@@ -1,0 +1,7 @@
+node_modules/
+main.js
+*.js.map
+.DS_Store
+
+# Local copy of the sibling web app, used only as porting reference
+reference/

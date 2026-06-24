@@ -1,0 +1,86 @@
+# Momentum — Obsidian plugin
+
+All-in-one life dashboard for Obsidian: **Habits, Tasks, Fitness, Nutrition and
+Studies** rendered directly from your vault's markdown files. Everything is
+stored as plain markdown under a single folder, so your data stays yours.
+
+## Why Momentum
+- No GitHub token, no CORS, no fetch — reads/writes files locally via the Vault API.
+- Frontmatter parsing handled by Obsidian's metadata cache.
+- Cross-device sync handled by Obsidian Sync / iCloud / git.
+- Renders with Obsidian's DOM API and theme variables (no remote code, no CDN).
+
+## Modules
+| Module | What it does |
+| --- | --- |
+| 🎯 Habit Tracker | Overview dashboard: KPIs, progress rings, donut charts, habit heatmaps, study progress |
+| ✅ Tasks & Notes | Kanban (drag & drop, boards, priorities, columns) + list view |
+| 🏋️ Fitness | Workout plans, active workout w/ timer, calendar, weight progress, logging |
+| 🥗 Nutrition | Fixed meal plans, food logging, calorie calendar & trends, water |
+| 📚 Studies | Kanban by topic (drag & drop, subtopics, URLs) + list view |
+| Nutrition | ✅ Macro targets, meal plans, daily logging, weekly calories |
+
+All visualizations use inline SVG (no external libraries / CDN).
+
+## Install (dev)
+1. `npm install`
+2. `npm run dev` (watch) or `npm run build` (production, one-off).
+3. Copy/symlink this folder into your vault at
+   `.obsidian/plugins/momentum/` (must contain `manifest.json`,
+   `main.js`, `styles.css`).
+4. In Obsidian: Settings → Community plugins → enable "Momentum".
+5. Open via the command palette → "Open Personal Assistant" (panel in the left sidebar).
+
+## Data location
+Set the **Data root folder** in plugin settings (default: `Personal Assistant`).
+Expected subfolders: `Tasks/`, `Notes/`, `Fitness/Exercises`, `Fitness/Workouts`,
+`Nutrition/Plan`, `Nutrition/Logs`, `Studies/`, `Habits/`, `Config/settings.md`.
+
+## Markdown schema
+The plugin is file-compatible with the web app. Examples:
+
+```yaml
+# Tasks/<title>.md
+task_id: "uuid"
+title: "Close the deal"
+status: "in progress"      # one of the task columns
+priority: "high"
+kanban_name: "Side Projects"
+group: "KCD 26"
+type: "task"
+```
+
+```yaml
+# Tasks/boards.md
+type: boards-config
+boards:
+  - id: aws
+    name: AWS
+    emoji: ☁️
+```
+
+```yaml
+# Notes/<title>.md
+title: "Idea"
+color: yellow
+type: note
+```
+
+## Project structure
+- `src/main.ts` — plugin entry (view registration, command, settings).
+- `src/view.ts` — dashboard `ItemView` (sidebar + page router).
+- `src/context.ts` — shared context (store + config + refresh).
+- `src/data.ts` — Vault data layer (read/write/list + per-module loaders).
+- `src/types.ts` — domain model + defaults.
+- `src/ui.ts` — reusable Modal/Notice helpers.
+- `src/modules/*.ts` — one renderer per page.
+- `styles.css` — UI styles mapped to Obsidian theme variables.
+
+## Publishing to the community store
+1. Push to a public GitHub repo.
+2. Tag a release matching `manifest.json` `version` (no `v` prefix), e.g.
+   `git tag 0.1.0 && git push origin 0.1.0`. The GitHub Action attaches
+   `main.js`, `manifest.json` and `styles.css` to the release.
+3. Submit a PR adding this plugin to
+   [`obsidianmd/obsidian-releases`](https://github.com/obsidianmd/obsidian-releases)
+   (`community-plugins.json`).

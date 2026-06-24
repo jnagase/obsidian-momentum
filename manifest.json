@@ -1,0 +1,10 @@
+{
+  "id": "momentum",
+  "name": "Momentum",
+  "version": "0.1.0",
+  "minAppVersion": "1.4.0",
+  "description": "All-in-one life dashboard: habits, tasks, fitness, nutrition and studies — all stored as plain markdown in your vault.",
+  "author": "Jaime Nagase",
+  "authorUrl": "https://github.com/JaimeNagase",
+  "isDesktopOnly": false
+}

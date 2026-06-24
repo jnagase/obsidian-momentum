@@ -1,0 +1,299 @@
+/* ===== Layout ===== */
+.pa-root{display:flex;height:100%;font-size:14px}
+.pa-sidebar{width:190px;border-right:1px solid var(--background-modifier-border);padding:8px;flex-shrink:0;overflow-y:auto}
+.pa-logo{font-size:1rem;font-weight:700;color:var(--text-accent);padding:6px 10px;margin-bottom:8px}
+.pa-nav{display:block;width:100%;text-align:left;background:none;border:none;color:var(--text-muted);padding:8px 10px;border-radius:6px;cursor:pointer;font-size:13px;margin-bottom:2px}
+.pa-nav:hover{background:var(--background-modifier-hover);color:var(--text-normal)}
+.pa-nav.active{background:var(--background-modifier-hover);color:var(--text-accent);font-weight:600}
+.pa-main{flex:1;overflow-y:auto;padding:16px}
+.pa-h1{font-size:1.3rem;font-weight:700;margin-bottom:12px}
+.pa-muted{color:var(--text-muted);font-size:.85rem}
+
+/* ===== Buttons ===== */
+.pa-btn{background:var(--interactive-accent);color:var(--text-on-accent);border:none;border-radius:6px;padding:5px 12px;cursor:pointer;font-size:.8rem}
+.pa-btn:hover{background:var(--interactive-accent-hover)}
+.pa-icon-btn{background:none;border:none;cursor:pointer;opacity:.6;font-size:.78rem;padding:2px 4px;border-radius:4px}
+.pa-icon-btn:hover{opacity:1;background:var(--background-modifier-hover)}
+
+/* ===== Board tabs ===== */
+.pa-tabs{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px}
+.pa-tab{background:var(--background-secondary);border:1px solid var(--background-modifier-border);color:var(--text-muted);padding:5px 12px;border-radius:16px;cursor:pointer;font-size:.8rem}
+.pa-tab:hover{color:var(--text-normal)}
+.pa-tab.on{background:var(--interactive-accent);color:var(--text-on-accent);border-color:transparent;font-weight:600}
+.pa-tab-add{border-style:dashed}
+
+/* ===== Kanban ===== */
+.pa-kanban{display:flex;gap:12px;align-items:flex-start;overflow-x:auto;padding-bottom:8px}
+.pa-col{background:var(--background-secondary);border:1px solid var(--background-modifier-border);border-radius:10px;padding:10px;min-width:230px;width:230px;flex-shrink:0}
+.pa-col-head{display:flex;justify-content:space-between;align-items:center;font-weight:600;font-size:.82rem;margin-bottom:8px}
+.pa-col-count{background:var(--background-modifier-border);border-radius:10px;padding:0 7px;font-size:.72rem;color:var(--text-muted)}
+.pa-col-body{min-height:40px;display:flex;flex-direction:column;gap:8px}
+.pa-col-body.pa-drop{outline:2px dashed var(--interactive-accent);border-radius:8px}
+
+/* ===== Cards ===== */
+.pa-card{background:var(--background-primary);border:1px solid var(--background-modifier-border);border-radius:8px;padding:10px;cursor:grab}
+.pa-card.pa-dragging{opacity:.5}
+.pa-task{border-left:3px solid var(--text-muted)}
+.pa-task.prio-high{border-left-color:#e5484d}
+.pa-task.prio-medium{border-left-color:#d97706}
+.pa-task.prio-low{border-left-color:#16a34a}
+.pa-card-title-row strong{font-size:.88rem}
+.pa-card-meta{margin-top:4px}
+.pa-badge{display:inline-block;background:var(--background-modifier-border);color:var(--text-muted);border-radius:4px;padding:1px 6px;font-size:.68rem;margin-top:5px}
+.pa-card-actions{display:flex;gap:2px;margin-top:6px;justify-content:flex-end}
+.pa-add-card{width:100%;margin-top:8px;background:none;border:1px dashed var(--background-modifier-border);border-radius:8px;color:var(--text-muted);padding:7px;cursor:pointer;font-size:.78rem}
+.pa-add-card:hover{color:var(--text-normal);border-color:var(--text-muted)}
+
+/* ===== Quick Notes ===== */
+.pa-notes-section{margin-top:24px}
+.pa-section-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.pa-section-head h3{margin:0;font-size:1rem}
+.pa-notes-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px}
+.pa-note{border-radius:8px;padding:10px;color:#222;position:relative;min-height:70px}
+.pa-note .pa-badge{background:rgba(0,0,0,.12);color:#333}
+.pa-note .pa-icon-btn{color:#333}
+.pa-note.color-yellow{background:#fff9c4}
+.pa-note.color-green{background:#c8e6c9}
+.pa-note.color-blue{background:#bbdefb}
+.pa-note.color-pink{background:#f8bbd0}
+.pa-note.color-purple{background:#e1bee7}
+.pa-note.color-orange{background:#ffe0b2}
+.pa-note.color-white{background:#fafafa}
+
+@media(max-width:600px){.pa-root{flex-direction:column}.pa-sidebar{width:100%;border-right:none;border-bottom:1px solid var(--background-modifier-border)}}
+
+/* ===== Habits ===== */
+.pa-habits-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px}
+.pa-habit-card{border:1px solid var(--background-modifier-border);border-radius:10px;padding:12px;background:var(--background-secondary)}
+.pa-habit-top{display:flex;justify-content:space-between;align-items:center;gap:6px;margin-bottom:10px}
+.pa-habit-name{font-size:.85rem;font-weight:600}
+.pa-habit-actions{display:flex;gap:6px;align-items:center}
+.pa-streak{font-size:.72rem;white-space:nowrap}
+.pa-mini-btn{font-size:.68rem;padding:3px 9px;border-radius:6px;border:1px solid var(--background-modifier-border);background:var(--background-primary);color:var(--text-muted);cursor:pointer}
+.pa-mini-btn:hover{color:var(--text-normal)}
+.pa-heatmap{display:grid;grid-template-columns:repeat(18,1fr);gap:3px;width:100%}
+.pa-hm-cell{aspect-ratio:1;border-radius:50%;background:var(--background-modifier-border)}
+
+/* ===== Charts ===== */
+.pa-ring{display:flex;flex-direction:column;align-items:center;gap:2px}
+.pa-ring-label{font-size:.58rem;color:var(--text-muted);max-width:74px;text-align:center}
+.pa-bars,.pa-spark{width:100%}
+
+/* ===== Panels & stats ===== */
+.pa-panel{background:var(--background-secondary);border:1px solid var(--background-modifier-border);border-radius:10px;padding:12px;margin-bottom:14px}
+.pa-panel-title{margin:0 0 10px;font-size:.95rem}
+.pa-stats-row{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}
+.pa-stat{background:var(--background-secondary);border:1px solid var(--background-modifier-border);border-radius:10px;padding:10px;text-align:center}
+.pa-stat-value{font-size:1.3rem;font-weight:700;color:var(--text-accent)}
+.pa-stat-label{font-size:.7rem;color:var(--text-muted);margin-top:2px}
+
+/* ===== Calendar ===== */
+.pa-cal-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+.pa-cal-title{font-weight:600;font-size:.85rem}
+.pa-cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:3px}
+.pa-cal-dow{text-align:center;font-size:.62rem;color:var(--text-muted);font-weight:600}
+.pa-cal-cell{aspect-ratio:1;display:flex;align-items:center;justify-content:center;font-size:.7rem;border-radius:6px;background:var(--background-primary);color:var(--text-muted)}
+.pa-cal-cell.empty{background:none}
+.pa-cal-cell.worked{background:var(--interactive-accent);color:var(--text-on-accent);font-weight:600}
+.pa-cal-cell.today{outline:2px solid var(--text-accent)}
+
+/* ===== Training plan ===== */
+.pa-splits-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px}
+.pa-split-card{border:1px solid var(--background-modifier-border);border-radius:10px;padding:10px;cursor:pointer;background:var(--background-primary)}
+.pa-split-card:hover{border-color:var(--text-muted)}
+.pa-split-card.on{border-color:var(--interactive-accent);background:var(--background-modifier-hover)}
+.pa-split-id{font-weight:700;color:var(--text-accent)}
+.pa-split-name{font-size:.82rem;margin:2px 0}
+
+/* ===== Active workout ===== */
+.pa-active{border-color:var(--interactive-accent)}
+.pa-active-top{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.pa-timer{font-variant-numeric:tabular-nums;font-weight:700;color:var(--text-accent)}
+.pa-fit-table{width:100%;border-collapse:collapse;margin:8px 0;font-size:.82rem}
+.pa-fit-table th{text-align:left;font-size:.7rem;color:var(--text-muted);padding:4px 6px;border-bottom:1px solid var(--background-modifier-border)}
+.pa-fit-table td{padding:5px 6px;border-bottom:1px solid var(--background-modifier-border)}
+.pa-fit-table tr.done{background:rgba(22,163,74,.08)}
+.pa-fit-name{font-weight:500}
+.pa-fit-input{width:64px;padding:4px 6px;border:1px solid var(--background-modifier-border);border-radius:6px;background:var(--background-primary);color:var(--text-normal)}
+.pa-active-actions{display:flex;gap:8px;align-items:center;margin-top:8px}
+
+/* ===== Nutrition ===== */
+.pa-macros-row{display:flex;flex-wrap:wrap;gap:18px;align-items:flex-start}
+.pa-macro{display:flex;flex-direction:column;align-items:center;gap:4px;min-width:90px}
+.pa-water-icon{font-size:1.8rem}
+.pa-macro-total{margin-top:6px;font-weight:600;font-size:.82rem;color:var(--text-accent)}
+
+/* ===== Dashboard ===== */
+.pa-kpis{grid-template-columns:repeat(auto-fit,minmax(110px,1fr))}
+.pa-rings-row{display:flex;flex-wrap:wrap;gap:24px;justify-content:flex-start}
+.pa-activity-row{display:flex;justify-content:space-between;gap:10px;padding:7px 0;border-bottom:1px solid var(--background-modifier-border);font-size:.85rem}
+.pa-activity-row:last-child{border-bottom:none}
+
+/* ===== Habit Tracker ===== */
+.pa-ht-header{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+.pa-ht-rings{display:flex;gap:12px}
+.pa-donuts-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px;margin-bottom:14px}
+.pa-donut-panel{margin-bottom:0}
+.pa-donut-wrap{display:flex;flex-direction:column;align-items:center;gap:8px}
+.pa-donut-legend{display:flex;flex-wrap:wrap;gap:8px;justify-content:center}
+.pa-legend-item{display:flex;align-items:center;gap:4px;font-size:.7rem;color:var(--text-muted)}
+.pa-legend-dot{width:9px;height:9px;border-radius:50%;display:inline-block}
+.pa-progress-label{display:flex;justify-content:space-between;font-size:.78rem;margin:10px 0 4px}
+.pa-progress-track{background:var(--background-modifier-border);border-radius:99px;height:6px;overflow:hidden}
+.pa-progress-fill{height:100%;border-radius:99px;transition:width .4s}
+
+/* ===== Tasks: view toggle & board bar ===== */
+.pa-view-toggle{display:flex;gap:6px;margin-bottom:12px}
+.pa-toggle-btn{background:var(--background-secondary);border:1px solid var(--background-modifier-border);color:var(--text-muted);padding:5px 14px;border-radius:8px;cursor:pointer;font-size:.8rem}
+.pa-toggle-btn.on{background:var(--interactive-accent);color:var(--text-on-accent);border-color:transparent;font-weight:600}
+.pa-board-bar{display:flex;justify-content:space-between;align-items:center;gap:8px;margin:6px 0 12px}
+.pa-board-title{font-weight:700;font-size:1rem}
+.pa-board-actions{display:flex;gap:6px}
+
+/* ===== Tasks: column tools ===== */
+.pa-col{border-top:3px solid var(--interactive-accent)}
+.pa-col-title{font-weight:700;font-size:.78rem;letter-spacing:.02em}
+.pa-col-tools{display:flex;align-items:center;gap:2px}
+.pa-col-count{color:#fff;border-radius:10px;padding:0 7px;font-size:.7rem;font-weight:600}
+
+/* ===== Tasks: cards ===== */
+.pa-card-top{display:flex;justify-content:space-between;align-items:flex-start;gap:6px}
+.pa-card-cat{font-size:.62rem;font-weight:700;letter-spacing:.04em;color:var(--text-accent);opacity:.85}
+.pa-card-x{opacity:.4}
+.pa-card-title{font-weight:600;font-size:.86rem;margin:3px 0}
+.pa-card.done{opacity:.6}
+.pa-card.done .pa-card-title{text-decoration:line-through}
+
+/* ===== Tasks: list view ===== */
+.pa-list-group-head{font-weight:700;font-size:.76rem;letter-spacing:.03em;margin:12px 0 6px;text-transform:uppercase}
+.pa-list-row{display:flex;align-items:center;gap:8px;padding:7px 6px;border-bottom:1px solid var(--background-modifier-border)}
+.pa-list-main{flex:1;display:flex;flex-direction:column;gap:2px;min-width:0}
+.pa-list-title{font-size:.86rem;font-weight:500}
+.pa-list-meta{font-size:.72rem}
+.pa-list-row.done .pa-list-title{text-decoration:line-through;opacity:.6}
+
+/* ===== Fitness / Nutrition shared ===== */
+.pa-two-col{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:760px){.pa-two-col{grid-template-columns:1fr}}
+.pa-select{background:var(--background-primary);border:1px solid var(--background-modifier-border);color:var(--text-normal);border-radius:6px;padding:4px 8px;font-size:.78rem}
+.pa-linechart{width:100%}
+
+/* Plan cards (workouts / meals) */
+.pa-plan-grid{display:flex;gap:10px;align-items:flex-start;overflow-x:auto}
+.pa-plan-card{flex:1 1 0;min-width:180px;background:var(--background-primary);border:1px solid var(--background-modifier-border);border-radius:10px;padding:10px;display:flex;flex-direction:column}
+.pa-plan-card.on{border-color:var(--interactive-accent);box-shadow:0 0 0 1px var(--interactive-accent)}
+.pa-plan-head{display:flex;justify-content:space-between;align-items:flex-start;gap:4px;margin-bottom:6px}
+.pa-plan-title{font-weight:600;font-size:.8rem;color:var(--text-accent)}
+.pa-plan-list{display:flex;flex-direction:column;gap:2px;margin-bottom:8px;flex:1}
+.pa-plan-ex{font-size:.74rem;color:var(--text-muted);border-bottom:1px solid var(--background-modifier-border);padding:2px 0}
+.pa-plan-select{align-self:flex-start}
+
+/* Calendar tags */
+.pa-cal-cell{flex-direction:column;gap:1px;cursor:default;position:relative}
+.pa-cal-day{font-size:.7rem}
+.pa-cal-tag{font-size:.55rem;font-weight:700;line-height:1}
+.pa-cal-cell.worked{background:var(--interactive-accent);color:var(--text-on-accent);cursor:pointer}
+.pa-cal-cell.selected{outline:2px solid var(--text-accent)}
+.pa-cal-legend{display:flex;gap:12px;justify-content:center;margin-top:8px}
+
+/* Add food bar */
+.pa-addfood-row{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.pa-addfood-name{flex:1;min-width:160px;background:var(--background-primary);border:1px solid var(--background-modifier-border);color:var(--text-normal);border-radius:6px;padding:6px 8px;font-size:.8rem}
+.pa-logged{margin-top:12px}
+
+.pa-clickable{cursor:pointer}
+.pa-plan-card.pa-clickable:hover{border-color:var(--text-muted)}
+
+.pa-editor-title{display:flex;align-items:center;gap:6px}
+.pa-editor-title .pa-panel-title{margin:0}
+
+/* ===== Tasks: List view (single list + collapsed completed) ===== */
+.pa-h2{font-size:1rem;font-weight:700;margin:6px 0 10px}
+.pa-list-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px;align-items:start}
+.pa-list-card{background:var(--background-secondary);border:1px solid var(--background-modifier-border);border-radius:12px;padding:14px}
+.pa-list-card-title{font-weight:700;font-size:.95rem;margin-bottom:4px}
+.pa-list-add{color:var(--text-accent);font-size:.82rem;cursor:pointer;padding:6px 0;border-bottom:1px solid var(--background-modifier-border);margin-bottom:4px}
+.pa-list-add:hover{opacity:.8}
+.pa-list-item{display:flex;gap:10px;align-items:flex-start;padding:8px 2px;border-bottom:1px solid var(--background-modifier-border)}
+.pa-list-circle{cursor:pointer;color:var(--text-muted);font-size:1rem;line-height:1.3;user-select:none}
+.pa-list-circle.on{color:#16a34a}
+.pa-list-item-main{flex:1;min-width:0}
+.pa-list-item-title{font-size:.88rem;cursor:pointer}
+.pa-list-item-title:hover{color:var(--text-accent)}
+.pa-list-item.done .pa-list-item-title{text-decoration:line-through;color:var(--text-muted)}
+.pa-list-item-sub{font-size:.72rem}
+.pa-completed{margin-top:8px}
+.pa-completed summary{cursor:pointer;color:var(--text-muted);font-size:.8rem;padding:4px 0;list-style:revert}
+
+.pa-fit-howto{font-size:.7rem;color:var(--text-muted);font-weight:400;margin-top:2px;max-width:340px;line-height:1.3}
+
+/* ===== Accent-driven theming (follows the user's Obsidian accent color) ===== */
+.pa-root{--pa-hover:color-mix(in srgb, var(--interactive-accent) 15%, transparent);
+         --pa-hover-strong:color-mix(in srgb, var(--interactive-accent) 26%, transparent);}
+
+/* page/sidebar keep the default gray/white scheme */
+
+/* tab/nav buttons: white background, consistent gray text */
+.pa-root .pa-nav,
+.pa-root .pa-tab,
+.pa-root .pa-toggle-btn{background:var(--background-primary);color:var(--text-muted)!important;transition:background .12s,color .12s,border-color .12s}
+.pa-root .pa-nav.active,
+.pa-root .pa-nav:hover,
+.pa-root .pa-tab:hover,
+.pa-root .pa-toggle-btn:hover,
+.pa-root .pa-tab.on,
+.pa-root .pa-toggle-btn.on{color:var(--interactive-accent)!important}
+.pa-root .pa-tab.on,
+.pa-root .pa-toggle-btn.on{color:var(--text-on-accent)!important}
+
+/* hover = user's accent tint, for everything clickable */
+.pa-nav:hover,
+.pa-tab:hover,
+.pa-toggle-btn:hover,
+.pa-mini-btn:hover,
+.pa-icon-btn:hover,
+.pa-add-card:hover,
+.pa-list-add:hover,
+.pa-card:hover,
+.pa-plan-card.pa-clickable:hover,
+.pa-split-card:hover,
+.pa-list-item:hover,
+.pa-stat:hover{
+  background:var(--pa-hover);
+  border-color:var(--interactive-accent);
+  color:var(--text-normal);
+}
+.pa-nav:hover,.pa-tab:hover,.pa-toggle-btn:hover,.pa-list-add:hover{color:var(--interactive-accent)}
+
+/* filled primary buttons keep the solid accent */
+.pa-btn{background:var(--interactive-accent);color:var(--text-on-accent)}
+.pa-btn:hover{background:var(--interactive-accent-hover);filter:none}
+
+/* active/selected states use the accent tint */
+.pa-nav.active,.pa-tab.on,.pa-toggle-btn.on{color:var(--text-on-accent)}
+.pa-tab.on,.pa-toggle-btn.on{background:var(--interactive-accent)}
+.pa-nav.active{background:var(--pa-hover-strong);color:var(--interactive-accent)}
+.pa-plan-card.on,.pa-list-card:focus-within{border-color:var(--interactive-accent);box-shadow:0 0 0 1px var(--interactive-accent)}
+
+/* worked calendar day on hover */
+.pa-cal-cell.worked:hover{filter:brightness(1.08)}
+
+/* ===== Kanban: up to 5 equal-width columns, no horizontal scroll ===== */
+.pa-kanban{overflow-x:visible;flex-wrap:nowrap}
+.pa-col{flex:1 1 0;width:auto;min-width:0}
+.pa-col-body .pa-card{width:100%;box-sizing:border-box}
+.pa-kanban-more{margin-top:8px}
+.pa-kanban-more summary{cursor:pointer;color:var(--text-muted);font-size:.78rem;padding:4px 0;text-align:center}
+.pa-kanban-more .pa-card{margin-top:8px}
+
+/* ===== Collapsible nav panel (toggled from the view header action) ===== */
+.pa-root.pa-nav-collapsed .pa-sidebar{display:none}
+
+/* ===== Navigator layout (nav in left sidebar, content in main) ===== */
+.pa-nav-root{display:block;height:auto;padding:8px}
+.pa-nav-root .pa-logo{margin-bottom:10px}
+.pa-content-root{display:block;height:100%}
+.pa-content-root .pa-page{padding:14px 16px}
+
+/* habit consistency cards: white background */
+.pa-habit-card{background:var(--background-primary)}

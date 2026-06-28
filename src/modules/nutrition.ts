@@ -3,6 +3,7 @@ import { Meal, MealItem, MealLog } from "../types";
 import { toast } from "../ui";
 import { todayLocal, ymd } from "../util";
 import { drawRing, drawLineChart } from "../charts";
+import { searchFoods, FoodResult } from "../foodapi";
 
 /** Fixed meal slots — names are not editable, only their plans. */
 const SLOTS = [
@@ -19,13 +20,14 @@ export class NutritionModule {
   private selectedDate: string | null = null;
   private calMonth: number;
   private calYear: number;
-  private addForm = { name: "", qty: "100", cal: "", meal: "lunch" };
+  private addForm = { name: "", qty: "100", cal: "", meal: "lunch", kcal100: 0, protein100: 0, carbs100: 0 };
 
   constructor(ctx: PAContext) {
     const now = new Date();
     this.ctx = ctx;
     this.calMonth = now.getMonth();
     this.calYear = now.getFullYear();
+    this.selectedDate = todayLocal(); // show today's log by default
   }
 
   /** The 4 fixed slots, hydrated with any saved plan file. */
@@ -47,14 +49,15 @@ export class NutritionModule {
     logs.forEach((l) => calByDay.set(l.date, (calByDay.get(l.date) || 0) + l.totalCal));
 
     this.renderHeader(root, calByDay, today);
-    this.renderMealPlans(root, meals);
-    this.renderAddFood(root, meals);
-    if (this.selectedMeal) this.renderMealEditor(root, meals);
     this.renderStats(root, calByDay, water, today);
 
     const cols = root.createDiv({ cls: "pa-two-col" });
     this.renderCalendar(cols, calByDay);
     this.renderTrend(cols, calByDay, today);
+
+    this.renderMealPlans(root, meals);
+    this.renderAddFood(root, meals);
+    if (this.selectedMeal) this.renderMealEditor(root, meals);
 
     if (this.selectedDate) this.renderDayDetail(root, meals, logs);
   }
@@ -93,24 +96,64 @@ export class NutritionModule {
     const row = panel.createDiv({ cls: "pa-addfood-row" });
     const nameInput = row.createEl("input", { cls: "pa-addfood-name", placeholder: "Food name…" });
     nameInput.value = this.addForm.name;
-    nameInput.oninput = () => (this.addForm.name = nameInput.value);
+    nameInput.oninput = () => { this.addForm.name = nameInput.value; this.clearFoodBasis(); };
 
     const qty = row.createEl("input", { cls: "pa-fit-input" });
     qty.type = "number"; qty.value = this.addForm.qty; qty.title = "Qty (g)";
-    qty.oninput = () => (this.addForm.qty = qty.value);
 
     const cal = row.createEl("input", { cls: "pa-fit-input" });
     cal.type = "number"; cal.placeholder = "Cal"; cal.value = this.addForm.cal;
     cal.oninput = () => (this.addForm.cal = cal.value);
 
+    // Recompute calories from the per-100g basis when a product was picked.
+    qty.oninput = () => {
+      this.addForm.qty = qty.value;
+      if (this.addForm.kcal100 > 0) {
+        const q = parseFloat(qty.value) || 0;
+        this.addForm.cal = String(Math.round((this.addForm.kcal100 * q) / 100));
+        cal.value = this.addForm.cal;
+      }
+    };
+
     const mealSel = row.createEl("select", { cls: "pa-select" });
     SLOTS.forEach((s) => { const o = mealSel.createEl("option", { text: s.name, value: s.id }); if (s.id === this.addForm.meal) o.selected = true; });
     mealSel.onchange = () => (this.addForm.meal = mealSel.value);
 
+    // Open Food Facts search button + results panel.
+    const searchBtn = row.createEl("button", { text: "🔎 Search", cls: "pa-mini-btn" });
+    const results = panel.createDiv({ cls: "pa-food-results" });
+    results.hide();
+
+    const doSearch = async () => {
+      const q = this.addForm.name.trim();
+      if (!q) { toast("Type a food name to search."); return; }
+      results.empty(); results.show();
+      results.createDiv({ cls: "pa-muted", text: `Searching “${q}” on Open Food Facts…` });
+      searchBtn.disabled = true;
+      try {
+        const found = await searchFoods(q, 20);
+        results.empty();
+        if (!found.length) { results.createDiv({ cls: "pa-muted", text: "No results found." }); return; }
+        found.forEach((f) => this.renderFoodResult(results, f, nameInput, qty, cal));
+      } catch (e) {
+        results.empty();
+        results.createDiv({ cls: "pa-muted", text: "Search failed (check your connection). You can still enter the food manually." });
+        console.error("Open Food Facts search error", e);
+      } finally {
+        searchBtn.disabled = false;
+      }
+    };
+    searchBtn.onclick = doSearch;
+    nameInput.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); doSearch(); } };
+
     const buildItem = (): MealItem | null => {
       const name = this.addForm.name.trim();
       if (!name) { toast("Enter a food name."); return null; }
-      return { name, qty: parseFloat(this.addForm.qty) || 0, unit: "g", cal: parseInt(this.addForm.cal) || 0 };
+      const q = parseFloat(this.addForm.qty) || 0;
+      const item: MealItem = { name, qty: q, unit: "g", cal: parseInt(this.addForm.cal) || 0 };
+      if (this.addForm.protein100 > 0) item.protein = Math.round((this.addForm.protein100 * q) / 100 * 10) / 10;
+      if (this.addForm.carbs100 > 0) item.carbs = Math.round((this.addForm.carbs100 * q) / 100 * 10) / 10;
+      return item;
     };
     const targetMeal = () => meals.find((m) => m.id === this.addForm.meal)!;
 
@@ -119,7 +162,7 @@ export class NutritionModule {
       const item = buildItem();
       if (!item) return;
       await this.ctx.store.logMeal(targetMeal(), [item]);
-      this.addForm.name = ""; this.addForm.cal = "";
+      this.resetAddForm();
       this.selectedDate = todayLocal();
       this.ctx.refresh();
       toast(`Logged ${item.name} to ${targetMeal().name}`);
@@ -130,10 +173,48 @@ export class NutritionModule {
       if (!item) return;
       const meal = targetMeal();
       await this.ctx.store.saveMeal({ id: meal.id, name: meal.name, emoji: meal.emoji, items: [...meal.items, item] });
-      this.addForm.name = ""; this.addForm.cal = "";
+      this.resetAddForm();
       this.ctx.refresh();
       toast(`Added ${item.name} to ${meal.name} plan`);
     };
+  }
+
+  /** Render a single Open Food Facts result row; clicking fills the form. */
+  private renderFoodResult(parent: HTMLElement, f: FoodResult, nameInput: HTMLInputElement, qty: HTMLInputElement, cal: HTMLInputElement): void {
+    const item = parent.createDiv({ cls: "pa-food-result pa-clickable" });
+    const main = item.createDiv({ cls: "pa-food-result-main" });
+    main.createSpan({ cls: "pa-food-result-name", text: f.brand ? `${f.name} · ${f.brand}` : f.name });
+    const macros = [`${f.kcal100} kcal/100g`];
+    if (f.protein100) macros.push(`P ${f.protein100}g`);
+    if (f.carbs100) macros.push(`C ${f.carbs100}g`);
+    if (f.fat100) macros.push(`G ${f.fat100}g`);
+    item.createDiv({ cls: "pa-food-result-macros pa-muted", text: macros.join(" · ") });
+    item.onclick = () => {
+      this.addForm.name = f.name;
+      this.addForm.kcal100 = f.kcal100;
+      this.addForm.protein100 = f.protein100 || 0;
+      this.addForm.carbs100 = f.carbs100 || 0;
+      const q = parseFloat(this.addForm.qty) || 100;
+      this.addForm.cal = String(Math.round((f.kcal100 * q) / 100));
+      nameInput.value = f.name;
+      cal.value = this.addForm.cal;
+      qty.value = this.addForm.qty;
+      parent.empty(); parent.hide();
+      toast(`Selected ${f.name} — ${this.addForm.cal} cal for ${q}g`);
+    };
+  }
+
+  /** Drop any picked per-100g basis (user is typing a custom name). */
+  private clearFoodBasis(): void {
+    this.addForm.kcal100 = 0;
+    this.addForm.protein100 = 0;
+    this.addForm.carbs100 = 0;
+  }
+
+  private resetAddForm(): void {
+    this.addForm.name = "";
+    this.addForm.cal = "";
+    this.clearFoodBasis();
   }
 
   // ---- Meal plan cards (fixed 4, whole card clickable) ----
@@ -147,7 +228,7 @@ export class NutritionModule {
     const grid = panel.createDiv({ cls: "pa-plan-grid" });
     meals.forEach((m) => {
       const card = grid.createDiv({ cls: "pa-plan-card pa-clickable" + (this.selectedMeal === m.id ? " on" : "") });
-      card.onclick = () => { this.selectedMeal = this.selectedMeal === m.id ? null : m.id; this.selectedDate = null; this.ctx.refresh(); };
+      card.onclick = () => { this.selectedMeal = this.selectedMeal === m.id ? null : m.id; this.ctx.refresh(); };
       card.createDiv({ text: `${m.emoji || ""} ${m.name} (${m.totalCal} cal)`.trim(), cls: "pa-plan-title" });
       const listEl = card.createDiv({ cls: "pa-plan-list" });
       if (!m.items.length) listEl.createDiv({ cls: "pa-muted", text: "No items" });
@@ -266,15 +347,16 @@ export class NutritionModule {
     prev.onclick = () => { this.calMonth--; if (this.calMonth < 0) { this.calMonth = 11; this.calYear--; } this.ctx.refresh(); };
     next.onclick = () => { this.calMonth++; if (this.calMonth > 11) { this.calMonth = 0; this.calYear++; } this.ctx.refresh(); };
 
-    const grid = card.createDiv({ cls: "pa-cal-grid" });
-    ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].forEach((d) => grid.createDiv({ text: d, cls: "pa-cal-dow" }));
+    const dow = card.createDiv({ cls: "pa-cal-dow-row" });
+    ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].forEach((d) => dow.createDiv({ text: d, cls: "pa-cal-dow" }));
+    const days = card.createDiv({ cls: "pa-cal-grid pa-cal-days" });
     const firstDow = new Date(this.calYear, this.calMonth, 1).getDay();
     const daysInMonth = new Date(this.calYear, this.calMonth + 1, 0).getDate();
-    for (let i = 0; i < firstDow; i++) grid.createDiv({ cls: "pa-cal-cell empty" });
+    for (let i = 0; i < firstDow; i++) days.createDiv({ cls: "pa-cal-cell empty" });
     const today = todayLocal();
     for (let day = 1; day <= daysInMonth; day++) {
       const ds = `${this.calYear}-${String(this.calMonth + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
-      const cell = grid.createDiv({ cls: "pa-cal-cell" });
+      const cell = days.createDiv({ cls: "pa-cal-cell" });
       cell.createDiv({ text: String(day), cls: "pa-cal-day" });
       const cal = calByDay.get(ds);
       if (cal != null) {
@@ -283,7 +365,7 @@ export class NutritionModule {
         cell.style.background = color;
         cell.style.color = "#fff";
         cell.createDiv({ text: String(cal), cls: "pa-cal-tag" });
-        cell.onclick = () => { this.selectedDate = ds; this.selectedMeal = null; this.ctx.refresh(); };
+        cell.onclick = () => { this.selectedDate = ds; this.ctx.refresh(); };
       }
       if (ds === today) cell.addClass("today");
     }

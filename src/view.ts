@@ -11,7 +11,7 @@ export const VIEW_TYPE_PA = "personal-assistant-view";
 
 export const PAGES = [
   { id: "habit-tracker", label: "🎯 Habit Tracker" },
-  { id: "tasks", label: "✅ Tasks & Notes" },
+  { id: "tasks", label: "✅ Tasks & Lists" },
   { id: "fitness", label: "🏋️ Fitness" },
   { id: "nutrition", label: "🥗 Nutrition" },
   { id: "studies", label: "📚 Studies" },

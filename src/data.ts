@@ -192,9 +192,23 @@ export class PADataStore {
           isAllDay: !!m.is_all_day,
           created: str(m.created),
           modified: str(m.modified),
+          order: (m.order !== undefined && m.order !== null) ? Number(m.order) : undefined,
           path: f.path,
         } as Task;
       });
+  }
+
+  /** Read the body (after frontmatter) of any vault file, for previews. */
+  async readBody(path: string): Promise<string> {
+    const f = this.app.vault.getAbstractFileByPath(path);
+    if (!(f instanceof TFile)) return "";
+    const raw = await this.app.vault.cachedRead(f);
+    let body = raw;
+    if (raw.startsWith("---")) {
+      const end = raw.indexOf("\n---", 3);
+      if (end !== -1) body = raw.slice(end + 4);
+    }
+    return body.replace(/^#.*$/m, "").trim();
   }
 
   async createTask(t: Partial<Task>): Promise<void> {
@@ -233,6 +247,7 @@ export class PADataStore {
       if (changes.kanbanName !== undefined) fm.kanban_name = changes.kanbanName;
       if (changes.group !== undefined) fm.group = changes.group;
       if (changes.due !== undefined) fm.due = changes.due;
+      if (changes.order !== undefined) fm.order = changes.order;
       fm.modified = new Date().toISOString();
     });
   }
@@ -446,6 +461,17 @@ export class PADataStore {
     await this.writeFile(`Fitness/Workouts/${date}-${splitId}-${time}.md`, this.buildDoc(meta, body));
   }
 
+  async updateWorkoutExercises(workout: Workout, exercises: WorkoutExercise[]): Promise<void> {
+    const f = this.app.vault.getAbstractFileByPath(workout.path);
+    if (!(f instanceof TFile)) return;
+    await this.patchFrontmatter(f, (fm) => { fm.exercises = exercises; fm.modified = new Date().toISOString(); });
+  }
+
+  async deleteWorkout(workout: Workout): Promise<void> {
+    const f = this.app.vault.getAbstractFileByPath(workout.path);
+    if (f instanceof TFile) await this.removeFile(f);
+  }
+
   // ============================================================
   // STUDIES
   // ============================================================
@@ -463,6 +489,7 @@ export class PADataStore {
           url: str(m.url),
           date: str(m.date),
           modified: str(m.modified),
+          order: (m.order !== undefined && m.order !== null) ? Number(m.order) : undefined,
           path: f.path,
         } as StudyCard;
       });
@@ -488,7 +515,20 @@ export class PADataStore {
       modified: new Date().toISOString(),
       type: "study",
     };
+    if (c.order !== undefined) meta.order = c.order;
+    else if (existing?.order !== undefined) meta.order = existing.order;
     return this.buildDoc(meta, `# ${c.title}\n`);
+  }
+
+  /** Patch status and/or order of a study card in place. */
+  async patchStudyCardMeta(card: StudyCard, changes: { status?: string; order?: number }): Promise<void> {
+    const f = this.app.vault.getAbstractFileByPath(card.path);
+    if (!(f instanceof TFile)) return;
+    await this.patchFrontmatter(f, (fm) => {
+      if (changes.status !== undefined) fm.status = changes.status;
+      if (changes.order !== undefined) fm.order = changes.order;
+      fm.modified = new Date().toISOString();
+    });
   }
 
   async createStudyCard(c: Partial<StudyCard> & { title: string; topic: string }): Promise<void> {

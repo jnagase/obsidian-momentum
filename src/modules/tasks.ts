@@ -1,6 +1,6 @@
 import { PAContext } from "../context";
 import { Board, Task } from "../types";
-import { ConfirmModal, FieldSpec, FormModal, toast } from "../ui";
+import { ConfirmModal, FieldSpec, FormModal, showActionMenu, toast } from "../ui";
 import { drawRing } from "../charts";
 
 const PRIORITIES = [
@@ -27,6 +27,12 @@ export class TasksModule {
     return COLUMN_COLORS[index % COLUMN_COLORS.length];
   }
 
+  /** The fixed "done" column id (the completion column). */
+  private doneCol(): string {
+    const cols = this.ctx.config.taskColumns;
+    return cols.includes("done") ? "done" : cols[cols.length - 1];
+  }
+
   render(root: HTMLElement): void {
     root.empty();
     const boards = this.ctx.store.loadBoards();
@@ -50,7 +56,7 @@ export class TasksModule {
   private renderHeader(root: HTMLElement, filtered: Task[]): void {
     const head = root.createDiv({ cls: "pa-ht-header" });
     const left = head.createDiv();
-    left.createDiv({ text: "✅ Tasks & Notes", cls: "pa-h1" });
+    left.createDiv({ text: "✅ Tasks & Lists", cls: "pa-h1" });
     left.createDiv({ text: "Kanban and list", cls: "pa-muted" });
 
     const cols = this.ctx.config.taskColumns;
@@ -107,15 +113,14 @@ export class TasksModule {
       c.createDiv({ text: label, cls: "pa-stat-label" });
     };
     stat("📋 TOTAL", String(total));
-    // Only the standard trio (first 3 columns): two counts + last as % done.
-    const trio = cols.slice(0, 3);
-    trio.forEach((col, i) => {
+    const doneId = this.doneCol();
+    // Non-done columns as counts, then the fixed done column as % completed.
+    cols.filter((c) => c !== doneId).slice(0, 2).forEach((col, i) => {
       const cnt = filtered.filter((t) => eff(t) === col).length;
-      const label = (names[col] || col).toUpperCase();
-      const isPct = i === trio.length - 1;
-      if (isPct) stat(label, (total ? Math.round((cnt / total) * 100) : 0) + "%", this.colColor(i));
-      else stat(label, String(cnt), this.colColor(i));
+      stat((names[col] || col).toUpperCase(), String(cnt), this.colColor(cols.indexOf(col)));
     });
+    const doneCnt = filtered.filter((t) => eff(t) === doneId).length;
+    stat((names[doneId] || doneId).toUpperCase(), (total ? Math.round((doneCnt / total) * 100) : 0) + "%", "#16a34a");
   }
 
   // ---- Board bar (name + delete board + add column) ----
@@ -125,25 +130,26 @@ export class TasksModule {
     bar.createDiv({ text: board ? `${board.emoji || ""} ${board.name}`.trim() : "📋 All boards", cls: "pa-board-title" });
 
     const actions = bar.createDiv({ cls: "pa-board-actions" });
-    if (board) {
-      const renameBtn = actions.createEl("button", { text: "✏️ Rename", cls: "pa-mini-btn" });
-      renameBtn.onclick = () => this.openRenameBoardModal(board, boards);
-      const delBtn = actions.createEl("button", { text: "🗑 Delete board", cls: "pa-mini-btn" });
-      delBtn.onclick = () =>
-        new ConfirmModal(this.ctx.app, `Delete board "${board.name}"? (tasks are kept, just untagged from this board view)`, async () => {
-          await this.ctx.store.saveBoards(boards.filter((b) => b.name !== board.name));
-          this.currentBoard = "all";
-          this.ctx.refresh();
-        }).open();
-    }
     const addCol = actions.createEl("button", { text: "+ Column", cls: "pa-mini-btn" });
     addCol.onclick = () => this.openAddColumnModal();
+    if (board) {
+      const kebab = actions.createEl("button", { text: "⋮", cls: "pa-icon-btn" });
+      kebab.onclick = (e) => showActionMenu(e, [
+        { title: "Rename board", icon: "pencil", onClick: () => this.openRenameBoardModal(board, boards) },
+        { title: "Delete board", icon: "trash", warning: true, onClick: () =>
+          new ConfirmModal(this.ctx.app, `Delete board "${board.name}"? (tasks are kept, just untagged from this board view)`, async () => {
+            await this.ctx.store.saveBoards(boards.filter((b) => b.name !== board.name));
+            this.currentBoard = "all";
+            this.ctx.refresh();
+          }).open() },
+      ]);
+    }
   }
 
   private openRenameBoardModal(board: Board, boards: Board[]): void {
     const fields: FieldSpec[] = [
       { key: "name", label: "Board name", type: "text", value: board.name },
-      { key: "emoji", label: "Emoji", type: "text", value: board.emoji || "" },
+      { key: "emoji", label: "Emoji", type: "emoji", value: board.emoji || "" },
     ];
     new FormModal(this.ctx.app, "Rename board", fields, async (v) => {
       const name = (v.name || "").trim();
@@ -168,11 +174,12 @@ export class TasksModule {
     const names = this.ctx.config.taskColumnNames;
     const colSet = new Set(cols);
     const eff = (t: Task) => (colSet.has(t.status) ? t.status : cols[0]);
+    const doneId = this.doneCol();
 
     const board = root.createDiv({ cls: "pa-kanban" });
     cols.forEach((col, i) => {
       const color = this.colColor(i);
-      const isLast = i === cols.length - 1;
+      const isDone = col === doneId;
       const colEl = board.createDiv({ cls: "pa-col" });
       colEl.style.borderColor = color;
       const colTasks = filtered.filter((t) => eff(t) === col);
@@ -191,29 +198,51 @@ export class TasksModule {
         const mvR = tools.createEl("button", { text: "▶", cls: "pa-icon-btn" });
         mvR.onclick = () => this.moveColumn(col, 1);
       }
-      const editC = tools.createEl("button", { text: "✏️", cls: "pa-icon-btn" });
-      editC.onclick = () => this.openRenameColumnModal(col);
-      const delC = tools.createEl("button", { text: "✕", cls: "pa-icon-btn" });
-      delC.onclick = () => this.removeColumn(col, filtered);
+      if (!isDone) {
+        const menuBtn = tools.createEl("button", { text: "⋮", cls: "pa-icon-btn" });
+        menuBtn.onclick = (e) => showActionMenu(e, [
+          { title: "Rename column", icon: "pencil", onClick: () => this.openRenameColumnModal(col) },
+          { title: "Delete column", icon: "trash", warning: true, onClick: () => this.removeColumn(col, filtered) },
+        ]);
+      }
 
       const list = colEl.createDiv({ cls: "pa-col-body" });
-      list.addEventListener("dragover", (e) => { e.preventDefault(); list.addClass("pa-drop"); });
-      list.addEventListener("dragleave", () => list.removeClass("pa-drop"));
-      list.addEventListener("drop", async (e) => {
+      const persistDrop = async (e: DragEvent) => {
         e.preventDefault();
         list.removeClass("pa-drop");
         const path = e.dataTransfer?.getData("text/plain");
-        const task = filtered.find((t) => t.path === path);
-        if (task && task.status !== col) { await this.ctx.store.updateTask(task, { status: col }); this.ctx.refresh(); }
-      });
+        if (!path) return;
+        const dragged = filtered.find((t) => t.path === path);
+        if (!dragged) return;
+        const ordered = colTasks.filter((t) => t.path !== path);
+        const afterEl = this.getDragAfterElement(list, e.clientY);
+        const afterPath = afterEl?.dataset.path ?? null;
+        let idx = afterPath ? ordered.findIndex((t) => t.path === afterPath) : ordered.length;
+        if (idx < 0) idx = ordered.length;
+        ordered.splice(idx, 0, dragged);
+        for (let k = 0; k < ordered.length; k++) {
+          const t = ordered[k];
+          const changes: Partial<Task> = {};
+          if (t.path === path && eff(t) !== col) changes.status = col;
+          if (t.order !== k) changes.order = k;
+          if (Object.keys(changes).length) await this.ctx.store.updateTask(t, changes);
+        }
+        this.ctx.refresh();
+      };
+      list.addEventListener("dragover", (e) => { e.preventDefault(); list.addClass("pa-drop"); });
+      list.addEventListener("dragleave", () => list.removeClass("pa-drop"));
+      list.addEventListener("drop", persistDrop);
 
-      colTasks.slice(0, isLast && colTasks.length > 7 ? 7 : colTasks.length)
-        .forEach((t) => this.renderCard(list, t, cols, eff(t), isLast));
+      const ord = (t: Task) => (t.order ?? 1e9);
+      colTasks.sort((a, b) => ord(a) - ord(b) || (a.created || "").localeCompare(b.created || ""));
 
-      if (isLast && colTasks.length > 7) {
+      colTasks.slice(0, isDone && colTasks.length > 7 ? 7 : colTasks.length)
+        .forEach((t) => this.renderCard(list, t, isDone));
+
+      if (isDone && colTasks.length > 7) {
         const det = list.createEl("details", { cls: "pa-completed pa-kanban-more" });
         det.createEl("summary", { text: `Show ${colTasks.length - 7} more` });
-        colTasks.slice(7).forEach((t) => this.renderCard(det, t, cols, eff(t), isLast));
+        colTasks.slice(7).forEach((t) => this.renderCard(det, t, isDone));
       }
 
       const addBtn = colEl.createEl("button", { text: "+ Add card", cls: "pa-add-card" });
@@ -221,47 +250,60 @@ export class TasksModule {
     });
   }
 
-  private renderCard(list: HTMLElement, t: Task, cols: string[], current: string, isDoneCol: boolean): void {
+  private getDragAfterElement(container: HTMLElement, y: number): HTMLElement | null {
+    const els = Array.from(container.querySelectorAll(".pa-task:not(.pa-dragging)")) as HTMLElement[];
+    let closest: HTMLElement | null = null;
+    let closestOffset = -Infinity;
+    for (const el of els) {
+      const box = el.getBoundingClientRect();
+      const offset = y - box.top - box.height / 2;
+      if (offset < 0 && offset > closestOffset) { closestOffset = offset; closest = el; }
+    }
+    return closest;
+  }
+
+  private renderCard(list: HTMLElement, t: Task, isDoneCol: boolean): void {
     const card = list.createDiv({ cls: "pa-card pa-task prio-" + (t.priority || "medium") + (isDoneCol ? " done" : "") });
+    card.dataset.path = t.path;
     card.setAttr("draggable", "true");
     card.addEventListener("dragstart", (e) => { e.dataTransfer?.setData("text/plain", t.path); card.addClass("pa-dragging"); });
     card.addEventListener("dragend", () => card.removeClass("pa-dragging"));
+    card.onclick = () => this.ctx.app.workspace.openLinkText(t.path, "", true);
 
-    const badgeText = (t.group || t.cat || t.kanbanName || "").toUpperCase();
     const topRow = card.createDiv({ cls: "pa-card-top" });
-    if (badgeText) topRow.createDiv({ text: badgeText, cls: "pa-card-cat" });
-    const del = topRow.createEl("button", { text: "✕", cls: "pa-icon-btn pa-card-x" });
-    del.onclick = () =>
-      new ConfirmModal(this.ctx.app, `Delete task "${t.title}"?`, async () => { await this.ctx.store.deleteTask(t); this.ctx.refresh(); }).open();
+    const badgeText = (t.group || t.cat || t.kanbanName || "").toUpperCase();
+    topRow.createDiv({ text: badgeText, cls: "pa-card-cat" });
+    const acts = topRow.createDiv({ cls: "pa-card-top-actions" });
+    const menuBtn = acts.createEl("button", { text: "⋮", cls: "pa-icon-btn pa-card-menu" });
+    menuBtn.onclick = (e) => {
+      e.stopPropagation();
+      showActionMenu(e, [
+        { title: "Open note", icon: "file-text", onClick: () => this.ctx.app.workspace.openLinkText(t.path, "", true) },
+        { title: "Edit", icon: "pencil", onClick: () => this.openTaskModal(t, t.status, this.ctx.store.loadBoards()) },
+        { title: "Delete", icon: "trash", warning: true, onClick: () => new ConfirmModal(this.ctx.app, `Delete task "${t.title}"?`, async () => { await this.ctx.store.deleteTask(t); this.ctx.refresh(); }).open() },
+      ]);
+    };
 
     card.createEl("div", { text: t.title, cls: "pa-card-title" });
     const dateStr = (t.created || "").substring(0, 10);
     card.createDiv({ cls: "pa-muted pa-card-meta", text: [t.priority, dateStr].filter(Boolean).join(" · ") });
 
-    const actions = card.createDiv({ cls: "pa-card-actions" });
-    const idx = cols.indexOf(current);
-    if (idx > 0) {
-      const left = actions.createEl("button", { text: "←", cls: "pa-icon-btn" });
-      left.onclick = async () => { await this.ctx.store.updateTask(t, { status: cols[idx - 1] }); this.ctx.refresh(); };
-    }
-    if (idx < cols.length - 1) {
-      const right = actions.createEl("button", { text: "→", cls: "pa-icon-btn" });
-      right.onclick = async () => { await this.ctx.store.updateTask(t, { status: cols[idx + 1] }); this.ctx.refresh(); };
-    }
-    const edit = actions.createEl("button", { text: "✏️", cls: "pa-icon-btn" });
-    edit.onclick = () => this.openTaskModal(t, t.status, this.ctx.store.loadBoards());
-    const open = actions.createEl("button", { text: "🔗", cls: "pa-icon-btn" });
-    open.onclick = () => this.ctx.app.workspace.openLinkText(t.path, "", true);
+    const preview = card.createDiv({ cls: "pa-card-preview" });
+    this.ctx.store.readBody(t.path).then((body) => {
+      const lines = body.split("\n").map((l) => l.trim()).filter(Boolean).slice(0, 3);
+      if (lines.length) preview.setText(lines.join("\n"));
+      else preview.remove();
+    });
   }
 
   // ---- List view (single list per board, with collapsed Completed) ----
   private renderList(root: HTMLElement, filtered: Task[]): void {
     const cols = this.ctx.config.taskColumns;
     const firstCol = cols[0];
-    const lastCol = cols[cols.length - 1];
+    const doneId = this.doneCol();
     const colSet = new Set(cols);
     const eff = (t: Task) => (colSet.has(t.status) ? t.status : cols[0]);
-    const isDone = (t: Task) => eff(t) === lastCol;
+    const isDone = (t: Task) => eff(t) === doneId;
     const boards = this.ctx.store.loadBoards();
 
     root.createDiv({ text: "📝 List de Tasks", cls: "pa-h2" });
@@ -279,20 +321,20 @@ export class TasksModule {
 
       const open = tasks.filter((t) => !isDone(t));
       const done = tasks.filter((t) => isDone(t));
-      open.forEach((t) => this.renderListItem(card, t, false, lastCol, firstCol));
+      open.forEach((t) => this.renderListItem(card, t, false, doneId, firstCol));
 
       if (done.length) {
         const det = card.createEl("details", { cls: "pa-completed" });
         det.createEl("summary", { text: `Completed (${done.length})` });
-        done.forEach((t) => this.renderListItem(det, t, true, lastCol, firstCol));
+        done.forEach((t) => this.renderListItem(det, t, true, doneId, firstCol));
       }
     });
   }
 
-  private renderListItem(parent: HTMLElement, t: Task, done: boolean, lastCol: string, firstCol: string): void {
+  private renderListItem(parent: HTMLElement, t: Task, done: boolean, doneCol: string, firstCol: string): void {
     const row = parent.createDiv({ cls: "pa-list-item" + (done ? " done" : "") });
     const circle = row.createSpan({ cls: "pa-list-circle" + (done ? " on" : ""), text: done ? "●" : "○" });
-    circle.onclick = async () => { await this.ctx.store.updateTask(t, { status: done ? firstCol : lastCol }); this.ctx.refresh(); };
+    circle.onclick = async () => { await this.ctx.store.updateTask(t, { status: done ? firstCol : doneCol }); this.ctx.refresh(); };
     const main = row.createDiv({ cls: "pa-list-item-main" });
     const title = main.createDiv({ text: t.title, cls: "pa-list-item-title" });
     title.onclick = () => this.ctx.app.workspace.openLinkText(t.path, "", true);
@@ -303,7 +345,7 @@ export class TasksModule {
   private openBoardModal(boards: Board[]): void {
     const fields: FieldSpec[] = [
       { key: "name", label: "Board name", type: "text" },
-      { key: "emoji", label: "Emoji", type: "text", placeholder: "📋" },
+      { key: "emoji", label: "Emoji", type: "emoji", placeholder: "📋" },
     ];
     new FormModal(this.ctx.app, "New board", fields, async (v) => {
       const name = (v.name || "").trim();
@@ -338,17 +380,26 @@ export class TasksModule {
     }, task ? "Save" : "Create").open();
   }
 
+  private splitEmoji(name: string): { emoji: string; text: string } {
+    const m = name.match(/^([^\p{L}\p{N}]+)\s*(.*)$/u);
+    return m ? { emoji: m[1].trim(), text: m[2] } : { emoji: "", text: name };
+  }
+
   private openAddColumnModal(): void {
     const cfg = this.ctx.config;
     if (cfg.taskColumns.length >= 5) { toast("Maximum of 5 columns."); return; }
-    new FormModal(this.ctx.app, "New column", [{ key: "name", label: "Column name", type: "text", placeholder: "Review, Blocked" }], async (v) => {
-      const name = (v.name || "").trim();
-      if (!name) return;
+    const fields: FieldSpec[] = [
+      { key: "name", label: "Column name", type: "text", placeholder: "Review, Blocked" },
+      { key: "emoji", label: "Emoji", type: "emoji", value: "" },
+    ];
+    new FormModal(this.ctx.app, "New column", fields, async (v) => {
+      const text = (v.name || "").trim();
+      if (!text) return;
       if (cfg.taskColumns.length >= 5) { toast("Maximum of 5 columns."); return; }
-      const id = name.toLowerCase().replace(/[^a-z0-9]/g, "-");
+      const id = text.toLowerCase().replace(/[^a-z0-9]/g, "-");
       if (cfg.taskColumns.includes(id)) return;
       cfg.taskColumns.push(id);
-      cfg.taskColumnNames[id] = name;
+      cfg.taskColumnNames[id] = `${(v.emoji || "").trim()} ${text}`.trim();
       await this.ctx.store.saveConfig(cfg);
       this.ctx.refresh();
     }, "Add").open();
@@ -366,11 +417,16 @@ export class TasksModule {
 
   private openRenameColumnModal(col: string): void {
     const cfg = this.ctx.config;
-    const current = cfg.taskColumnNames[col] || col;
-    new FormModal(this.ctx.app, "Rename column", [{ key: "name", label: "New name", type: "text", value: current }], async (v) => {
-      const name = (v.name || "").trim();
-      if (!name) return;
-      cfg.taskColumnNames[col] = name;
+    if (col === this.doneCol()) { toast("The Done column can't be renamed."); return; }
+    const { emoji, text } = this.splitEmoji(cfg.taskColumnNames[col] || col);
+    const fields: FieldSpec[] = [
+      { key: "name", label: "New name", type: "text", value: text },
+      { key: "emoji", label: "Emoji", type: "emoji", value: emoji },
+    ];
+    new FormModal(this.ctx.app, "Rename column", fields, async (v) => {
+      const t = (v.name || "").trim();
+      if (!t) return;
+      cfg.taskColumnNames[col] = `${(v.emoji || "").trim()} ${t}`.trim();
       await this.ctx.store.saveConfig(cfg);
       this.ctx.refresh();
     }, "Save").open();
@@ -378,6 +434,7 @@ export class TasksModule {
 
   private removeColumn(col: string, tasks: Task[]): void {
     const cfg = this.ctx.config;
+    if (col === this.doneCol()) { toast("The Done column can't be removed."); return; }
     if (cfg.taskColumns.length <= 1) { toast("You must keep at least one column."); return; }
     new ConfirmModal(this.ctx.app, `Delete column "${this.cleanLabel(cfg.taskColumnNames[col] || col)}"? Tasks move to the first column.`, async () => {
       const remaining = cfg.taskColumns.filter((c) => c !== col);

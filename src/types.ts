@@ -23,6 +23,7 @@ export interface Task {
   isAllDay?: boolean;
   created?: string;
   modified?: string;
+  order?: number;
   path: string; // vault path of the source file
   body?: string;
 }
@@ -91,6 +92,7 @@ export interface StudyCard {
   url?: string;
   date?: string;
   modified?: string;
+  order?: number;
   path: string;
 }
 

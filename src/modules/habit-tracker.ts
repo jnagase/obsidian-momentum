@@ -279,7 +279,7 @@ export class HabitTrackerModule {
   private openHabitModal(): void {
     const fields: FieldSpec[] = [
       { key: "name", label: "Name", type: "text", placeholder: "Walk the dog / Quit smoking" },
-      { key: "emoji", label: "Emoji", type: "text", value: "⭐" },
+      { key: "emoji", label: "Emoji", type: "emoji", value: "⭐" },
       {
         key: "type", label: "Type", type: "dropdown", value: "do",
         options: [

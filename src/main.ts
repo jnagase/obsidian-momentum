@@ -20,12 +20,20 @@ export default class PersonalAssistantPlugin extends Plugin implements PAHost {
     this.registerView(VIEW_TYPE_PA_NAV, (leaf) => new PANavView(leaf, this));
 
     this.addCommand({
-      id: "open-personal-assistant",
-      name: "Open Personal Assistant",
+      id: "open-momentum",
+      name: "Open Momentum",
       callback: () => this.activateView(),
     });
 
     this.addSettingTab(new PASettingTab(this.app, this));
+
+    // Ensure the nav panel exists in the left sidebar so its access icon is always available.
+    this.app.workspace.onLayoutReady(() => {
+      if (this.app.workspace.getLeavesOfType(VIEW_TYPE_PA_NAV).length === 0) {
+        const leaf = this.app.workspace.getLeftLeaf(false);
+        leaf?.setViewState({ type: VIEW_TYPE_PA_NAV });
+      }
+    });
   }
 
   /** Open the nav panel in the left sidebar and the content in the main area. */

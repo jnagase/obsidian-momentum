@@ -5,10 +5,11 @@ Studies** rendered directly from your vault's markdown files. Everything is
 stored as plain markdown under a single folder, so your data stays yours.
 
 ## Why Momentum
-- No GitHub token, no CORS, no fetch — reads/writes files locally via the Vault API.
+- Reads/writes files locally via the Vault API — no GitHub token, no CORS workarounds.
 - Frontmatter parsing handled by Obsidian's metadata cache.
 - Cross-device sync handled by Obsidian Sync / iCloud / git.
 - Renders with Obsidian's DOM API and theme variables (no remote code, no CDN).
+- One optional network call: the Nutrition food search (see [Network use & privacy](#network-use--privacy)).
 
 ## Modules
 | Module | What it does |
@@ -30,6 +31,16 @@ All visualizations use inline SVG (no external libraries / CDN).
    `main.js`, `styles.css`).
 4. In Obsidian: Settings → Community plugins → enable "Momentum".
 5. Open via the command palette → "Open Personal Assistant" (panel in the left sidebar).
+
+## Network use & privacy
+Momentum works fully offline. The only time it reaches the internet is when you
+**search for a food** in the Nutrition module. That search queries the
+[Open Food Facts](https://world.openfoodfacts.org) public API
+(`world.openfoodfacts.org`) over HTTPS using Obsidian's `requestUrl`, sending
+only the search term you typed. No API key or account is required, and no
+personal data, vault content, or telemetry is transmitted. If you never use the
+food search, the plugin makes no network requests. You can always enter food
+calories manually instead.
 
 ## Data location
 Set the **Data root folder** in plugin settings (default: `Personal Assistant`).

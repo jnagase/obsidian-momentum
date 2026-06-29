@@ -1,5 +1,7 @@
 # Momentum — Obsidian plugin
 
+[![Buy me a coffee](https://img.shields.io/badge/Buy%20me%20a%20coffee-support-yellow?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/jnagase)
+
 All-in-one life dashboard for Obsidian: **Habits, Tasks, Fitness, Nutrition and
 Studies** rendered directly from your vault's Markdown files. Everything is
 stored as plain Markdown under a single folder, so your data stays yours.

@@ -90,5 +90,14 @@ class PASettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         })
       );
+
+    new Setting(containerEl)
+      .setName("Support")
+      .setDesc("If Momentum is useful to you, you can support its development.")
+      .addButton((b) =>
+        b.setButtonText("Buy me a coffee").setCta().onClick(() => {
+          window.open("https://buymeacoffee.com/jnagase", "_blank");
+        })
+      );
   }
 }

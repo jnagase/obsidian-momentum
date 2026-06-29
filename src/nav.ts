@@ -13,7 +13,7 @@ export class PANavView extends ItemView {
   }
 
   getViewType(): string { return VIEW_TYPE_PA_NAV; }
-  getDisplayText(): string { return "Momentum"; }
+  getDisplayText(): string { return "Momentum Life"; }
   getIcon(): string { return "target"; }
 
   async onOpen(): Promise<void> { this.render(); }
@@ -23,7 +23,7 @@ export class PANavView extends ItemView {
     const root = this.contentEl;
     root.empty();
     root.addClass("pa-root", "pa-nav-root");
-    root.createDiv({ text: "🎯 Momentum", cls: "pa-logo" });
+    root.createDiv({ text: "🎯 Momentum Life", cls: "pa-logo" });
     PAGES.forEach((p) => {
       const btn = root.createEl("button", {
         text: p.label,

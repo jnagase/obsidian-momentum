@@ -1,4 +1,4 @@
-# Momentum — Obsidian plugin
+# Momentum Life — Obsidian plugin
 
 [![Buy me a coffee](https://img.shields.io/badge/Buy%20me%20a%20coffee-support-yellow?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/jnagase)
 
@@ -6,7 +6,7 @@ All-in-one life dashboard for Obsidian: **Habits, Tasks, Fitness, Nutrition and
 Studies** rendered directly from your vault's Markdown files. Everything is
 stored as plain Markdown under a single folder, so your data stays yours.
 
-## Why Momentum
+## Why Momentum Life
 - Reads/writes files locally via the Vault API — no GitHub token, no CORS workarounds.
 - Frontmatter parsing handled by Obsidian's metadata cache.
 - Cross-device sync handled by Obsidian Sync / iCloud / git.
@@ -28,10 +28,10 @@ All visualizations use inline SVG (no external libraries / CDN).
 1. `npm install`
 2. `npm run dev` (watch) or `npm run build` (production, one-off).
 3. Copy/symlink this folder into your vault at
-   `.obsidian/plugins/momentum/` (must contain `manifest.json`,
+   `.obsidian/plugins/momentum-life/` (must contain `manifest.json`,
    `main.js`, `styles.css`).
-4. In Obsidian: Settings → Community plugins → enable "Momentum".
-5. Open via the command palette → "Momentum: Open" (panel in the left sidebar).
+4. In Obsidian: Settings → Community plugins → enable "Momentum Life".
+5. Open via the command palette → "Momentum Life: Open" (panel in the left sidebar).
 
 ## Network use & privacy
 Momentum works fully offline. The only time it reaches the internet is when you

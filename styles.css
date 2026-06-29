@@ -242,17 +242,17 @@
 /* page/sidebar keep the default gray/white scheme */
 
 /* tab/nav buttons: white background, consistent gray text */
-.pa-root .pa-nav,
-.pa-root .pa-tab,
-.pa-root .pa-toggle-btn{background:var(--background-primary);color:var(--text-muted)!important;transition:background .12s,color .12s,border-color .12s}
-.pa-root .pa-nav.active,
-.pa-root .pa-nav:hover,
-.pa-root .pa-tab:hover,
-.pa-root .pa-toggle-btn:hover,
-.pa-root .pa-tab.on,
-.pa-root .pa-toggle-btn.on{color:var(--interactive-accent)!important}
-.pa-root .pa-tab.on,
-.pa-root .pa-toggle-btn.on{color:var(--text-on-accent)!important}
+.pa-root.pa-root .pa-nav,
+.pa-root.pa-root .pa-tab,
+.pa-root.pa-root .pa-toggle-btn{background:var(--background-primary);color:var(--text-muted);transition:background .12s,color .12s,border-color .12s}
+.pa-root.pa-root .pa-nav.active,
+.pa-root.pa-root .pa-nav:hover,
+.pa-root.pa-root .pa-tab:hover,
+.pa-root.pa-root .pa-toggle-btn:hover,
+.pa-root.pa-root .pa-tab.on,
+.pa-root.pa-root .pa-toggle-btn.on{color:var(--interactive-accent)}
+.pa-root.pa-root .pa-tab.on,
+.pa-root.pa-root .pa-toggle-btn.on{color:var(--text-on-accent)}
 
 /* hover = user's accent tint, for everything clickable */
 .pa-nav:hover,

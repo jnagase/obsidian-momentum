@@ -55,7 +55,7 @@ export class HabitTrackerModule {
     const scoreForDay = (ds: string): { done: number; total: number } => {
       const checks = systemHabits.map((h) => h.done(ds));
       habits.forEach((h) => {
-        if (h.habitType === "quit") checks.push((h.lastReset || h.created || ds) <= ds);
+        if (h.habitType === "quit") checks.push((h.created || ds) <= ds && !(h.log && h.log[ds]));
         else checks.push(!!h.log[ds]);
       });
       return { done: checks.filter(Boolean).length, total: checks.length };
@@ -152,7 +152,7 @@ export class HabitTrackerModule {
 
     // Tasks by status
     const byTask = new Map<string, number>();
-    d.tasks.forEach((t) => { const s = t.status || "todo"; byTask.set(s, (byTask.get(s) || 0) + 1); });
+    d.tasks.forEach((t) => { const s = t.status || "backlog"; byTask.set(s, (byTask.get(s) || 0) + 1); });
     this.donutPanel(row, "✅ Tasks by status",
       Array.from(byTask.entries()).map(([k, v], i) => ({ label: k, value: v, color: palette[i % palette.length] })));
   }
@@ -176,7 +176,7 @@ export class HabitTrackerModule {
     habits.forEach((h) => this.renderCustomHabit(grid, h, today));
   }
 
-  private heatmap(card: HTMLElement, done: (ds: string) => boolean, color: string, today: string): void {
+  private heatmap(card: HTMLElement, cellColor: (ds: string) => string | null, today: string): void {
     const hm = card.createDiv({ cls: "pa-heatmap" });
     const base = new Date(today + "T00:00:00");
     for (let j = HEATMAP_DAYS - 1; j >= 0; j--) {
@@ -185,7 +185,8 @@ export class HabitTrackerModule {
       const ds = ymd(x);
       const cell = hm.createDiv({ cls: "pa-hm-cell" });
       cell.setAttr("title", ds);
-      if (done(ds)) cell.style.background = color;
+      const c = cellColor(ds);
+      if (c) cell.style.background = c;
     }
   }
 
@@ -203,15 +204,23 @@ export class HabitTrackerModule {
     const top = card.createDiv({ cls: "pa-habit-top" });
     top.createSpan({ text: h.label, cls: "pa-habit-name" });
     top.createSpan({ text: `🔥 ${streak}`, cls: "pa-muted pa-streak" });
-    this.heatmap(card, h.done, h.color, today);
+    this.heatmap(card, (ds) => (h.done(ds) ? h.color : null), today);
   }
 
   private renderCustomHabit(grid: HTMLElement, h: Habit, today: string): void {
     const isQuit = h.habitType === "quit";
     const color = isQuit ? "#ef4444" : "#0ea5e9";
-    const done = isQuit
-      ? (ds: string) => { const start = h.lastReset || h.created || today; return ds >= start && ds <= today; }
-      : (ds: string) => !!h.log[ds];
+    const cleanColor = "#16a34a";
+    const created = h.created || today;
+    // Quit: clean days are green, relapse days (recorded on Reset) are red,
+    // so a streak with an interruption stays visible. Do: filled on logged days.
+    const cellColor: (ds: string) => string | null = isQuit
+      ? (ds) => {
+          if (h.log && h.log[ds]) return color;
+          if (ds >= created && ds <= today) return cleanColor;
+          return null;
+        }
+      : (ds) => (h.log[ds] ? color : null);
 
     let streak: number;
     if (isQuit) {
@@ -250,7 +259,7 @@ export class HabitTrackerModule {
         this.ctx.refresh();
       }).open();
 
-    this.heatmap(card, done, color, today);
+    this.heatmap(card, cellColor, today);
   }
 
   // ---- Study progress ----

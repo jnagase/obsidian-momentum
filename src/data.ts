@@ -180,7 +180,7 @@ export class PADataStore {
         return {
           id: str(m.task_id) || f.basename,
           title: str(m.title) || f.basename,
-          status: str(m.status) || "todo",
+          status: str(m.status) || "backlog",
           priority: str(m.priority) || "medium",
           cat: str(m.category) || "work",
           group: str(m.group),
@@ -216,7 +216,7 @@ export class PADataStore {
     const meta: FM = {
       task_id: cryptoId(),
       title,
-      status: t.status || "todo",
+      status: t.status || "backlog",
       priority: t.priority || "medium",
       created: new Date().toISOString(),
       modified: new Date().toISOString(),
@@ -351,6 +351,9 @@ export class PADataStore {
     const f = this.app.vault.getAbstractFileByPath(habit.path || "");
     if (!(f instanceof TFile)) return;
     await this.patchFrontmatter(f, (fm) => {
+      const log = coerce<Record<string, boolean>>(fm.log, {});
+      log[date] = true; // record the relapse so the clean history stays visible
+      fm.log = log;
       fm.lastReset = date;
       fm.modified = new Date().toISOString();
     });

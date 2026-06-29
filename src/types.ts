@@ -11,7 +11,7 @@ export interface Board {
 export interface Task {
   id: string; // task_id (uuid) or filename fallback
   title: string;
-  status: string; // matches a task column key, e.g. "todo" | "in progress" | "done"
+  status: string; // matches a task column key, e.g. "backlog" | "in progress" | "done"
   priority: "low" | "medium" | "high" | string;
   cat?: string;
   group?: string;
@@ -139,9 +139,9 @@ export interface PAConfig {
   splitNames: Record<string, string>;
 }
 
-export const DEFAULT_TASK_COLUMNS = ["todo", "in progress", "done"];
+export const DEFAULT_TASK_COLUMNS = ["backlog", "in progress", "done"];
 export const DEFAULT_TASK_COLUMN_NAMES: Record<string, string> = {
-  todo: "📌 BACKLOG",
+  backlog: "📌 BACKLOG",
   "in progress": "🔄 IN PROGRESS",
   done: "✅ DONE",
   "on-hold": "On-hold",

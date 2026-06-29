@@ -25,13 +25,18 @@ export function showActionMenu(evt: MouseEvent, actions: MenuAction[]): void {
   menu.showAtMouseEvent(evt);
 }
 
+/** Adapt an async function to a void-returning DOM event handler. */
+export function asVoid(fn: () => Promise<unknown>): () => void {
+  return () => { void fn(); };
+}
+
 /** Open an external link only if it's a safe http(s) URL, with noopener. */
 export function openExternal(url: string): void {
   const u = (url || "").trim();
   if (/^https?:\/\//i.test(u)) {
     window.open(u, "_blank", "noopener,noreferrer");
   } else {
-    new Notice("Only http(s) links can be opened.");
+    new Notice("Only HTTP(s) links can be opened.");
   }
 }
 
@@ -92,14 +97,14 @@ export class FormModal extends Modal {
   private fields: FieldSpec[];
   private title: string;
   private submitLabel: string;
-  private onSubmit: (values: Record<string, string>) => void;
+  private onSubmit: (values: Record<string, string>) => void | Promise<void>;
   private values: Record<string, string> = {};
 
   constructor(
     app: App,
     title: string,
     fields: FieldSpec[],
-    onSubmit: (values: Record<string, string>) => void,
+    onSubmit: (values: Record<string, string>) => void | Promise<void>,
     submitLabel = "Save"
   ) {
     super(app);
@@ -123,7 +128,7 @@ export class FormModal extends Modal {
             t.setValue(this.values[f.key]).onChange((v) => (this.values[f.key] = v));
             if (f.placeholder) t.setPlaceholder(f.placeholder);
             t.inputEl.rows = 4;
-            t.inputEl.style.width = "100%";
+            t.inputEl.addClass("pa-textarea-full");
           });
           break;
         case "number":
@@ -134,7 +139,7 @@ export class FormModal extends Modal {
           break;
         case "dropdown":
           setting.addDropdown((d) => {
-            (f.options || []).forEach((o) => d.addOption(o.value, o.label));
+            (f.options || []).forEach((o) => { d.addOption(o.value, o.label); });
             d.setValue(this.values[f.key] || (f.options?.[0]?.value ?? ""))
               .onChange((v) => (this.values[f.key] = v));
           });
@@ -151,7 +156,9 @@ export class FormModal extends Modal {
           const setTrigger = () => trigger.setText(this.values[f.key] || "🙂");
           setTrigger();
           const pop = wrap.createDiv({ cls: "pa-emoji-pop" });
-          pop.style.display = "none";
+          let popOpen = false;
+          const setPop = (open: boolean) => { popOpen = open; if (open) pop.show(); else pop.hide(); };
+          setPop(false);
           const search = pop.createEl("input", { cls: "pa-emoji-search" });
           search.placeholder = "Search emoji…";
           const grid = pop.createDiv({ cls: "pa-emoji-grid" });
@@ -161,15 +168,14 @@ export class FormModal extends Modal {
             EMOJI_DATA.filter((d) => !ql || d.k.includes(ql) || d.e === ql).forEach((d) => {
               const b = grid.createEl("button", { text: d.e, cls: "pa-emoji-btn" });
               b.type = "button";
-              b.onclick = () => { this.values[f.key] = d.e; setTrigger(); pop.style.display = "none"; };
+              b.onclick = () => { this.values[f.key] = d.e; setTrigger(); setPop(false); };
             });
           };
           renderGrid("");
           search.oninput = () => renderGrid(search.value);
           trigger.onclick = () => {
-            const open = pop.style.display === "none";
-            pop.style.display = open ? "block" : "none";
-            if (open) { search.value = ""; renderGrid(""); search.focus(); }
+            setPop(!popOpen);
+            if (popOpen) { search.value = ""; renderGrid(""); search.focus(); }
           };
           break;
         }
@@ -185,15 +191,15 @@ export class FormModal extends Modal {
       .addButton((b) => b.setButtonText("Cancel").onClick(() => this.close()))
       .addButton((b) =>
         b.setButtonText(this.submitLabel).setCta().onClick(() => {
-          this.onSubmit(this.values);
+          void this.onSubmit(this.values);
           this.close();
         })
       );
 
     // Let the emoji popover float outside the modal box instead of being clipped.
     if (this.fields.some((f) => f.type === "emoji")) {
-      this.modalEl.style.overflow = "visible";
-      this.contentEl.style.overflow = "visible";
+      this.modalEl.addClass("pa-modal-overflow-visible");
+      this.contentEl.addClass("pa-modal-overflow-visible");
     }
   }
 
@@ -203,9 +209,9 @@ export class FormModal extends Modal {
 /** Simple yes/no confirmation modal. */
 export class ConfirmModal extends Modal {
   private message: string;
-  private onConfirm: () => void;
+  private onConfirm: () => void | Promise<void>;
 
-  constructor(app: App, message: string, onConfirm: () => void) {
+  constructor(app: App, message: string, onConfirm: () => void | Promise<void>) {
     super(app);
     this.message = message;
     this.onConfirm = onConfirm;
@@ -218,8 +224,8 @@ export class ConfirmModal extends Modal {
     new Setting(contentEl)
       .addButton((b) => b.setButtonText("Cancel").onClick(() => this.close()))
       .addButton((b) =>
-        b.setButtonText("Confirm").setWarning().onClick(() => {
-          this.onConfirm();
+        b.setButtonText("Confirm").setCta().onClick(() => {
+          void this.onConfirm();
           this.close();
         })
       );

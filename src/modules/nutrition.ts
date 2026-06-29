@@ -35,7 +35,7 @@ export class NutritionModule {
     const saved = this.ctx.store.loadMeals();
     return SLOTS.map((s) => {
       const m = saved.find((x) => x.id === s.id);
-      return m ? { ...m, name: s.name, emoji: s.emoji } : ({ id: s.id, name: s.name, emoji: s.emoji, totalCal: 0, items: [], path: "" } as Meal);
+      return m ? { ...m, name: s.name, emoji: s.emoji } : ({ id: s.id, name: s.name, emoji: s.emoji, totalCal: 0, items: [], path: "" });
     });
   }
 
@@ -144,7 +144,7 @@ export class NutritionModule {
       }
     };
     searchBtn.onclick = doSearch;
-    nameInput.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); doSearch(); } };
+    nameInput.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); void doSearch(); } };
 
     const buildItem = (): MealItem | null => {
       const name = this.addForm.name.trim();
@@ -157,7 +157,7 @@ export class NutritionModule {
     };
     const targetMeal = () => meals.find((m) => m.id === this.addForm.meal)!;
 
-    const toToday = row.createEl("button", { text: "+ Add to Today", cls: "pa-btn" });
+    const toToday = row.createEl("button", { text: "+ add to today", cls: "pa-btn" });
     toToday.onclick = async () => {
       const item = buildItem();
       if (!item) return;
@@ -167,7 +167,7 @@ export class NutritionModule {
       this.ctx.refresh();
       toast(`Logged ${item.name} to ${targetMeal().name}`);
     };
-    const toPlan = row.createEl("button", { text: "+ Add to Plan", cls: "pa-mini-btn" });
+    const toPlan = row.createEl("button", { text: "+ add to plan", cls: "pa-mini-btn" });
     toPlan.onclick = async () => {
       const item = buildItem();
       if (!item) return;
@@ -221,7 +221,7 @@ export class NutritionModule {
   private renderMealPlans(root: HTMLElement, meals: Meal[]): void {
     const panel = root.createDiv({ cls: "pa-panel" });
     const head = panel.createDiv({ cls: "pa-section-head" });
-    head.createEl("h3", { text: "🍽️ Meal Plan — 4 fixed slots · tap a card to edit", cls: "pa-panel-title" });
+    head.createEl("h3", { text: "🍽️ meal plan — 4 fixed slots · tap a card to edit", cls: "pa-panel-title" });
     const water = head.createEl("button", { text: "💧 +250ml", cls: "pa-mini-btn" });
     water.onclick = async () => { await this.ctx.store.addWater(todayLocal(), 0.25); this.ctx.refresh(); toast("💧 +250ml"); };
 
@@ -281,7 +281,7 @@ export class NutritionModule {
     recalc();
 
     const actions = panel.createDiv({ cls: "pa-active-actions" });
-    const confirm = actions.createEl("button", { text: "✓ Confirm Meal", cls: "pa-btn" });
+    const confirm = actions.createEl("button", { text: "✓ confirm meal", cls: "pa-btn" });
     confirm.onclick = async () => {
       const eaten = this.readRows(tbody, meal, true);
       if (!eaten.length) { toast("Check at least one item."); return; }
@@ -291,7 +291,7 @@ export class NutritionModule {
       this.ctx.refresh();
       toast(`✓ ${meal.name} confirmed`);
     };
-    const save = actions.createEl("button", { text: "💾 Save Plan", cls: "pa-mini-btn" });
+    const save = actions.createEl("button", { text: "💾 Save plan", cls: "pa-mini-btn" });
     save.onclick = async () => { await this.ctx.store.saveMeal({ id: meal.id, name: meal.name, emoji: meal.emoji, items: this.readRows(tbody, meal, false) }); this.ctx.refresh(); toast("💾 Plan saved"); };
     const close = actions.createEl("button", { text: "Close", cls: "pa-mini-btn" });
     close.onclick = () => { this.selectedMeal = null; this.ctx.refresh(); };
@@ -339,7 +339,7 @@ export class NutritionModule {
   private renderCalendar(root: HTMLElement, calByDay: Map<string, number>): void {
     const target = this.ctx.config.calorieTarget || 2000;
     const card = root.createDiv({ cls: "pa-panel" });
-    card.createEl("h3", { text: "📅 Meal Calendar", cls: "pa-panel-title" });
+    card.createEl("h3", { text: "📅 Meal calendar", cls: "pa-panel-title" });
     const header = card.createDiv({ cls: "pa-cal-head" });
     const prev = header.createEl("button", { text: "←", cls: "pa-icon-btn" });
     header.createSpan({ text: new Date(this.calYear, this.calMonth, 1).toLocaleString("default", { month: "long", year: "numeric" }), cls: "pa-cal-title" });
@@ -362,8 +362,7 @@ export class NutritionModule {
       if (cal != null) {
         const pct = target ? (cal / target) * 100 : 0;
         const color = pct >= 80 && pct <= 110 ? "#16a34a" : pct > 110 ? "#ef4444" : "#f59e0b";
-        cell.style.background = color;
-        cell.style.color = "#fff";
+        cell.setCssStyles({ backgroundColor: color, color: "#fff" });
         cell.createDiv({ text: String(cal), cls: "pa-cal-tag" });
         cell.onclick = () => { this.selectedDate = ds; this.ctx.refresh(); };
       }
@@ -380,7 +379,7 @@ export class NutritionModule {
   // ---- Calories last 7 days ----
   private renderTrend(root: HTMLElement, calByDay: Map<string, number>, today: string): void {
     const card = root.createDiv({ cls: "pa-panel" });
-    card.createEl("h3", { text: "📈 Calories Last 7 Days", cls: "pa-panel-title" });
+    card.createEl("h3", { text: "📈 Calories last 7 days", cls: "pa-panel-title" });
     const labels: string[] = [];
     const values: number[] = [];
     const base = new Date(today + "T00:00:00");

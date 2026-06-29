@@ -93,7 +93,7 @@ export class TasksModule {
     };
     mkTab("all", "📋 All");
     boards.forEach((b) => mkTab(b.name, `${b.emoji || ""} ${b.name}`.trim()));
-    const add = bar.createEl("button", { text: "+ Board", cls: "pa-tab pa-tab-add" });
+    const add = bar.createEl("button", { text: "+ board", cls: "pa-tab pa-tab-add" });
     add.onclick = () => this.openBoardModal(boards);
   }
 
@@ -130,7 +130,7 @@ export class TasksModule {
     bar.createDiv({ text: board ? `${board.emoji || ""} ${board.name}`.trim() : "📋 All boards", cls: "pa-board-title" });
 
     const actions = bar.createDiv({ cls: "pa-board-actions" });
-    const addCol = actions.createEl("button", { text: "+ Column", cls: "pa-mini-btn" });
+    const addCol = actions.createEl("button", { text: "+ column", cls: "pa-mini-btn" });
     addCol.onclick = () => this.openAddColumnModal();
     if (board) {
       const kebab = actions.createEl("button", { text: "⋮", cls: "pa-icon-btn" });
@@ -231,7 +231,7 @@ export class TasksModule {
       };
       list.addEventListener("dragover", (e) => { e.preventDefault(); list.addClass("pa-drop"); });
       list.addEventListener("dragleave", () => list.removeClass("pa-drop"));
-      list.addEventListener("drop", persistDrop);
+      list.addEventListener("drop", (e) => { void persistDrop(e); });
 
       const ord = (t: Task) => (t.order ?? 1e9);
       colTasks.sort((a, b) => ord(a) - ord(b) || (a.created || "").localeCompare(b.created || ""));
@@ -245,13 +245,13 @@ export class TasksModule {
         colTasks.slice(7).forEach((t) => this.renderCard(det, t, isDone));
       }
 
-      const addBtn = colEl.createEl("button", { text: "+ Add card", cls: "pa-add-card" });
+      const addBtn = colEl.createEl("button", { text: "+ add card", cls: "pa-add-card" });
       addBtn.onclick = () => this.openTaskModal(null, col, boards);
     });
   }
 
   private getDragAfterElement(container: HTMLElement, y: number): HTMLElement | null {
-    const els = Array.from(container.querySelectorAll(".pa-task:not(.pa-dragging)")) as HTMLElement[];
+    const els = Array.from(container.querySelectorAll<HTMLElement>(".pa-task:not(.pa-dragging)"));
     let closest: HTMLElement | null = null;
     let closestOffset = -Infinity;
     for (const el of els) {
@@ -278,7 +278,7 @@ export class TasksModule {
     menuBtn.onclick = (e) => {
       e.stopPropagation();
       showActionMenu(e, [
-        { title: "Open note", icon: "file-text", onClick: () => this.ctx.app.workspace.openLinkText(t.path, "", true) },
+        { title: "Open note", icon: "file-text", onClick: () => { void this.ctx.app.workspace.openLinkText(t.path, "", true); } },
         { title: "Edit", icon: "pencil", onClick: () => this.openTaskModal(t, t.status, this.ctx.store.loadBoards()) },
         { title: "Delete", icon: "trash", warning: true, onClick: () => new ConfirmModal(this.ctx.app, `Delete task "${t.title}"?`, async () => { await this.ctx.store.deleteTask(t); this.ctx.refresh(); }).open() },
       ]);
@@ -289,7 +289,7 @@ export class TasksModule {
     card.createDiv({ cls: "pa-muted pa-card-meta", text: [t.priority, dateStr].filter(Boolean).join(" · ") });
 
     const preview = card.createDiv({ cls: "pa-card-preview" });
-    this.ctx.store.readBody(t.path).then((body) => {
+    void this.ctx.store.readBody(t.path).then((body) => {
       const lines = body.split("\n").map((l) => l.trim()).filter(Boolean).slice(0, 3);
       if (lines.length) preview.setText(lines.join("\n"));
       else preview.remove();

@@ -140,7 +140,7 @@ export class FitnessModule {
     });
 
     const card = root.createDiv({ cls: "pa-panel" });
-    card.createEl("h3", { text: "📅 Workout Calendar", cls: "pa-panel-title" });
+    card.createEl("h3", { text: "📅 Workout calendar", cls: "pa-panel-title" });
     const header = card.createDiv({ cls: "pa-cal-head" });
     const prev = header.createEl("button", { text: "←", cls: "pa-icon-btn" });
     header.createSpan({ text: new Date(this.calYear, this.calMonth, 1).toLocaleString("default", { month: "long", year: "numeric" }), cls: "pa-cal-title" });
@@ -174,7 +174,7 @@ export class FitnessModule {
   private renderWeightProgress(root: HTMLElement, exercises: Exercise[], workouts: Workout[]): void {
     const card = root.createDiv({ cls: "pa-panel" });
     const head = card.createDiv({ cls: "pa-section-head" });
-    head.createEl("h3", { text: "📈 Weight Progress", cls: "pa-panel-title" });
+    head.createEl("h3", { text: "📈 Weight progress", cls: "pa-panel-title" });
     const sel = head.createEl("select", { cls: "pa-select" });
     this.getSplits().forEach((s) => { const o = sel.createEl("option", { text: `Workout ${s.id}`, value: s.id }); if (s.id === this.weightSplit) o.selected = true; });
     sel.onchange = () => { this.weightSplit = sel.value; this.ctx.refresh(); };
@@ -235,7 +235,7 @@ export class FitnessModule {
     const save = card.createEl("button", { text: "💾 Save changes", cls: "pa-mini-btn" });
     save.onclick = async () => {
       const updated: WorkoutExercise[] = w.exercises.map((we, idx) => {
-        const tr = tbody.querySelector(`tr[data-idx="${idx}"]`) as HTMLElement | null;
+        const tr = tbody.querySelector(`tr[data-idx="${idx}"]`);
         const wv = tr?.querySelector("input.pa-log-w") as HTMLInputElement | null;
         const sv = tr?.querySelector("input.pa-log-s") as HTMLInputElement | null;
         return { ...we, weight: wv ? parseFloat(wv.value) || 0 : we.weight, sets: sv ? (sv.value.trim() || we.sets) : we.sets };
@@ -266,7 +266,7 @@ export class FitnessModule {
     }
 
     if (!exs.length) {
-      panel.createEl("p", { cls: "pa-muted", text: "No exercises in this workout. Add some with + Exercise." });
+      panel.createEl("p", { cls: "pa-muted", text: "No exercises in this workout. Add some with + exercise." });
     } else {
       const table = panel.createEl("table", { cls: "pa-fit-table" });
       const cols = this.workoutActive ? ["✓", "Exercise", "Weight", "Sets", "How-to", ""] : ["Exercise", "Weight", "Sets", "How-to", ""];
@@ -289,7 +289,7 @@ export class FitnessModule {
         this.checked.clear();
         this.ctx.refresh();
       };
-      const addEx = actions.createEl("button", { text: "+ Exercise", cls: "pa-mini-btn" });
+      const addEx = actions.createEl("button", { text: "+ exercise", cls: "pa-mini-btn" });
       addEx.onclick = () => this.openExerciseModal(null);
       const save = actions.createEl("button", { text: "💾 Save changes", cls: "pa-mini-btn" });
       save.onclick = async () => { const n = await this.persistRowEdits(exs, panel); toast(n ? `💾 Saved (${n})` : "💾 Saved"); };
@@ -302,8 +302,8 @@ export class FitnessModule {
   private async persistRowEdits(exs: Exercise[], panel: HTMLElement): Promise<number> {
     let changed = 0;
     for (const ex of exs) {
-      const wInput = panel.querySelector(`input.pa-weight-input[data-ex="${CSS.escape(ex.name)}"]`) as HTMLInputElement | null;
-      const sInput = panel.querySelector(`input.pa-sets-input[data-ex="${CSS.escape(ex.name)}"]`) as HTMLInputElement | null;
+      const wInput = panel.querySelector<HTMLInputElement>(`input.pa-weight-input[data-ex="${CSS.escape(ex.name)}"]`);
+      const sInput = panel.querySelector<HTMLInputElement>(`input.pa-sets-input[data-ex="${CSS.escape(ex.name)}"]`);
       const newWeight = wInput ? parseFloat(wInput.value) || 0 : ex.weight;
       const newSets = sInput ? (sInput.value.trim() || ex.sets) : ex.sets;
       if (newWeight !== ex.weight || newSets !== ex.sets) { await this.ctx.store.saveExercise({ ...ex, weight: newWeight, sets: newSets }); changed++; }
@@ -357,8 +357,8 @@ export class FitnessModule {
     const duration = Math.max(1, Math.floor((Date.now() - this.startTime) / 1000 / 60));
     const logged: WorkoutExercise[] = [];
     for (const ex of exs) {
-      const wInput = panel.querySelector(`input.pa-weight-input[data-ex="${CSS.escape(ex.name)}"]`) as HTMLInputElement | null;
-      const sInput = panel.querySelector(`input.pa-sets-input[data-ex="${CSS.escape(ex.name)}"]`) as HTMLInputElement | null;
+      const wInput = panel.querySelector<HTMLInputElement>(`input.pa-weight-input[data-ex="${CSS.escape(ex.name)}"]`);
+      const sInput = panel.querySelector<HTMLInputElement>(`input.pa-sets-input[data-ex="${CSS.escape(ex.name)}"]`);
       const newWeight = wInput ? parseFloat(wInput.value) || 0 : ex.weight;
       const newSets = sInput ? (sInput.value.trim() || ex.sets) : ex.sets;
       if (newWeight !== ex.weight || newSets !== ex.sets) await this.ctx.store.saveExercise({ ...ex, weight: newWeight, sets: newSets });

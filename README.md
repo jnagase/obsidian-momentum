@@ -91,7 +91,7 @@ type: note
 ## Publishing to the community store
 1. Push to a public GitHub repo.
 2. Tag a release matching `manifest.json` `version` (no `v` prefix), e.g.
-   `git tag 0.1.1 && git push origin 0.1.1`. The GitHub Action attaches
+   `git tag 0.1.2 && git push origin 0.1.2`. The GitHub Action attaches
    `main.js`, `manifest.json` and `styles.css` to the release.
 3. Submit a PR adding this plugin to
    [`obsidianmd/obsidian-releases`](https://github.com/obsidianmd/obsidian-releases)

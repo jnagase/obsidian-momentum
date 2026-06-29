@@ -12,7 +12,7 @@ export interface Task {
   id: string; // task_id (uuid) or filename fallback
   title: string;
   status: string; // matches a task column key, e.g. "backlog" | "in progress" | "done"
-  priority: "low" | "medium" | "high" | string;
+  priority: string; // "low" | "medium" | "high"
   cat?: string;
   group?: string;
   kanbanId?: string;
@@ -42,7 +42,7 @@ export interface Habit {
   id: string;
   name: string;
   emoji: string;
-  habitType: "do" | "quit" | string;
+  habitType: string; // "do" | "quit"
   log: Record<string, boolean>;
   created?: string;
   lastReset?: string;

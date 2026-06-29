@@ -9,19 +9,28 @@ import { todayLocal } from "./util";
 export let DATA_ROOT = "Personal Assistant";
 export function setDataRoot(root: string) { DATA_ROOT = root || ""; }
 
-type FM = Record<string, any>;
+type FM = Record<string, unknown>;
 
 /** Accept either an already-parsed object/array or a JSON string. */
-function coerce<T>(v: any, fallback: T): T {
+function coerce<T>(v: unknown, fallback: T): T {
   if (v == null) return fallback;
   if (typeof v === "string") {
-    try { return JSON.parse(v); } catch { return fallback; }
+    try { return JSON.parse(v) as T; } catch { return fallback; }
   }
   return v as T;
 }
 
-function str(v: any): string { return v == null ? "" : String(v); }
-function num(v: any): number { const n = parseFloat(v); return isNaN(n) ? 0 : n; }
+function str(v: unknown): string {
+  if (v == null) return "";
+  if (typeof v === "string") return v;
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
+  return JSON.stringify(v);
+}
+function num(v: unknown): number {
+  if (typeof v === "number") return isNaN(v) ? 0 : v;
+  if (typeof v === "string") { const n = parseFloat(v); return isNaN(n) ? 0 : n; }
+  return 0;
+}
 
 /** Filesystem-safe filename derived from a title (keeps accents, drops symbols). */
 export function safeName(title: string): string {
@@ -99,7 +108,9 @@ export class PADataStore {
       const v = meta[k];
       if (v == null) continue;
       if (typeof v === "object") lines.push(`${k}: ${JSON.stringify(v)}`);
-      else lines.push(`${k}: ${typeof v === "string" ? JSON.stringify(v) : v}`);
+      else if (typeof v === "string") lines.push(`${k}: ${JSON.stringify(v)}`);
+      else if (typeof v === "number" || typeof v === "boolean") lines.push(`${k}: ${String(v)}`);
+      else lines.push(`${k}: ${JSON.stringify(v)}`);
     }
     lines.push("---", "", body || "");
     return lines.join("\n");
@@ -107,7 +118,7 @@ export class PADataStore {
 
   /** Update frontmatter of an existing file in place, preserving body. */
   async patchFrontmatter(file: TFile, mutate: (fm: FM) => void): Promise<void> {
-    await this.app.fileManager.processFrontMatter(file, (fm) => mutate(fm));
+    await this.app.fileManager.processFrontMatter(file, (fm: FM) => mutate(fm));
   }
 
   // ============================================================
@@ -157,7 +168,7 @@ export class PADataStore {
   private boardsFrom(file: TFile | null): Board[] {
     if (!file) return [];
     const m = this.frontmatter(file);
-    const list = coerce<any[]>(m.boards, []);
+    const list = coerce<Array<Record<string, unknown>>>(m.boards, []);
     return list.map((b) => ({ id: str(b.id), name: str(b.name), emoji: b.emoji ? str(b.emoji) : "" }))
       .filter((b) => b.id || b.name);
   }
@@ -194,7 +205,7 @@ export class PADataStore {
           modified: str(m.modified),
           order: (m.order !== undefined && m.order !== null) ? Number(m.order) : undefined,
           path: f.path,
-        } as Task;
+        };
       });
   }
 
@@ -272,7 +283,7 @@ export class PADataStore {
         board: str(m.board),
         date: str(m.date),
         path: f.path,
-      } as Note;
+      };
     });
   }
 
@@ -317,7 +328,7 @@ export class PADataStore {
         lastReset: str(m.lastReset),
         modified: str(m.modified),
         path: f.path,
-      } as Habit;
+      };
     });
   }
 
@@ -370,7 +381,7 @@ export class PADataStore {
   loadSplits(): Split[] {
     const f = this.fileAt("Fitness/splits.md");
     if (!f) return [];
-    const list = coerce<any[]>(this.frontmatter(f).splits, []);
+    const list = coerce<Array<Record<string, unknown>>>(this.frontmatter(f).splits, []);
     return list.map((s) => ({ id: str(s.id), name: str(s.name) })).filter((s) => s.id);
   }
 
@@ -386,7 +397,7 @@ export class PADataStore {
         weight: num(m.weight),
         howto: str(m.howto),
         path: f.path,
-      } as Exercise;
+      };
     });
   }
 
@@ -400,7 +411,7 @@ export class PADataStore {
         duration: num(m.duration),
         exercises: coerce<WorkoutExercise[]>(m.exercises, []),
         path: f.path,
-      } as Workout;
+      };
     }).filter((w) => w.date);
   }
 
@@ -494,7 +505,7 @@ export class PADataStore {
           modified: str(m.modified),
           order: (m.order !== undefined && m.order !== null) ? Number(m.order) : undefined,
           path: f.path,
-        } as StudyCard;
+        };
       });
   }
 
@@ -590,7 +601,7 @@ export class PADataStore {
         totalCal: num(m.total_cal),
         items: coerce<MealItem[]>(m.items, []),
         path: f.path,
-      } as Meal;
+      };
     });
   }
 
@@ -606,7 +617,7 @@ export class PADataStore {
         totalCarbs: num(m.carbs),
         items: coerce<MealItem[]>(m.items, []),
         path: f.path,
-      } as MealLog;
+      };
     }).filter((l) => l.date);
   }
 

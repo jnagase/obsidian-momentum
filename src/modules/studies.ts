@@ -91,7 +91,7 @@ export class StudiesModule {
     };
     mkTab("all", "📚 All");
     topics.forEach((b) => mkTab(b.name, `${b.emoji || ""} ${b.name}`.trim()));
-    const add = bar.createEl("button", { text: "+ Topic", cls: "pa-tab pa-tab-add" });
+    const add = bar.createEl("button", { text: "+ topic", cls: "pa-tab pa-tab-add" });
     add.onclick = () => this.openTopicModal(topics);
   }
 
@@ -124,7 +124,7 @@ export class StudiesModule {
     const topic = topics.find((b) => b.name === this.currentTopic);
     bar.createDiv({ text: topic ? `${topic.emoji || ""} ${topic.name}`.trim() : "📚 All topics", cls: "pa-board-title" });
     const actions = bar.createDiv({ cls: "pa-board-actions" });
-    const addCol = actions.createEl("button", { text: "+ Column", cls: "pa-mini-btn" });
+    const addCol = actions.createEl("button", { text: "+ column", cls: "pa-mini-btn" });
     addCol.onclick = () => this.openAddColumnModal();
     if (topic) {
       const kebab = actions.createEl("button", { text: "⋮", cls: "pa-icon-btn" });
@@ -219,7 +219,7 @@ export class StudiesModule {
       };
       list.addEventListener("dragover", (e) => { e.preventDefault(); list.addClass("pa-drop"); });
       list.addEventListener("dragleave", () => list.removeClass("pa-drop"));
-      list.addEventListener("drop", persistDrop);
+      list.addEventListener("drop", (e) => { void persistDrop(e); });
 
       const ord = (c: StudyCard) => (c.order ?? 1e9);
       colCards.sort((a, b) => ord(a) - ord(b) || (a.date || "").localeCompare(b.date || ""));
@@ -232,13 +232,13 @@ export class StudiesModule {
         colCards.slice(7).forEach((c) => this.renderCard(det, c, isDone, topics));
       }
 
-      const addBtn = colEl.createEl("button", { text: "+ Add card", cls: "pa-add-card" });
+      const addBtn = colEl.createEl("button", { text: "+ add card", cls: "pa-add-card" });
       addBtn.onclick = () => this.openCardModal(null, col, topics);
     });
   }
 
   private getDragAfterElement(container: HTMLElement, y: number): HTMLElement | null {
-    const els = Array.from(container.querySelectorAll(".pa-study:not(.pa-dragging)")) as HTMLElement[];
+    const els = Array.from(container.querySelectorAll<HTMLElement>(".pa-study:not(.pa-dragging)"));
     let closest: HTMLElement | null = null;
     let closestOffset = -Infinity;
     for (const el of els) {
@@ -265,7 +265,7 @@ export class StudiesModule {
     menuBtn.onclick = (e) => {
       e.stopPropagation();
       const items: MenuAction[] = [
-        { title: "Open note", icon: "file-text", onClick: () => this.ctx.app.workspace.openLinkText(c.path, "", true) },
+        { title: "Open note", icon: "file-text", onClick: () => { void this.ctx.app.workspace.openLinkText(c.path, "", true); } },
       ];
       if (c.url) items.push({ title: "Open URL", icon: "link", onClick: () => openExternal(c.url!) });
       items.push({ title: "Edit", icon: "pencil", onClick: () => this.openCardModal(c, c.status, topics) });
@@ -277,7 +277,7 @@ export class StudiesModule {
     if (c.date) card.createDiv({ cls: "pa-muted pa-card-meta", text: c.date });
 
     const preview = card.createDiv({ cls: "pa-card-preview" });
-    this.ctx.store.readBody(c.path).then((body) => {
+    void this.ctx.store.readBody(c.path).then((body) => {
       const lines = body.split("\n").map((l) => l.trim()).filter(Boolean).slice(0, 3);
       if (lines.length) preview.setText(lines.join("\n"));
       else preview.remove();

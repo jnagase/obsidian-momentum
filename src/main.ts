@@ -12,7 +12,8 @@ export default class MomentumPlugin extends Plugin implements PAHost {
   currentPage = "habit-tracker";
 
   async onload(): Promise<void> {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    const data = (await this.loadData()) as Partial<PASettings> | null;
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
     setDataRoot(this.settings.dataRoot);
     this.store = new PADataStore(this.app);
 
@@ -21,7 +22,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
 
     this.addCommand({
       id: "open",
-      name: "Open Momentum",
+      name: "Open",
       callback: () => this.activateView(),
     });
 
@@ -31,7 +32,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
     this.app.workspace.onLayoutReady(() => {
       if (this.app.workspace.getLeavesOfType(VIEW_TYPE_PA_NAV).length === 0) {
         const leaf = this.app.workspace.getLeftLeaf(false);
-        leaf?.setViewState({ type: VIEW_TYPE_PA_NAV });
+        void leaf?.setViewState({ type: VIEW_TYPE_PA_NAV });
       }
     });
   }
@@ -44,7 +45,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       navLeaf = workspace.getLeftLeaf(false);
       await navLeaf?.setViewState({ type: VIEW_TYPE_PA_NAV, active: true });
     }
-    if (navLeaf) workspace.revealLeaf(navLeaf);
+    if (navLeaf) void workspace.revealLeaf(navLeaf);
     await this.openPage(this.currentPage);
   }
 
@@ -58,7 +59,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       await leaf.setViewState({ type: VIEW_TYPE_PA, active: true });
     }
     if (leaf.view instanceof PAView) leaf.view.setPage(id);
-    workspace.revealLeaf(leaf);
+    void workspace.revealLeaf(leaf);
     workspace.getLeavesOfType(VIEW_TYPE_PA_NAV).forEach((l) => {
       if (l.view instanceof PANavView) l.view.render();
     });
@@ -83,7 +84,7 @@ class PASettingTab extends PluginSettingTab {
     containerEl.empty();
     new Setting(containerEl)
       .setName("Data root folder")
-      .setDesc("Vault folder that holds Tasks/, Fitness/, Nutrition/, Studies/, Habits/, Config/.")
+      .setDesc("Vault folder that stores all plugin data.")
       .addText((t) =>
         t.setValue(this.plugin.settings.dataRoot).onChange(async (v) => {
           this.plugin.settings.dataRoot = v.trim();
@@ -93,7 +94,7 @@ class PASettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Support")
-      .setDesc("If Momentum is useful to you, you can support its development.")
+      .setDesc("If you find this plugin useful, you can support its development.")
       .addButton((b) =>
         b.setButtonText("Buy me a coffee").setCta().onClick(() => {
           window.open("https://buymeacoffee.com/jnagase", "_blank");

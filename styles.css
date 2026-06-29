@@ -209,6 +209,8 @@
 
 .pa-clickable{cursor:pointer}
 .pa-plan-card.pa-clickable:hover{border-color:var(--text-muted)}
+.pa-textarea-full{width:100%}
+.pa-modal-overflow-visible{overflow:visible}
 
 .pa-editor-title{display:flex;align-items:center;gap:6px}
 .pa-editor-title .pa-panel-title{margin:0}

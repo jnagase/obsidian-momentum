@@ -1,5 +1,5 @@
 import { PAContext } from "../context";
-import { Board, Habit, MealLog, StudyCard, Task, Workout } from "../types";
+import { Board, Habit, StudyCard, Task, Workout } from "../types";
 import { ConfirmModal, FieldSpec, FormModal, toast } from "../ui";
 import { daysBetween, todayLocal, ymd } from "../util";
 import { drawDonut, drawRing } from "../charts";
@@ -167,8 +167,8 @@ export class HabitTrackerModule {
   private renderHabitConsistency(root: HTMLElement, systemHabits: SystemHabit[], habits: Habit[], today: string): void {
     const panel = root.createDiv({ cls: "pa-panel" });
     const head = panel.createDiv({ cls: "pa-section-head" });
-    head.createEl("h3", { text: "📊 Habit Consistency", cls: "pa-panel-title" });
-    const add = head.createEl("button", { text: "+ New Habit", cls: "pa-btn" });
+    head.createEl("h3", { text: "📊 Habit consistency", cls: "pa-panel-title" });
+    const add = head.createEl("button", { text: "+ new habit", cls: "pa-btn" });
     add.onclick = () => this.openHabitModal();
 
     const grid = panel.createDiv({ cls: "pa-habits-grid" });
@@ -244,12 +244,12 @@ export class HabitTrackerModule {
     right.createSpan({ text: isQuit ? `🚭 ${streak}d` : `🔥 ${streak}`, cls: "pa-muted pa-streak" });
 
     if (isQuit) {
-      const reset = right.createEl("button", { text: "↺ Reset", cls: "pa-mini-btn" });
+      const reset = right.createEl("button", { text: "↺ reset", cls: "pa-mini-btn" });
       reset.onclick = async () => { await this.ctx.store.resetHabit(h, today); this.ctx.refresh(); };
     } else {
       const marked = !!h.log[today];
       const mark = right.createEl("button", { text: marked ? "✓ Today" : "Mark today", cls: "pa-mini-btn" + (marked ? " on" : "") });
-      if (marked) { mark.style.background = color; mark.style.color = "#fff"; }
+      if (marked) mark.setCssStyles({ backgroundColor: color, color: "#fff" });
       mark.onclick = async () => { await this.ctx.store.toggleHabit(h, today); this.ctx.refresh(); };
     }
     const del = right.createEl("button", { text: "🗑", cls: "pa-icon-btn" });
@@ -266,7 +266,7 @@ export class HabitTrackerModule {
   private renderStudyProgress(root: HTMLElement, boards: Board[], cards: StudyCard[]): void {
     if (!boards.length) return;
     const panel = root.createDiv({ cls: "pa-panel" });
-    panel.createEl("h3", { text: "📚 Study Progress", cls: "pa-panel-title" });
+    panel.createEl("h3", { text: "📚 Study progress", cls: "pa-panel-title" });
     boards.forEach((b) => {
       const topicCards = cards.filter((c) => c.topic === b.name);
       const done = topicCards.filter((c) => c.status === "done").length;

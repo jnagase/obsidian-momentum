@@ -12,7 +12,7 @@ export interface FoodResult {
 }
 
 // Identify the app per Open Food Facts usage guidelines.
-const USER_AGENT = "Momentum-Obsidian/0.1.1 (github.com/jnagase/obsidian-momentum)";
+const USER_AGENT = "Momentum-Obsidian/0.1.2 (github.com/jnagase/obsidian-momentum)";
 const BASE = "https://world.openfoodfacts.org";
 
 const num = (v: unknown): number => {
@@ -55,7 +55,8 @@ export async function searchFoods(query: string, limit = 20): Promise<FoodResult
   const fields = "product_name,brands,nutriments,serving_size";
   const url = `${BASE}/cgi/search.pl?search_terms=${encodeURIComponent(q)}&search_simple=1&action=process&json=1&page_size=${limit}&fields=${fields}`;
   const res = await requestUrl({ url, headers: { "User-Agent": USER_AGENT } });
-  const products = ((res.json?.products as OFFProduct[]) || []);
+  const data = res.json as { products?: OFFProduct[] };
+  const products = data.products || [];
   const seen = new Set<string>();
   const out: FoodResult[] = [];
   for (const p of products) {
@@ -75,6 +76,7 @@ export async function lookupBarcode(barcode: string): Promise<FoodResult | null>
   if (!code) return null;
   const url = `${BASE}/api/v2/product/${code}.json?fields=product_name,brands,nutriments,serving_size`;
   const res = await requestUrl({ url, headers: { "User-Agent": USER_AGENT } });
-  if (res.json?.status !== 1 || !res.json?.product) return null;
-  return mapProduct(res.json.product as OFFProduct);
+  const data = res.json as { status?: number; product?: OFFProduct };
+  if (data.status !== 1 || !data.product) return null;
+  return mapProduct(data.product);
 }

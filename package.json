@@ -1,21 +1,30 @@
 {
   "name": "obsidian-momentum",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "All-in-one life dashboard for habits, tasks, fitness, nutrition and studies, stored as plain Markdown notes in your vault.",
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
-    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production"
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "lint": "eslint src"
   },
-  "keywords": ["obsidian-plugin"],
+  "keywords": [
+    "obsidian-plugin"
+  ],
   "author": "Jaime Nagase",
   "license": "MIT",
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@eslint/json": "^2.0.0",
     "@types/node": "^20.11.0",
+    "@typescript-eslint/parser": "^8.62.0",
     "builtin-modules": "^3.3.0",
     "esbuild": "0.20.0",
+    "eslint": "^10.6.0",
+    "eslint-plugin-obsidianmd": "^0.3.0",
     "obsidian": "latest",
     "tslib": "^2.6.2",
-    "typescript": "^5.4.0"
+    "typescript": "^5.4.0",
+    "typescript-eslint": "^8.62.0"
   }
 }

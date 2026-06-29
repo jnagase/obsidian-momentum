@@ -6,7 +6,7 @@ import { PANavView, VIEW_TYPE_PA_NAV } from "./nav";
 interface PASettings { dataRoot: string; }
 const DEFAULT_SETTINGS: PASettings = { dataRoot: "Personal Assistant" };
 
-export default class PersonalAssistantPlugin extends Plugin implements PAHost {
+export default class MomentumPlugin extends Plugin implements PAHost {
   settings: PASettings;
   store: PADataStore;
   currentPage = "habit-tracker";
@@ -20,7 +20,7 @@ export default class PersonalAssistantPlugin extends Plugin implements PAHost {
     this.registerView(VIEW_TYPE_PA_NAV, (leaf) => new PANavView(leaf, this));
 
     this.addCommand({
-      id: "open-momentum",
+      id: "open",
       name: "Open Momentum",
       callback: () => this.activateView(),
     });
@@ -73,8 +73,8 @@ export default class PersonalAssistantPlugin extends Plugin implements PAHost {
 }
 
 class PASettingTab extends PluginSettingTab {
-  plugin: PersonalAssistantPlugin;
-  constructor(app: App, plugin: PersonalAssistantPlugin) {
+  plugin: MomentumPlugin;
+  constructor(app: App, plugin: MomentumPlugin) {
     super(app, plugin);
     this.plugin = plugin;
   }

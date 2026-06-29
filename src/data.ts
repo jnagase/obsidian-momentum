@@ -76,7 +76,7 @@ export class PADataStore {
     const full = this.full(path);
     const existing = this.app.vault.getAbstractFileByPath(full);
     if (existing instanceof TFile) {
-      await this.app.vault.modify(existing, content);
+      await this.app.vault.process(existing, () => content);
       return existing;
     }
     await this.ensureFolder(full);

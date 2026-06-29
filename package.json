@@ -1,7 +1,7 @@
 {
   "name": "obsidian-momentum",
   "version": "0.1.1",
-  "description": "Momentum — all-in-one life dashboard for Obsidian (habits, tasks, fitness, nutrition, studies) stored as plain markdown.",
+  "description": "All-in-one life dashboard for habits, tasks, fitness, nutrition and studies, stored as plain Markdown notes in your vault.",
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",

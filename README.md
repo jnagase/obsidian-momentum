@@ -1,8 +1,8 @@
 # Momentum — Obsidian plugin
 
 All-in-one life dashboard for Obsidian: **Habits, Tasks, Fitness, Nutrition and
-Studies** rendered directly from your vault's markdown files. Everything is
-stored as plain markdown under a single folder, so your data stays yours.
+Studies** rendered directly from your vault's Markdown files. Everything is
+stored as plain Markdown under a single folder, so your data stays yours.
 
 ## Why Momentum
 - Reads/writes files locally via the Vault API — no GitHub token, no CORS workarounds.
@@ -15,11 +15,10 @@ stored as plain markdown under a single folder, so your data stays yours.
 | Module | What it does |
 | --- | --- |
 | 🎯 Habit Tracker | Overview dashboard: KPIs, progress rings, donut charts, habit heatmaps, study progress |
-| ✅ Tasks & Notes | Kanban (drag & drop, boards, priorities, columns) + list view |
+| ✅ Tasks & Lists | Kanban (drag & drop, boards, priorities, columns) + list view |
 | 🏋️ Fitness | Workout plans, active workout w/ timer, calendar, weight progress, logging |
-| 🥗 Nutrition | Fixed meal plans, food logging, calorie calendar & trends, water |
+| 🥗 Nutrition | Fixed meal plans, food logging, calorie calendar & trends, water, Open Food Facts search |
 | 📚 Studies | Kanban by topic (drag & drop, subtopics, URLs) + list view |
-| Nutrition | ✅ Macro targets, meal plans, daily logging, weekly calories |
 
 All visualizations use inline SVG (no external libraries / CDN).
 
@@ -30,7 +29,7 @@ All visualizations use inline SVG (no external libraries / CDN).
    `.obsidian/plugins/momentum/` (must contain `manifest.json`,
    `main.js`, `styles.css`).
 4. In Obsidian: Settings → Community plugins → enable "Momentum".
-5. Open via the command palette → "Open Personal Assistant" (panel in the left sidebar).
+5. Open via the command palette → "Momentum: Open" (panel in the left sidebar).
 
 ## Network use & privacy
 Momentum works fully offline. The only time it reaches the internet is when you
@@ -48,7 +47,7 @@ Expected subfolders: `Tasks/`, `Notes/`, `Fitness/Exercises`, `Fitness/Workouts`
 `Nutrition/Plan`, `Nutrition/Logs`, `Studies/`, `Habits/`, `Config/settings.md`.
 
 ## Markdown schema
-The plugin is file-compatible with the web app. Examples:
+Each module reads and writes plain Markdown notes with YAML frontmatter. Examples:
 
 ```yaml
 # Tasks/<title>.md
@@ -90,7 +89,7 @@ type: note
 ## Publishing to the community store
 1. Push to a public GitHub repo.
 2. Tag a release matching `manifest.json` `version` (no `v` prefix), e.g.
-   `git tag 0.1.0 && git push origin 0.1.0`. The GitHub Action attaches
+   `git tag 0.1.1 && git push origin 0.1.1`. The GitHub Action attaches
    `main.js`, `manifest.json` and `styles.css` to the release.
 3. Submit a PR adding this plugin to
    [`obsidianmd/obsidian-releases`](https://github.com/obsidianmd/obsidian-releases)

@@ -1,6 +1,6 @@
 import { PAContext } from "../context";
 import { Meal, MealItem, MealLog } from "../types";
-import { toast } from "../ui";
+import { ConfirmModal, toast } from "../ui";
 import { todayLocal, ymd } from "../util";
 import { drawRing, drawLineChart } from "../charts";
 import { searchFoods, FoodResult } from "../foodapi";
@@ -157,15 +157,18 @@ export class NutritionModule {
     };
     const targetMeal = () => meals.find((m) => m.id === this.addForm.meal)!;
 
-    const toToday = row.createEl("button", { text: "+ add to today", cls: "pa-btn" });
-    toToday.onclick = async () => {
+    const today = todayLocal();
+    const targetDate = this.selectedDate && this.selectedDate !== today ? this.selectedDate : today;
+    const isPast = targetDate !== today;
+    const toDay = row.createEl("button", { text: isPast ? `+ add to ${targetDate}` : "+ add to today", cls: "pa-btn" });
+    toDay.onclick = async () => {
       const item = buildItem();
       if (!item) return;
-      await this.ctx.store.logMeal(targetMeal(), [item]);
+      await this.ctx.store.logMeal(targetMeal(), [item], targetDate);
       this.resetAddForm();
-      this.selectedDate = todayLocal();
+      this.selectedDate = targetDate;
       this.ctx.refresh();
-      toast(`Logged ${item.name} to ${targetMeal().name}`);
+      toast(`Logged ${item.name} to ${targetMeal().name}${isPast ? ` (${targetDate})` : ""}`);
     };
     const toPlan = row.createEl("button", { text: "+ add to plan", cls: "pa-mini-btn" });
     toPlan.onclick = async () => {
@@ -364,9 +367,11 @@ export class NutritionModule {
         const color = pct >= 80 && pct <= 110 ? "#16a34a" : pct > 110 ? "#ef4444" : "#f59e0b";
         cell.setCssStyles({ backgroundColor: color, color: "#fff" });
         cell.createDiv({ text: String(cal), cls: "pa-cal-tag" });
-        cell.onclick = () => { this.selectedDate = ds; this.ctx.refresh(); };
       }
+      cell.addClass("pa-clickable");
+      cell.onclick = () => { this.selectedDate = ds; this.ctx.refresh(); };
       if (ds === today) cell.addClass("today");
+      if (ds === this.selectedDate) cell.addClass("selected");
     }
     const legend = card.createDiv({ cls: "pa-cal-legend" });
     [["#f59e0b", "<80%"], ["#16a34a", "80-110%"], ["#ef4444", ">110%"]].forEach(([c, l]) => {
@@ -400,17 +405,26 @@ export class NutritionModule {
     const panel = root.createDiv({ cls: "pa-panel pa-active" });
     const top = panel.createDiv({ cls: "pa-active-top" });
     top.createEl("h3", { text: `🍴 ${ds} — ${total} cal`, cls: "pa-panel-title" });
-    const close = top.createEl("button", { text: "✕", cls: "pa-icon-btn" });
+    const headActions = top.createDiv({ cls: "pa-active-actions" });
+    if (dayLogs.length) {
+      const delDay = headActions.createEl("button", { text: "🗑", cls: "pa-icon-btn" });
+      delDay.setAttr("aria-label", "Delete this day's meal logs");
+      delDay.onclick = () => new ConfirmModal(this.ctx.app, `Delete all ${dayLogs.length} meal log${dayLogs.length === 1 ? "" : "s"} for ${ds}?`, async () => {
+        for (const l of dayLogs) await this.ctx.store.deleteMealLog(l);
+        this.selectedDate = null;
+        this.ctx.refresh();
+      }).open();
+    }
+    const close = headActions.createEl("button", { text: "✕", cls: "pa-icon-btn" });
+    close.setAttr("aria-label", "Close");
     close.onclick = () => { this.selectedDate = null; this.ctx.refresh(); };
 
-    if (!dayLogs.length) { panel.createEl("p", { cls: "pa-muted", text: "No meals logged this day." }); return; }
+    if (!dayLogs.length) { panel.createEl("p", { cls: "pa-muted", text: "No meals logged this day. Use the \u201cadd a food\u201d bar above to log food for this date." }); return; }
     dayLogs.forEach((l) => {
       const meal = meals.find((m) => m.id === l.mealId);
       const card = panel.createDiv({ cls: "pa-card" });
       const tr = card.createDiv({ cls: "pa-card-title-row" });
       tr.createEl("strong", { text: meal ? `${meal.emoji || ""} ${meal.name}` : l.mealId || "Meal" });
-      const del = tr.createEl("button", { text: "✕", cls: "pa-icon-btn" });
-      del.onclick = async () => { await this.ctx.store.deleteMealLog(l); this.ctx.refresh(); };
       l.items.forEach((it) => card.createDiv({ cls: "pa-muted", text: `${it.name} — ${it.qty}${it.unit} (${it.cal} cal)` }));
       card.createDiv({ cls: "pa-macro-total", text: `Total: ${l.totalCal} cal` });
     });

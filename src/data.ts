@@ -455,8 +455,7 @@ export class PADataStore {
     await this.writeFile("Fitness/splits.md", this.buildDoc({ type: "splits-config", splits }, "# Workout Splits\n"));
   }
 
-  async logWorkout(splitId: string, duration: number, exercises: WorkoutExercise[]): Promise<void> {
-    const date = todayLocal();
+  async logWorkout(splitId: string, duration: number, exercises: WorkoutExercise[], date: string = todayLocal()): Promise<void> {
     const now = new Date();
     const time = String(now.getHours()).padStart(2, "0") + String(now.getMinutes()).padStart(2, "0");
     const meta: FM = {
@@ -642,8 +641,7 @@ export class PADataStore {
     if (f instanceof TFile) await this.removeFile(f);
   }
 
-  async logMeal(meal: Meal, items: MealItem[]): Promise<void> {
-    const date = todayLocal();
+  async logMeal(meal: Meal, items: MealItem[], date: string = todayLocal()): Promise<void> {
     const now = new Date();
     const time = String(now.getHours()).padStart(2, "0") + String(now.getMinutes()).padStart(2, "0");
     const totalCal = items.reduce((s, it) => s + (Number(it.cal) || 0), 0);

@@ -95,7 +95,8 @@
 .pa-cal-cell{aspect-ratio:1;display:flex;align-items:center;justify-content:center;font-size:.7rem;border-radius:6px;background:var(--background-primary);color:var(--text-muted)}
 .pa-cal-cell.empty{background:none}
 .pa-cal-cell.worked{background:var(--interactive-accent);color:var(--text-on-accent);font-weight:600}
-.pa-cal-cell.today{outline:2px solid var(--text-accent)}
+.pa-cal-cell.today{outline:1px dashed var(--text-muted);outline-offset:-2px}
+.pa-cal-cell.today .pa-cal-day{font-weight:800}
 
 /* ===== Training plan ===== */
 .pa-splits-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px}
@@ -193,7 +194,7 @@
 .pa-cal-day{font-size:.7rem}
 .pa-cal-tag{font-size:.55rem;font-weight:700;line-height:1}
 .pa-cal-cell.worked{background:var(--interactive-accent);color:var(--text-on-accent);cursor:pointer}
-.pa-cal-cell.selected{outline:2px solid var(--text-accent)}
+.pa-cal-cell.selected{outline:2px solid var(--interactive-accent);outline-offset:-2px}
 .pa-cal-legend{display:flex;gap:12px;justify-content:center;margin-top:8px}
 
 /* Add food bar */
@@ -208,6 +209,7 @@
 .pa-food-result-macros{font-size:.72rem;margin-top:2px}
 
 .pa-clickable{cursor:pointer}
+.pa-cal-cell.pa-clickable:not(.worked):not(.selected):hover{background:var(--background-modifier-hover)}
 .pa-plan-card.pa-clickable:hover{border-color:var(--text-muted)}
 .pa-textarea-full{width:100%}
 .pa-modal-overflow-visible{overflow:visible}
@@ -279,9 +281,12 @@
 .pa-btn:hover{background:var(--interactive-accent-hover);filter:none}
 
 /* active/selected states use the accent tint */
-.pa-nav.active,.pa-tab.on,.pa-toggle-btn.on{color:var(--text-on-accent)}
-.pa-tab.on,.pa-toggle-btn.on{background:var(--interactive-accent)}
-.pa-nav.active{background:var(--pa-hover-strong);color:var(--interactive-accent)}
+.pa-root.pa-root .pa-nav.active,
+.pa-root.pa-root .pa-tab.on,
+.pa-root.pa-root .pa-toggle-btn.on{color:var(--text-on-accent)}
+.pa-root.pa-root .pa-tab.on,
+.pa-root.pa-root .pa-toggle-btn.on{background:var(--interactive-accent)}
+.pa-root.pa-root .pa-nav.active{background:var(--pa-hover-strong);color:var(--interactive-accent)}
 .pa-plan-card.on,.pa-list-card:focus-within{border-color:var(--interactive-accent);box-shadow:0 0 0 1px var(--interactive-accent)}
 
 /* worked calendar day on hover */

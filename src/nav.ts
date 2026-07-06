@@ -13,6 +13,7 @@ export class PANavView extends ItemView {
   }
 
   getViewType(): string { return VIEW_TYPE_PA_NAV; }
+  // eslint-disable-next-line obsidianmd/ui/sentence-case -- "Momentum Life" is the plugin's proper name
   getDisplayText(): string { return "Momentum Life"; }
   getIcon(): string { return "target"; }
 

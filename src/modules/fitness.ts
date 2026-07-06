@@ -163,8 +163,9 @@ export class FitnessModule {
       if (sp && sp.length) {
         cell.addClass("worked");
         cell.createDiv({ text: sp.join(" "), cls: "pa-cal-tag" });
-        cell.onclick = () => { this.selectedDate = ds; this.ctx.refresh(); };
       }
+      cell.addClass("pa-clickable");
+      cell.onclick = () => { this.selectedDate = ds; this.ctx.refresh(); };
       if (ds === today) cell.addClass("today");
       if (ds === this.selectedDate) cell.addClass("selected");
     }
@@ -201,10 +202,21 @@ export class FitnessModule {
     const panel = root.createDiv({ cls: "pa-panel pa-active" });
     const top = panel.createDiv({ cls: "pa-active-top" });
     top.createEl("h3", { text: `🏋️ ${ds} — ${dayWorkouts.length} workout${dayWorkouts.length === 1 ? "" : "s"}`, cls: "pa-panel-title" });
-    const close = top.createEl("button", { text: "✕", cls: "pa-icon-btn" });
+    const headActions = top.createDiv({ cls: "pa-active-actions" });
+    if (dayWorkouts.length) {
+      const delDay = headActions.createEl("button", { text: "🗑", cls: "pa-icon-btn" });
+      delDay.setAttr("aria-label", "Delete this day's workout logs");
+      delDay.onclick = () => new ConfirmModal(this.ctx.app, `Delete all ${dayWorkouts.length} workout log${dayWorkouts.length === 1 ? "" : "s"} for ${ds}?`, async () => {
+        for (const w of dayWorkouts) await this.ctx.store.deleteWorkout(w);
+        this.selectedDate = null;
+        this.ctx.refresh();
+      }).open();
+    }
+    const close = headActions.createEl("button", { text: "✕", cls: "pa-icon-btn" });
+    close.setAttr("aria-label", "Close");
     close.onclick = () => { this.selectedDate = null; this.ctx.refresh(); };
 
-    if (!dayWorkouts.length) { panel.createEl("p", { cls: "pa-muted", text: "No workouts logged this day." }); return; }
+    if (!dayWorkouts.length) { panel.createEl("p", { cls: "pa-muted", text: "No workouts logged this day. Tap a workout card in the plan above to log one for this date." }); return; }
     dayWorkouts.forEach((w) => this.renderLoggedWorkout(panel, w));
   }
 
@@ -213,9 +225,6 @@ export class FitnessModule {
     const card = panel.createDiv({ cls: "pa-card" });
     const head = card.createDiv({ cls: "pa-card-title-row" });
     head.createEl("strong", { text: `${w.split} - ${split?.name || ""} · ${w.duration}min` });
-    const del = head.createEl("button", { text: "✕", cls: "pa-icon-btn" });
-    del.onclick = () =>
-      new ConfirmModal(this.ctx.app, `Delete this ${w.split} workout log?`, async () => { await this.ctx.store.deleteWorkout(w); this.ctx.refresh(); }).open();
 
     if (!w.exercises.length) { card.createEl("p", { cls: "pa-muted", text: "No exercises." }); return; }
     const table = card.createEl("table", { cls: "pa-fit-table" });
@@ -281,14 +290,20 @@ export class FitnessModule {
       const finish = actions.createEl("button", { text: "✅ Finish workout", cls: "pa-btn" });
       finish.onclick = () => this.finishWorkout(splitId, exs, panel);
     } else {
-      const start = actions.createEl("button", { text: "▶ Start workout", cls: "pa-btn" });
-      start.onclick = async () => {
-        await this.persistRowEdits(exs, panel); // keep edits before timing begins
-        this.workoutActive = true;
-        this.startTime = Date.now();
-        this.checked.clear();
-        this.ctx.refresh();
-      };
+      const past = this.selectedDate && this.selectedDate !== todayLocal() ? this.selectedDate : null;
+      if (past) {
+        const logPast = actions.createEl("button", { text: `✔ Log for ${past}`, cls: "pa-btn" });
+        logPast.onclick = () => this.logWorkoutForDate(splitId, exs, panel, past);
+      } else {
+        const start = actions.createEl("button", { text: "▶ Start workout", cls: "pa-btn" });
+        start.onclick = async () => {
+          await this.persistRowEdits(exs, panel); // keep edits before timing begins
+          this.workoutActive = true;
+          this.startTime = Date.now();
+          this.checked.clear();
+          this.ctx.refresh();
+        };
+      }
       const addEx = actions.createEl("button", { text: "+ exercise", cls: "pa-mini-btn" });
       addEx.onclick = () => this.openExerciseModal(null);
       const save = actions.createEl("button", { text: "💾 Save changes", cls: "pa-mini-btn" });
@@ -370,6 +385,24 @@ export class FitnessModule {
     this.selectedDate = todayLocal(); // show the just-logged workout as a log at the bottom
     this.ctx.refresh();
     toast(`💪 Workout logged (${logged.length} exercises, ${duration}min)`);
+  }
+
+  /** Log the editor's workout (with current row weights/sets) to a specific date, no live timer. */
+  private async logWorkoutForDate(splitId: string, exs: Exercise[], panel: HTMLElement, date: string): Promise<void> {
+    await this.persistRowEdits(exs, panel);
+    const logged: WorkoutExercise[] = exs.map((ex) => {
+      const wInput = panel.querySelector<HTMLInputElement>(`input.pa-weight-input[data-ex="${CSS.escape(ex.name)}"]`);
+      const sInput = panel.querySelector<HTMLInputElement>(`input.pa-sets-input[data-ex="${CSS.escape(ex.name)}"]`);
+      const newWeight = wInput ? parseFloat(wInput.value) || 0 : ex.weight;
+      const newSets = sInput ? (sInput.value.trim() || ex.sets) : ex.sets;
+      return { exercise: ex.name, weight: newWeight, sets: newSets, feel: "good", oldWeight: ex.weight };
+    });
+    if (!logged.length) { toast("This workout has no exercises to log."); return; }
+    await this.ctx.store.logWorkout(splitId, 0, logged, date);
+    this.endWorkout();
+    this.selectedDate = date;
+    this.ctx.refresh();
+    toast(`💪 ${splitId} logged for ${date}`);
   }
 
   // ---- Modals ----

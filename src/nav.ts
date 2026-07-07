@@ -6,15 +6,16 @@ export const VIEW_TYPE_PA_NAV = "personal-assistant-nav";
 /** Left-sidebar navigation panel that drives the main content view. */
 export class PANavView extends ItemView {
   private host: PAHost;
+  private displayName: string;
 
-  constructor(leaf: WorkspaceLeaf, host: PAHost) {
+  constructor(leaf: WorkspaceLeaf, host: PAHost, displayName: string) {
     super(leaf);
     this.host = host;
+    this.displayName = displayName;
   }
 
   getViewType(): string { return VIEW_TYPE_PA_NAV; }
-  // eslint-disable-next-line obsidianmd/ui/sentence-case -- "Momentum Life" is the plugin's proper name
-  getDisplayText(): string { return "Momentum Life"; }
+  getDisplayText(): string { return this.displayName; }
   getIcon(): string { return "target"; }
 
   async onOpen(): Promise<void> { this.render(); }
@@ -24,7 +25,7 @@ export class PANavView extends ItemView {
     const root = this.contentEl;
     root.empty();
     root.addClass("pa-root", "pa-nav-root");
-    root.createDiv({ text: "🎯 Momentum Life", cls: "pa-logo" });
+    root.createDiv({ text: `🎯 ${this.displayName}`, cls: "pa-logo" });
     PAGES.forEach((p) => {
       const btn = root.createEl("button", {
         text: p.label,

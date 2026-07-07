@@ -18,7 +18,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
     this.store = new PADataStore(this.app);
 
     this.registerView(VIEW_TYPE_PA, (leaf) => new PAView(leaf, this.store, this));
-    this.registerView(VIEW_TYPE_PA_NAV, (leaf) => new PANavView(leaf, this));
+    this.registerView(VIEW_TYPE_PA_NAV, (leaf) => new PANavView(leaf, this, this.manifest.name));
 
     this.addCommand({
       id: "open",

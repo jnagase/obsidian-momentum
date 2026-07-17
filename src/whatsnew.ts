@@ -11,13 +11,13 @@ export const CHANGELOG: ChangeEntry[] = [
       {
         title: "Fixed",
         items: [
-          "Duplicated dashboard entries in the sidebar are now removed automatically on startup (they could pile up when the workspace synced between desktop and mobile).",
+          "Duplicated dashboard panels in the sidebar are now removed automatically on startup. They could pile up when the workspace synced between desktop and mobile; the plugin now keeps a single panel of each type.",
         ],
       },
       {
         title: "New",
         items: [
-          "This dialog. After every update you'll see a short summary of what changed since you last opened the plugin.",
+          "This dialog. After every update you'll see a short summary of what changed since the last version you opened.",
         ],
       },
     ],
@@ -26,26 +26,48 @@ export const CHANGELOG: ChangeEntry[] = [
     version: "0.1.8",
     sections: [
       {
-        title: "New",
+        title: "New — personal finances",
         items: [
-          "Personal Finances module: ledger with monthly income, expenses and balance, a category donut, a 6-month trend, and an add bar with a date field.",
-          "Recurring costs organized as a month made of collapsible weeks; apply a single week or the whole month at once, with starter templates to begin.",
-          "Currency selector in settings that updates the whole dashboard live.",
-          "AI assistant side panel with multiple providers (Gemini, Claude, Grok, OpenAI-compatible) plus an optional desktop-only local command.",
-          "The AI can propose changes to your data (create/complete/delete a task, add a transaction or a recurring cost) and always asks you to confirm before applying.",
-          "Two-way sync between task boards and Markdown checkbox lists, so other plugins can read and edit the same tasks.",
+          "A full finances module with a ledger and monthly stats: income, expenses and balance.",
+          "A category donut (with currency values and a compact center label such as R$8.4k or R$1.2M) and a 6-month trend chart.",
+          "An add-transaction bar with a date field, month navigation, and a settings gear.",
+          "Recurring costs organized as a month made of weeks (week 1: days 1–7 … week 4: 22–end). Weeks are collapsible and collapsed by default, each showing an income, expense and net summary.",
+          "Apply a single week or the whole month of recurring items at once, plus starter templates on the empty state to get going fast.",
+          "A currency selector in the main plugin settings that updates the whole dashboard live.",
+        ],
+      },
+      {
+        title: "New — AI assistant",
+        items: [
+          "A right-sidebar chat panel (ribbon icon plus an \"open AI assistant\" command) that reads a snapshot of your data to give grounded answers.",
+          "Multiple providers: Google Gemini, Anthropic Claude, xAI Grok, and any OpenAI-compatible endpoint, with an optional desktop-only local command.",
+          "Settings show only the fields each provider needs, and API mode and local mode are mutually exclusive.",
+          "The assistant can propose changes to your data (create, complete or delete a task, add a transaction, or add a recurring cost) and always shows a confirmation before anything is applied.",
+        ],
+      },
+      {
+        title: "New — tasks as Markdown lists",
+        items: [
+          "Each board mirrors to a Markdown checkbox list, so other plugins (for example Hearth) can read and edit the same tasks.",
+          "Board changes update the list and editing the list updates the board, guarded so there is no sync loop.",
         ],
       },
       {
         title: "Improved",
         items: [
-          "Fitness and Nutrition calendars are fully clickable to log on past dates, with a per-day delete and clearer selected-day states.",
+          "Fitness and Nutrition calendars are fully clickable, so you can log workouts and meals on past dates directly.",
+          "A per-day delete in the day-detail header for both Fitness and Nutrition.",
+          "Clearer calendar states (today, selected and hover) so the selected day is never ambiguous.",
+          "The data folder now defaults to the plugin name; existing installs keep their previous folder automatically.",
         ],
       },
       {
         title: "Fixed",
         items: [
-          "Entries logged close together could overwrite each other; currency changes now apply to existing data; meal-plan edits no longer land in the wrong meal; task board labels no longer vanish when navigating.",
+          "Entries logged close together could overwrite each other; each file now gets a unique name.",
+          "Currency changes now apply to data you already entered instead of showing raw numbers.",
+          "Meal-plan edits no longer land in the wrong meal (for example dinner edits showing up in lunch).",
+          "Task board labels no longer disappear when navigating between boards, kanban and lists.",
         ],
       },
     ],

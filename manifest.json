@@ -1,7 +1,7 @@
 {
   "id": "momentum-life",
   "name": "Momentum Life",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "minAppVersion": "1.7.2",
   "description": "All-in-one life dashboard for habits, tasks, fitness, nutrition and studies, stored as plain Markdown notes in your vault.",
   "author": "Jaime Nagase",

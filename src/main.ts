@@ -1,30 +1,51 @@
-import { Plugin, WorkspaceLeaf, PluginSettingTab, App, Setting } from "obsidian";
+import { Plugin, WorkspaceLeaf, PluginSettingTab, App, Setting, TFolder, TFile, Platform } from "obsidian";
 import { PADataStore, setDataRoot } from "./data";
 import { PAView, VIEW_TYPE_PA, PAHost } from "./view";
 import { PANavView, VIEW_TYPE_PA_NAV } from "./nav";
+import { MomentumAIView, VIEW_TYPE_MOMENTUM_AI, AIHost } from "./aiview";
+import { AIConfig, DEFAULT_MODELS } from "./ai";
 
-interface PASettings { dataRoot: string; }
-const DEFAULT_SETTINGS: PASettings = { dataRoot: "Personal Assistant" };
+interface PASettings { dataRoot: string; aiProvider: string; aiApiKey: string; aiModel: string; aiBaseUrl: string; aiCommand: string; aiCommandArgs: string; }
+const DEFAULT_SETTINGS: PASettings = { dataRoot: "Momentum Life", aiProvider: "gemini", aiApiKey: "", aiModel: "gemini-3.5-flash", aiBaseUrl: "", aiCommand: "", aiCommandArgs: "" };
+const LEGACY_DATA_ROOT = "Personal Assistant";
 
-export default class MomentumPlugin extends Plugin implements PAHost {
+export default class MomentumPlugin extends Plugin implements PAHost, AIHost {
   settings: PASettings;
   store: PADataStore;
   currentPage = "habit-tracker";
 
   async onload(): Promise<void> {
-    const data = (await this.loadData()) as Partial<PASettings> | null;
+    const data = (await this.loadData()) as (Partial<PASettings> & { geminiApiKey?: string }) | null;
     this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
+    // Migrate the earlier Gemini-only key field to the generic AI key.
+    if (data?.geminiApiKey && !this.settings.aiApiKey) this.settings.aiApiKey = data.geminiApiKey;
+    // Legacy safety: if the user never chose a folder and the new default doesn't
+    // exist yet but a legacy "Personal Assistant" folder does, keep using it.
+    if (!data || !data.dataRoot) {
+      const hasNew = this.app.vault.getAbstractFileByPath(this.settings.dataRoot) instanceof TFolder;
+      const hasLegacy = this.app.vault.getAbstractFileByPath(LEGACY_DATA_ROOT) instanceof TFolder;
+      if (!hasNew && hasLegacy) this.settings.dataRoot = LEGACY_DATA_ROOT;
+    }
     setDataRoot(this.settings.dataRoot);
     this.store = new PADataStore(this.app);
 
     this.registerView(VIEW_TYPE_PA, (leaf) => new PAView(leaf, this.store, this));
     this.registerView(VIEW_TYPE_PA_NAV, (leaf) => new PANavView(leaf, this, this.manifest.name));
+    this.registerView(VIEW_TYPE_MOMENTUM_AI, (leaf) => new MomentumAIView(leaf, this));
 
     this.addCommand({
       id: "open",
       name: "Open",
       callback: () => this.activateView(),
     });
+
+    this.addCommand({
+      id: "open-ai",
+      name: "Open AI assistant",
+      callback: () => this.activateAIView(),
+    });
+
+    this.addRibbonIcon("bot", "Momentum AI", () => this.activateAIView());
 
     this.addSettingTab(new PASettingTab(this.app, this));
 
@@ -34,7 +55,43 @@ export default class MomentumPlugin extends Plugin implements PAHost {
         const leaf = this.app.workspace.getLeftLeaf(false);
         void leaf?.setViewState({ type: VIEW_TYPE_PA_NAV });
       }
+      void this.store.syncTaskLists();
     });
+
+    // When a task-list mirror file is edited (e.g. a checkbox toggled from another
+    // plugin), reflect the done/undone change back into the board tasks.
+    this.registerEvent(this.app.vault.on("modify", (file) => {
+      if (!(file instanceof TFile)) return;
+      const listsPrefix = this.store.full("Tasks/Lists") + "/";
+      if (!file.path.startsWith(listsPrefix)) return;
+      void (async () => {
+        const changed = await this.store.applyTaskListFile(file);
+        if (changed) await this.store.syncTaskLists();
+      })();
+    }));
+  }
+
+  // ---- AIHost ----
+  getAIConfig(): AIConfig {
+    return {
+      provider: this.settings.aiProvider || "gemini",
+      apiKey: this.settings.aiApiKey || "",
+      model: this.settings.aiModel || "",
+      baseUrl: this.settings.aiBaseUrl || "",
+      command: this.settings.aiCommand || "",
+      args: this.settings.aiCommandArgs || "",
+    };
+  }
+
+  /** Open the AI chat panel in the right sidebar. */
+  async activateAIView(): Promise<void> {
+    const { workspace } = this.app;
+    let leaf: WorkspaceLeaf | null = workspace.getLeavesOfType(VIEW_TYPE_MOMENTUM_AI)[0] ?? null;
+    if (!leaf) {
+      leaf = workspace.getRightLeaf(false);
+      await leaf?.setViewState({ type: VIEW_TYPE_MOMENTUM_AI, active: true });
+    }
+    if (leaf) void workspace.revealLeaf(leaf);
   }
 
   /** Open the nav panel in the left sidebar and the content in the main area. */
@@ -91,6 +148,103 @@ class PASettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         })
       );
+
+    new Setting(containerEl).setName("Finances").setHeading();
+
+    new Setting(containerEl)
+      .setName("Currency")
+      .setDesc("Currency symbol shown across the finances module.")
+      .addDropdown((d) => {
+        d.addOption("R$", "R$ — real");
+        d.addOption("$", "$ — dollar");
+        d.addOption("€", "€ — euro");
+        d.addOption("£", "£ — pound");
+        d.addOption("¥", "¥ — yen");
+        d.addOption("₹", "₹ — rupee");
+        d.addOption("C$", "C$ — canadian dollar");
+        d.addOption("A$", "A$ — australian dollar");
+        void this.plugin.store.loadConfig().then((cfg) => { if (cfg.currency) d.setValue(cfg.currency); });
+        d.onChange(async (v) => {
+          const c = await this.plugin.store.loadConfig();
+          c.currency = v;
+          await this.plugin.store.saveConfig(c);
+        });
+      });
+
+    new Setting(containerEl).setName("AI assistant").setHeading();
+
+    const providerSetting = new Setting(containerEl)
+      .setName("Provider")
+      .setDesc("Which AI service to use. Bring your own API key. The chat only contacts the selected provider when you send a message, with a short summary of your dashboard data. No telemetry is collected.");
+
+    const providerFields = containerEl.createDiv();
+
+    const renderProviderFields = () => {
+      providerFields.empty();
+      const p = this.plugin.settings.aiProvider;
+
+      if (p === "local") {
+        if (!Platform.isDesktopApp) {
+          providerFields.createEl("p", { cls: "setting-item-description", text: "The local command option is only available on desktop." });
+          return;
+        }
+        new Setting(providerFields)
+          .setName("Command")
+          .setDesc("Full path to a local CLI binary to run. Runs on your machine, desktop only.")
+          .addText((t) =>
+            t.setValue(this.plugin.settings.aiCommand).onChange(async (v) => { this.plugin.settings.aiCommand = v.trim(); await this.plugin.saveSettings(); })
+          );
+        new Setting(providerFields)
+          .setName("Command arguments")
+          .setDesc("Arguments separated by spaces. Use {prompt} to pass the prompt as an argument; leave it out to send the prompt on standard input.")
+          .addText((t) =>
+            t.setValue(this.plugin.settings.aiCommandArgs).onChange(async (v) => { this.plugin.settings.aiCommandArgs = v; await this.plugin.saveSettings(); })
+          );
+        return;
+      }
+
+      new Setting(providerFields)
+        .setName("API key")
+        .setDesc("Your own API key for the selected provider.")
+        .addText((t) => {
+          t.inputEl.type = "password";
+          t.setPlaceholder("Paste your key here")
+            .setValue(this.plugin.settings.aiApiKey)
+            .onChange(async (v) => { this.plugin.settings.aiApiKey = v.trim(); await this.plugin.saveSettings(); });
+        });
+
+      new Setting(providerFields)
+        .setName("Model")
+        .setDesc("Model ID for the selected provider. Change it if the default is not available to you.")
+        .addText((t) =>
+          t.setValue(this.plugin.settings.aiModel).onChange(async (v) => { this.plugin.settings.aiModel = v.trim(); await this.plugin.saveSettings(); })
+        );
+
+      if (p === "openai") {
+        new Setting(providerFields)
+          .setName("Base URL")
+          .setDesc("Endpoint for the OpenAI-compatible option. Leave empty to use the default.")
+          .addText((t) =>
+            t.setValue(this.plugin.settings.aiBaseUrl).onChange(async (v) => { this.plugin.settings.aiBaseUrl = v.trim(); await this.plugin.saveSettings(); })
+          );
+      }
+    };
+
+    providerSetting.addDropdown((d) => {
+      d.addOption("gemini", "Gemini (Google)");
+      d.addOption("anthropic", "Claude (Anthropic)");
+      d.addOption("xai", "Grok");
+      d.addOption("openai", "OpenAI-compatible (custom)");
+      if (Platform.isDesktopApp) d.addOption("local", "Local command (desktop, personal)");
+      d.setValue(this.plugin.settings.aiProvider).onChange(async (v) => {
+        this.plugin.settings.aiProvider = v;
+        if (v !== "local") this.plugin.settings.aiModel = DEFAULT_MODELS[v] || this.plugin.settings.aiModel;
+        await this.plugin.saveSettings();
+        renderProviderFields();
+      });
+    });
+
+    renderProviderFields();
 
     new Setting(containerEl)
       .setName("Support")

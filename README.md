@@ -11,7 +11,7 @@ stored as plain Markdown under a single folder, so your data stays yours.
 - Frontmatter parsing handled by Obsidian's metadata cache.
 - Cross-device sync handled by Obsidian Sync / iCloud / git.
 - Renders with Obsidian's DOM API and theme variables (no remote code, no CDN).
-- One optional network call: the Nutrition food search (see [Network use & privacy](#network-use--privacy)).
+- Optional network use only: the Nutrition food search and the AI assistant (see [Network use & privacy](#network-use--privacy)).
 
 ## Modules
 | Module | What it does |
@@ -21,6 +21,8 @@ stored as plain Markdown under a single folder, so your data stays yours.
 | 🏋️ Fitness | Workout plans, active workout w/ timer, calendar, weight progress, logging |
 | 🥗 Nutrition | Fixed meal plans, food logging, calorie calendar & trends, water, Open Food Facts search |
 | 📚 Studies | Kanban by topic (drag & drop, subtopics, URLs) + list view |
+| 💰 Finances | Income/expense ledger, monthly summaries, category breakdown, recurring templates (monthly & weekly) |
+| 🤖 AI assistant | Optional chat panel that answers about your data — bring your own API key or local tool |
 
 All visualizations use inline SVG (no external libraries / CDN).
 
@@ -33,20 +35,48 @@ All visualizations use inline SVG (no external libraries / CDN).
 4. In Obsidian: Settings → Community plugins → enable "Momentum Life".
 5. Open via the command palette → "Momentum Life: Open" (panel in the left sidebar).
 
+## AI assistant
+Momentum Life ships an optional chat panel (open it from the ribbon 🤖 or the
+command "Open AI assistant") that answers questions about your dashboard data.
+You bring your own key or tool — nothing is bundled. It works in two modes:
+
+**1. Cloud providers (desktop + mobile).** Pick a provider and paste your own API
+key in Settings → Momentum Life → AI assistant. Supported: Gemini (Google),
+Claude (Anthropic), Grok (xAI), and any OpenAI-compatible endpoint (custom base
+URL — e.g. OpenRouter, a gateway, or a local server). Requests go over HTTPS
+using Obsidian's `requestUrl`.
+
+**2. Local command (desktop only).** Instead of a cloud API, point the plugin at
+a local CLI you already have installed. Set the binary path and arguments; the
+plugin runs it on your machine, passes your prompt, and shows its output. Because
+this executes a program locally, it is opt-in, desktop-only, hidden on mobile, and
+never runs anything unless you configure it and send a message.
+
+In both modes the plugin sends your message plus a short summary of your Momentum
+data (open tasks, today's calories, this month's balance, etc.) only when you send
+a chat message. No telemetry is collected.
+
 ## Network use & privacy
-Momentum works fully offline. The only time it reaches the internet is when you
-**search for a food** in the Nutrition module. That search queries the
-[Open Food Facts](https://world.openfoodfacts.org) public API
-(`world.openfoodfacts.org`) over HTTPS using Obsidian's `requestUrl`, sending
-only the search term you typed. No API key or account is required, and no
-personal data, vault content, or telemetry is transmitted. If you never use the
-food search, the plugin makes no network requests. You can always enter food
-calories manually instead.
+Momentum works offline by default. It only reaches the network in two optional
+cases, and only when you actively use them:
+
+- **Nutrition food search** — queries the
+  [Open Food Facts](https://world.openfoodfacts.org) public API
+  (`world.openfoodfacts.org`) over HTTPS, sending only the search term you typed.
+  No API key or account required.
+- **AI assistant (cloud mode)** — when you send a chat message, it contacts the
+  provider you configured with your own API key, sending your message and a short
+  summary of your dashboard data. The local-command mode runs a CLI on your machine
+  instead and makes no direct network request from the plugin.
+
+No personal data, vault content, or telemetry is transmitted otherwise. If you use
+neither feature, the plugin makes no network requests.
 
 ## Data location
-Set the **Data root folder** in plugin settings (default: `Personal Assistant`).
-Expected subfolders: `Tasks/`, `Notes/`, `Fitness/Exercises`, `Fitness/Workouts`,
-`Nutrition/Plan`, `Nutrition/Logs`, `Studies/`, `Habits/`, `Config/settings.md`.
+Set the **Data root folder** in plugin settings (default: `Momentum Life`).
+Expected subfolders: `Tasks/`, `Tasks/Lists/`, `Notes/`, `Fitness/Exercises`,
+`Fitness/Workouts`, `Nutrition/Plan`, `Nutrition/Logs`, `Studies/`, `Habits/`,
+`Finance/Transactions/`, `Config/settings.md`.
 
 ## Markdown schema
 Each module reads and writes plain Markdown notes with YAML frontmatter. Examples:
@@ -93,6 +123,6 @@ type: note
 2. Tag a release matching `manifest.json` `version` (no `v` prefix), e.g.
    `git tag 0.1.2 && git push origin 0.1.2`. The GitHub Action attaches
    `main.js`, `manifest.json` and `styles.css` to the release.
-3. Submit a PR adding this plugin to
-   [`obsidianmd/obsidian-releases`](https://github.com/obsidianmd/obsidian-releases)
-   (`community-plugins.json`).
+3. Submit the plugin at the
+   [Obsidian Community directory](https://community.obsidian.md) (sign in, link
+   your GitHub account, then Plugins → New plugin).

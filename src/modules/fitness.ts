@@ -1,6 +1,6 @@
 import { PAContext } from "../context";
 import { Exercise, Split, Workout, WorkoutExercise, DEFAULT_SPLITS } from "../types";
-import { ConfirmModal, FieldSpec, FormModal, showActionMenu, toast } from "../ui";
+import { ConfirmModal, FieldSpec, FormModal, toast } from "../ui";
 import { todayLocal, ymd } from "../util";
 import { drawRing, drawLineChart, LineSeries } from "../charts";
 
@@ -349,11 +349,15 @@ export class FitnessModule {
     tr.createEl("td", { text: ex.howto || "—", cls: "pa-fit-howto" });
 
     const actionsTd = tr.createEl("td");
-    const kebab = actionsTd.createEl("button", { text: "⋮", cls: "pa-icon-btn" });
-    kebab.onclick = (e) => showActionMenu(e, [
-      { title: "Edit", icon: "pencil", onClick: () => this.openExerciseModal(ex) },
-      { title: "Delete", icon: "trash", warning: true, onClick: () => new ConfirmModal(this.ctx.app, `Delete exercise "${ex.name}"?`, async () => { await this.ctx.store.deleteExercise(ex); this.ctx.refresh(); }).open() },
-    ]);
+    const edit = actionsTd.createEl("button", { text: "✏️", cls: "pa-icon-btn" });
+    edit.setAttr("aria-label", "Edit exercise");
+    edit.onclick = () => this.openExerciseModal(ex);
+    const del = actionsTd.createEl("button", { text: "🗑", cls: "pa-icon-btn" });
+    del.setAttr("aria-label", "Delete exercise");
+    del.onclick = () => new ConfirmModal(this.ctx.app, `Delete exercise "${ex.name}"?`, async () => {
+      await this.ctx.store.deleteExercise(ex);
+      this.ctx.refresh();
+    }).open();
   }
 
   private startTimer(): void {

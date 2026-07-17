@@ -82,8 +82,12 @@ export function drawBars(
 export function drawDonut(
   parent: HTMLElement,
   segments: Array<{ label: string; value: number; color: string }>,
-  size = 150
+  size = 150,
+  format?: (n: number) => string,
+  centerFormat?: (n: number) => string
 ): void {
+  const fmt = format ?? ((n: number) => String(n));
+  const centerFmt = centerFormat ?? fmt;
   const wrap = parent.createDiv({ cls: "pa-donut-wrap" });
   const total = segments.reduce((a, s) => a + s.value, 0);
   const r = (size - 22) / 2;
@@ -108,8 +112,8 @@ export function drawDonut(
       cumulative += segLen;
     });
   }
-  const totalText = svgEl("text", { x: cx, y: cx - 4, "text-anchor": "middle", "dominant-baseline": "central", "font-size": 22, "font-weight": 700, fill: "var(--text-normal)" });
-  totalText.textContent = String(total);
+  const totalText = svgEl("text", { x: cx, y: cx - 4, "text-anchor": "middle", "dominant-baseline": "central", "font-size": centerFormat ? 17 : (format ? 13 : 22), "font-weight": 700, fill: "var(--text-normal)" });
+  totalText.textContent = centerFmt(total);
   svg.appendChild(totalText);
   const labelText = svgEl("text", { x: cx, y: cx + 14, "text-anchor": "middle", "dominant-baseline": "central", "font-size": 10, fill: "var(--text-muted)" });
   labelText.textContent = "Total";
@@ -121,7 +125,7 @@ export function drawDonut(
     const item = legend.createDiv({ cls: "pa-legend-item" });
     const dot = item.createSpan({ cls: "pa-legend-dot" });
     dot.style.background = s.color;
-    item.createSpan({ text: `${s.label} (${s.value})` });
+    item.createSpan({ text: `${s.label} (${fmt(s.value)})` });
   });
 }
 

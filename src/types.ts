@@ -125,6 +125,28 @@ export interface MealLog {
   path: string;
 }
 
+export interface Transaction {
+  id: string;
+  date: string; // YYYY-MM-DD
+  type: string; // "income" | "expense"
+  amount: number;
+  category: string;
+  note?: string;
+  path: string;
+}
+
+/** A recurring income/expense template the user can apply to a month in one click. */
+export interface RecurringItem {
+  id: string;
+  type: string; // "income" | "expense"
+  category: string;
+  amount: number;
+  note?: string;
+  freq: string; // "monthly" | "weekly"
+  day?: number; // monthly: day of month (1-28) to date the applied transaction
+  weekday?: number; // weekly: 0=Sun .. 6=Sat
+}
+
 export interface PAConfig {
   calorieTarget: number;
   proteinTarget: number;
@@ -137,7 +159,14 @@ export interface PAConfig {
   studyTopics: Board[];
   customSplits: Split[];
   splitNames: Record<string, string>;
+  currency: string;
+  monthlyBudget: number;
+  expenseCategories: string[];
+  incomeCategories: string[];
 }
+
+export const DEFAULT_EXPENSE_CATEGORIES = ["Housing", "Food", "Transport", "Health", "Leisure", "Bills", "Shopping", "Other"];
+export const DEFAULT_INCOME_CATEGORIES = ["Salary", "Bonus", "Investments", "Gift", "Other"];
 
 export const DEFAULT_TASK_COLUMNS = ["backlog", "in progress", "done"];
 export const DEFAULT_TASK_COLUMN_NAMES: Record<string, string> = {
@@ -182,5 +211,9 @@ export function defaultConfig(): PAConfig {
     studyTopics: [],
     customSplits: [],
     splitNames: {},
+    currency: "$",
+    monthlyBudget: 0,
+    expenseCategories: DEFAULT_EXPENSE_CATEGORIES.slice(),
+    incomeCategories: DEFAULT_INCOME_CATEGORIES.slice(),
   };
 }

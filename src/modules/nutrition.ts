@@ -55,6 +55,10 @@ export class NutritionModule {
     this.renderCalendar(cols, calByDay);
     this.renderTrend(cols, calByDay, today);
 
+    // While a meal editor is open, the "add a food" bar targets that meal by default,
+    // so "add to plan" goes to the meal you're editing (not whatever was last selected).
+    if (this.selectedMeal) this.addForm.meal = this.selectedMeal;
+
     this.renderMealPlans(root, meals);
     this.renderAddFood(root, meals);
     if (this.selectedMeal) this.renderMealEditor(root, meals);

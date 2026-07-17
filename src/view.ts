@@ -6,6 +6,7 @@ import { TasksModule } from "./modules/tasks";
 import { FitnessModule } from "./modules/fitness";
 import { NutritionModule } from "./modules/nutrition";
 import { StudiesModule } from "./modules/studies";
+import { FinancesModule } from "./modules/finances";
 
 export const VIEW_TYPE_PA = "personal-assistant-view";
 
@@ -15,6 +16,7 @@ export const PAGES = [
   { id: "fitness", label: "🏋️ Fitness" },
   { id: "nutrition", label: "🥗 Nutrition" },
   { id: "studies", label: "📚 Studies" },
+  { id: "finances", label: "💰 Finances" },
 ];
 
 /** Implemented by the plugin so the nav + content views stay in sync. */
@@ -33,6 +35,7 @@ export class PAView extends ItemView {
   private fitnessModule: FitnessModule;
   private nutritionModule: NutritionModule;
   private studiesModule: StudiesModule;
+  private financesModule: FinancesModule;
 
   constructor(leaf: WorkspaceLeaf, store: PADataStore, host: PAHost) {
     super(leaf);
@@ -44,6 +47,7 @@ export class PAView extends ItemView {
     this.fitnessModule = new FitnessModule(this.ctx);
     this.nutritionModule = new NutritionModule(this.ctx);
     this.studiesModule = new StudiesModule(this.ctx);
+    this.financesModule = new FinancesModule(this.ctx);
   }
 
   getViewType(): string { return VIEW_TYPE_PA; }
@@ -64,7 +68,13 @@ export class PAView extends ItemView {
     const refresh = debounce(() => this.renderPage(), 400, true);
     this.registerEvent(
       this.app.metadataCache.on("changed", (file) => {
-        if (file.path.startsWith(DATA_ROOT + "/")) refresh();
+        if (!file.path.startsWith(DATA_ROOT + "/")) return;
+        // Currency/targets live in the config file — reload it so the change shows immediately.
+        if (file.path === `${DATA_ROOT}/Config/settings.md`) {
+          void this.ctx.reloadConfig().then(() => this.renderPage());
+        } else {
+          refresh();
+        }
       })
     );
   }
@@ -92,6 +102,7 @@ export class PAView extends ItemView {
       case "fitness": this.fitnessModule.render(main); break;
       case "nutrition": this.nutritionModule.render(main); break;
       case "studies": this.studiesModule.render(main); break;
+      case "finances": this.financesModule.render(main); break;
       default: this.habitTrackerModule.render(main);
     }
   }

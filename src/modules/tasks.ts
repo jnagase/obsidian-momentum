@@ -37,6 +37,8 @@ export class TasksModule {
     root.empty();
     const boards = this.ctx.store.loadBoards();
     const tasks = this.ctx.store.loadTasks();
+    // Keep the standard-Markdown checkbox mirrors (Tasks/Lists/*.md) in sync with the board.
+    void this.ctx.store.syncTaskLists();
     const filtered = tasks.filter((t) => this.currentBoard === "all" || t.kanbanName === this.currentBoard);
 
     this.renderHeader(root, filtered);

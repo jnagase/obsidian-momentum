@@ -1,12 +1,12 @@
 import { App, TFile, TFolder, normalizePath } from "obsidian";
 import {
   Board, Task, Note, Habit, Exercise, Workout, WorkoutExercise, Split,
-  StudyCard, Meal, MealItem, MealLog, PAConfig, defaultConfig,
+  StudyCard, Meal, MealItem, MealLog, Transaction, RecurringItem, PAConfig, defaultConfig,
 } from "./types";
 import { todayLocal } from "./util";
 
 /** Root folder inside the vault that holds all Personal Assistant data. */
-export let DATA_ROOT = "Personal Assistant";
+export let DATA_ROOT = "Momentum Life";
 export function setDataRoot(root: string) { DATA_ROOT = root || ""; }
 
 type FM = Record<string, unknown>;
@@ -140,6 +140,10 @@ export class PADataStore {
     if (m.study_topics) cfg.studyTopics = coerce(m.study_topics, cfg.studyTopics);
     if (m.custom_splits) cfg.customSplits = coerce(m.custom_splits, cfg.customSplits);
     if (m.split_names) cfg.splitNames = coerce(m.split_names, cfg.splitNames);
+    if (m.currency) cfg.currency = str(m.currency);
+    if (m.monthly_budget != null) cfg.monthlyBudget = num(m.monthly_budget);
+    if (m.expense_categories) cfg.expenseCategories = coerce(m.expense_categories, cfg.expenseCategories);
+    if (m.income_categories) cfg.incomeCategories = coerce(m.income_categories, cfg.incomeCategories);
     return cfg;
   }
 
@@ -157,6 +161,10 @@ export class PADataStore {
       study_topics: cfg.studyTopics,
       custom_splits: cfg.customSplits,
       split_names: cfg.splitNames,
+      currency: cfg.currency,
+      monthly_budget: cfg.monthlyBudget,
+      expense_categories: cfg.expenseCategories,
+      income_categories: cfg.incomeCategories,
       modified: new Date().toISOString(),
     };
     await this.writeFile("Config/settings.md", this.buildDoc(meta, "# Personal Assistant Config\n"));
@@ -184,8 +192,9 @@ export class PADataStore {
   // TASKS
   // ============================================================
   loadTasks(): Task[] {
+    const listsPrefix = this.full("Tasks/Lists") + "/";
     return this.listMarkdown("Tasks")
-      .filter((f) => f.name !== "boards.md")
+      .filter((f) => f.name !== "boards.md" && !f.path.startsWith(listsPrefix))
       .map((f) => {
         const m = this.frontmatter(f);
         return {
@@ -266,6 +275,91 @@ export class PADataStore {
   async deleteTask(task: Task): Promise<void> {
     const f = this.app.vault.getAbstractFileByPath(task.path);
     if (f instanceof TFile) await this.removeFile(f);
+  }
+
+  /** Write a file only when its content actually changes (avoids churn / sync loops). */
+  private async writeIfChanged(rel: string, content: string): Promise<void> {
+    const existing = this.fileAt(rel);
+    if (existing) {
+      const cur = await this.app.vault.read(existing);
+      if (cur === content) return;
+      await this.app.vault.process(existing, () => content);
+    } else {
+      const full = this.full(rel);
+      await this.ensureFolder(full);
+      await this.app.vault.create(full, content);
+    }
+  }
+
+  /** Board name a task belongs to for the list mirror ("No board" when unassigned). */
+  private taskGroup(t: Task): string { return t.kanbanName || "No board"; }
+
+  /**
+   * Regenerate the standard-Markdown checkbox mirror of tasks, one file per board
+   * under `Tasks/Lists/<board>.md`. Lets other plugins (Tasks, Home, etc.) read and
+   * toggle the same tasks. Deterministic + content-guarded so it converges without loops.
+   */
+  async syncTaskLists(): Promise<void> {
+    const cfg = await this.loadConfig();
+    const cols = cfg.taskColumns;
+    const names = cfg.taskColumnNames;
+    const colSet = new Set(cols);
+    const doneCol = cols.includes("done") ? "done" : cols[cols.length - 1];
+    const tasks = this.loadTasks();
+    const boards = this.loadBoards();
+    const eff = (t: Task) => (colSet.has(t.status) ? t.status : cols[0]);
+    const ord = (t: Task) => (t.order ?? 1e9);
+
+    const groups = [...boards.map((b) => b.name), "No board"];
+    const wanted = new Set<string>();
+    for (const g of groups) {
+      const gTasks = tasks.filter((t) => this.taskGroup(t) === g);
+      if (g === "No board" && !gTasks.length) continue;
+      const rel = `Tasks/Lists/${safeName(g)}/tasks.md`;
+      wanted.add(this.full(rel));
+      let body = `%% Momentum Life — task list for board "${g}". Toggle a checkbox to mark it done/undone in the board. %%\n`;
+      for (const col of cols) {
+        const colTasks = gTasks
+          .filter((t) => eff(t) === col)
+          .sort((a, b) => ord(a) - ord(b) || (a.created || "").localeCompare(b.created || "") || a.title.localeCompare(b.title));
+        if (!colTasks.length) continue;
+        body += `\n## ${names[col] || col}\n`;
+        for (const t of colTasks) body += `- [${col === doneCol ? "x" : " "}] ${t.title}\n`;
+      }
+      await this.writeIfChanged(rel, body);
+    }
+
+    // Remove mirror files for boards that no longer exist.
+    const listsPrefix = this.full("Tasks/Lists") + "/";
+    for (const f of this.app.vault.getMarkdownFiles()) {
+      if (f.path.startsWith(listsPrefix) && !wanted.has(f.path)) await this.removeFile(f);
+    }
+  }
+
+  /** Apply checkbox toggles from a list mirror file back to the board tasks. Returns true if anything changed. */
+  async applyTaskListFile(file: TFile): Promise<boolean> {
+    const cfg = await this.loadConfig();
+    const cols = cfg.taskColumns;
+    const colSet = new Set(cols);
+    const doneCol = cols.includes("done") ? "done" : cols[cols.length - 1];
+    const firstCol = cols[0];
+    const boardName = file.parent?.name ?? "";
+    const content = await this.app.vault.read(file);
+    const tasks = this.loadTasks();
+    const eff = (t: Task) => (colSet.has(t.status) ? t.status : cols[0]);
+    let changed = false;
+    for (const line of content.split("\n")) {
+      const m = line.match(/^\s*-\s*\[( |x|X)\]\s+(.*)$/);
+      if (!m) continue;
+      const checked = m[1].toLowerCase() === "x";
+      const title = m[2].trim();
+      const t = tasks.find((x) => safeName(this.taskGroup(x)) === boardName && x.title === title);
+      if (!t) continue;
+      const isDone = eff(t) === doneCol;
+      if (checked && !isDone) { await this.updateTask(t, { status: doneCol }); changed = true; }
+      else if (!checked && isDone) { await this.updateTask(t, { status: firstCol }); changed = true; }
+    }
+    return changed;
   }
 
   // ============================================================
@@ -471,7 +565,7 @@ export class PADataStore {
     exercises.forEach((e) => {
       body += `- ${e.exercise}: ${e.weight}kg x ${e.sets}${e.feel ? ` (${e.feel})` : ""}\n`;
     });
-    await this.writeFile(`Fitness/Workouts/${date}-${splitId}-${time}.md`, this.buildDoc(meta, body));
+    await this.writeFile(`Fitness/Workouts/${date}-${splitId}-${time}-${Math.random().toString(36).slice(2, 7)}.md`, this.buildDoc(meta, body));
   }
 
   async updateWorkoutExercises(workout: Workout, exercises: WorkoutExercise[]): Promise<void> {
@@ -689,6 +783,68 @@ export class PADataStore {
     const log: Record<string, number> = {};
     log[date] = Math.max(0, deltaLiters);
     await this.writeFile("Nutrition/water.md", this.buildDoc({ type: "water-log", log, modified: new Date().toISOString() }, "# Water log\n"));
+  }
+
+  // ============================================================
+  // FINANCE (Finance/Transactions/*.md)
+  // ============================================================
+  loadTransactions(): Transaction[] {
+    return this.listMarkdown("Finance/Transactions").map((f) => {
+      const m = this.frontmatter(f);
+      return {
+        id: str(m.id) || f.basename,
+        date: str(m.date).substring(0, 10),
+        type: str(m.tx_type) || "expense",
+        amount: num(m.amount),
+        category: str(m.category) || "Other",
+        note: str(m.note),
+        path: f.path,
+      };
+    }).filter((t) => t.date);
+  }
+
+  async addTransaction(t: { type: string; amount: number; category: string; note?: string }, date: string = todayLocal()): Promise<void> {
+    const now = new Date();
+    const time = String(now.getHours()).padStart(2, "0") + String(now.getMinutes()).padStart(2, "0") + String(now.getSeconds()).padStart(2, "0");
+    const meta: FM = {
+      id: Date.now(),
+      type: "transaction",
+      tx_type: t.type === "income" ? "income" : "expense",
+      date,
+      amount: t.amount,
+      category: t.category || "Other",
+      note: t.note || "",
+      logged: new Date().toISOString(),
+    };
+    const sign = t.type === "income" ? "+" : "-";
+    const body = `# ${t.category} ${sign}${t.amount}\n\n${t.note || ""}\n`;
+    const rand = Math.random().toString(36).slice(2, 7);
+    await this.writeFile(`Finance/Transactions/${date}-${meta.tx_type as string}-${time}-${rand}.md`, this.buildDoc(meta, body));
+  }
+
+  async deleteTransaction(t: Transaction): Promise<void> {
+    const f = this.app.vault.getAbstractFileByPath(t.path);
+    if (f instanceof TFile) await this.removeFile(f);
+  }
+
+  loadRecurring(): RecurringItem[] {
+    const f = this.fileAt("Finance/recurring.md");
+    if (!f) return [];
+    const list = coerce<Array<Record<string, unknown>>>(this.frontmatter(f).items, []);
+    return list.map((r) => ({
+      id: str(r.id) || ("r" + Math.random().toString(36).slice(2, 8)),
+      type: str(r.type) === "income" ? "income" : "expense",
+      category: str(r.category) || "Other",
+      amount: num(r.amount),
+      note: str(r.note),
+      freq: str(r.freq) === "weekly" ? "weekly" : "monthly",
+      day: r.day != null ? num(r.day) : undefined,
+      weekday: r.weekday != null ? num(r.weekday) : undefined,
+    })).filter((r) => r.amount > 0);
+  }
+
+  async saveRecurring(items: RecurringItem[]): Promise<void> {
+    await this.writeFile("Finance/recurring.md", this.buildDoc({ type: "recurring-config", items }, "# Recurring costs\n"));
   }
 }
 

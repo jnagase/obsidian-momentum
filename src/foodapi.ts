@@ -12,7 +12,7 @@ export interface FoodResult {
 }
 
 // Identify the app per Open Food Facts usage guidelines.
-const USER_AGENT = "Momentum-Obsidian/0.1.8 (github.com/jnagase/obsidian-momentum)";
+const USER_AGENT = "Momentum-Obsidian/0.1.9 (github.com/jnagase/obsidian-momentum)";
 const BASE = "https://world.openfoodfacts.org";
 
 const num = (v: unknown): number => {

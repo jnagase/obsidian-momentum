@@ -373,3 +373,8 @@
 .pa-ai-action{font-size:.84rem;line-height:1.4;padding:3px 0;border-bottom:1px solid var(--background-modifier-border)}
 .pa-ai-action:last-of-type{border-bottom:none}
 .pa-ai-actions-row{display:flex;gap:8px;margin-top:8px}
+.pa-whatsnew-intro{margin:-4px 0 14px}
+.pa-whatsnew-version{margin:16px 0 6px;font-size:1.05rem}
+.pa-whatsnew-section{font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-muted);margin:10px 0 2px}
+.pa-whatsnew-list{margin:0 0 4px;padding-left:20px}
+.pa-whatsnew-list li{margin:3px 0;line-height:1.45}

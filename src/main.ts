@@ -4,9 +4,10 @@ import { PAView, VIEW_TYPE_PA, PAHost } from "./view";
 import { PANavView, VIEW_TYPE_PA_NAV } from "./nav";
 import { MomentumAIView, VIEW_TYPE_MOMENTUM_AI, AIHost } from "./aiview";
 import { AIConfig, DEFAULT_MODELS } from "./ai";
+import { WhatsNewModal, CHANGELOG, cmpVersion } from "./whatsnew";
 
-interface PASettings { dataRoot: string; aiProvider: string; aiApiKey: string; aiModel: string; aiBaseUrl: string; aiCommand: string; aiCommandArgs: string; }
-const DEFAULT_SETTINGS: PASettings = { dataRoot: "Momentum Life", aiProvider: "gemini", aiApiKey: "", aiModel: "gemini-3.5-flash", aiBaseUrl: "", aiCommand: "", aiCommandArgs: "" };
+interface PASettings { dataRoot: string; aiProvider: string; aiApiKey: string; aiModel: string; aiBaseUrl: string; aiCommand: string; aiCommandArgs: string; lastSeenVersion: string; }
+const DEFAULT_SETTINGS: PASettings = { dataRoot: "Momentum Life", aiProvider: "gemini", aiApiKey: "", aiModel: "gemini-3.5-flash", aiBaseUrl: "", aiCommand: "", aiCommandArgs: "", lastSeenVersion: "" };
 const LEGACY_DATA_ROOT = "Personal Assistant";
 
 export default class MomentumPlugin extends Plugin implements PAHost, AIHost {
@@ -51,11 +52,15 @@ export default class MomentumPlugin extends Plugin implements PAHost, AIHost {
 
     // Ensure the nav panel exists in the left sidebar so its access icon is always available.
     this.app.workspace.onLayoutReady(() => {
+      // Remove any duplicate panels that piled up (e.g. from workspace sync between devices).
+      this.dedupeLeaves(VIEW_TYPE_PA_NAV);
+      this.dedupeLeaves(VIEW_TYPE_MOMENTUM_AI);
       if (this.app.workspace.getLeavesOfType(VIEW_TYPE_PA_NAV).length === 0) {
         const leaf = this.app.workspace.getLeftLeaf(false);
         void leaf?.setViewState({ type: VIEW_TYPE_PA_NAV });
       }
       void this.store.syncTaskLists();
+      this.maybeShowWhatsNew();
     });
 
     // When a task-list mirror file is edited (e.g. a checkbox toggled from another
@@ -120,6 +125,23 @@ export default class MomentumPlugin extends Plugin implements PAHost, AIHost {
     workspace.getLeavesOfType(VIEW_TYPE_PA_NAV).forEach((l) => {
       if (l.view instanceof PANavView) l.view.render();
     });
+  }
+
+  /** Keep at most one leaf of a given view type; detach the extras. */
+  private dedupeLeaves(type: string): void {
+    const leaves = this.app.workspace.getLeavesOfType(type);
+    leaves.slice(1).forEach((l) => l.detach());
+  }
+
+  /** Show the update dialog once per new version, listing changes since last seen. */
+  private maybeShowWhatsNew(): void {
+    const current = this.manifest.version;
+    const last = this.settings.lastSeenVersion;
+    if (last === current) return;
+    const entries = last ? CHANGELOG.filter((e) => cmpVersion(e.version, last) > 0) : CHANGELOG.slice();
+    this.settings.lastSeenVersion = current;
+    void this.saveSettings();
+    if (entries.length) new WhatsNewModal(this.app, this.manifest.name, entries).open();
   }
 
   onunload(): void {}

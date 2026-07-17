@@ -1,4 +1,4 @@
-import { Platform, requestUrl } from "obsidian";
+import { requestUrl } from "obsidian";
 
 export interface ChatMessage {
   role: "user" | "assistant";
@@ -6,12 +6,10 @@ export interface ChatMessage {
 }
 
 export interface AIConfig {
-  provider: string; // "gemini" | "anthropic" | "xai" | "openai" | "local"
+  provider: string; // "gemini" | "anthropic" | "xai" | "openai"
   apiKey: string;
   model: string;
   baseUrl: string; // used by the OpenAI-compatible provider
-  command: string; // used by the local-command provider (desktop only)
-  args: string;    // args for the local command; use {prompt} to pass the prompt as an argument
 }
 
 /** Suggested default model per provider (editable by the user). */
@@ -28,72 +26,9 @@ export async function aiChat(cfg: AIConfig, system: string, messages: ChatMessag
     case "anthropic": return anthropicChat(cfg, system, messages);
     case "xai": return openaiCompatChat({ ...cfg, baseUrl: "https://api.x.ai/v1" }, system, messages);
     case "openai": return openaiCompatChat(cfg, system, messages);
-    case "local": return localCommandChat(cfg, system, messages);
     case "gemini":
     default: return geminiChat(cfg.apiKey, cfg.model, system, messages);
   }
-}
-
-/** Remove ANSI escape/color codes a CLI may emit, without a literal control char in the source. */
-function stripAnsi(s: string): string {
-  const esc = String.fromCharCode(27);
-  return s.replace(new RegExp(esc + "\\[[0-9;?]*[A-Za-z]", "g"), "");
-}
-
-/** Clean a headless CLI's stdout: drop color codes, the leading "> " marker and a credits/time footer. */
-function cleanCliOutput(s: string): string {
-  const lines = stripAnsi(s)
-    .split("\n")
-    .filter((l) => !/Credits:\s*[\d.]+/i.test(l) && !/^\s*[▸>].*Time:/i.test(l));
-  return lines.join("\n").replace(/^\s*>\s?/, "").trim();
-}
-
-/** Flatten the system prompt + conversation into a single text prompt for a one-shot CLI. */
-function buildPrompt(system: string, messages: ChatMessage[]): string {
-  const parts: string[] = [];
-  if (system) parts.push(system);
-  for (const m of messages) parts.push(`${m.role === "user" ? "User" : "Assistant"}: ${m.text}`);
-  parts.push("Assistant:");
-  return parts.join("\n\n");
-}
-
-/**
- * Personal, desktop-only bridge: run a local CLI (e.g. a Kiro/Q CLI in headless mode),
- * pass the prompt via stdin (or a {prompt} arg placeholder) and return its stdout.
- * Not for the community build — executing local binaries is desktop-only and not review-safe.
- */
-async function localCommandChat(cfg: AIConfig, system: string, messages: ChatMessage[]): Promise<string> {
-  // Guarded by a build-time flag so the community build tree-shakes this whole block
-  // (and its child_process import) out. Only a personal MOMENTUM_LOCAL=1 build keeps it.
-  if (MOMENTUM_LOCAL_CMD) {
-    if (!Platform.isDesktopApp) throw new Error("The local command provider only works on desktop.");
-    const cmd = (cfg.command || "").trim();
-    if (!cmd) throw new Error("Set the command path in Settings → AI assistant → Command.");
-
-    const prompt = buildPrompt(system, messages);
-    const raw = (cfg.args || "").trim();
-    const usesPlaceholder = raw.includes("{prompt}");
-    const args = raw.length ? raw.split(/\s+/).map((a) => a.replace("{prompt}", prompt)) : [];
-
-    // eslint-disable-next-line @typescript-eslint/no-require-imports, import/no-nodejs-modules, no-undef -- personal desktop-only bridge, excluded from the community build
-    const cp = require("child_process") as typeof import("child_process");
-    return await new Promise<string>((resolve, reject) => {
-      let out = "";
-      let err = "";
-      const child = cp.spawn(cmd, args, { shell: false });
-      const timer = window.setTimeout(() => { child.kill(); reject(new Error("Command timed out after 120s.")); }, 120000);
-      child.stdout.on("data", (d: unknown) => { out += String(d); });
-      child.stderr.on("data", (d: unknown) => { err += String(d); });
-      child.on("error", (e: Error) => { window.clearTimeout(timer); reject(new Error(`Failed to run command: ${e.message}`)); });
-      child.on("close", (code: number | null) => {
-        window.clearTimeout(timer);
-        if (code === 0) resolve(cleanCliOutput(out) || "(the command returned no output)");
-        else reject(new Error(stripAnsi(err).trim() || `Command exited with code ${code}`));
-      });
-      if (!usesPlaceholder && child.stdin) { child.stdin.write(prompt); child.stdin.end(); }
-    });
-  }
-  throw new Error("The local command provider is not available in this build.");
 }
 
 function apiError(status: number, json: unknown, fallback: string): Error {

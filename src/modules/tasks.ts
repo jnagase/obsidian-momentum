@@ -286,7 +286,7 @@ export class TasksModule {
       ]);
     };
 
-    card.createEl("div", { text: t.title, cls: "pa-card-title" });
+    card.createDiv({ text: t.title, cls: "pa-card-title" });
     const dateStr = (t.created || "").substring(0, 10);
     card.createDiv({ cls: "pa-muted pa-card-meta", text: [t.priority, dateStr].filter(Boolean).join(" · ") });
 

@@ -48,13 +48,8 @@ using Obsidian's `requestUrl`.
 
 The plugin sends your message plus a short summary of your Momentum data (open
 tasks, today's calories, this month's balance, etc.) only when you send a chat
-message. No telemetry is collected.
-
-> **Note on local CLIs.** The source also contains an optional, desktop-only
-> "local command" bridge that runs a CLI you already have installed (via
-> `child_process`). It is **excluded from the community build** and only exists in
-> a self-compiled local build (`npm run build:local`). The version distributed
-> through Obsidian never bundles it and cannot execute local programs.
+message. No telemetry is collected. The plugin never runs local programs; it only
+talks to the cloud provider you configure, over HTTPS.
 
 ## Network use & privacy
 Momentum works offline by default. It only reaches the network in two optional

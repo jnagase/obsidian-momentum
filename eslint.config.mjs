@@ -9,7 +9,6 @@ export default defineConfig([
     languageOptions: {
       parser: tsparser,
       parserOptions: { project: "./tsconfig.json" },
-      globals: { MOMENTUM_LOCAL_CMD: "readonly" },
     },
   },
   {

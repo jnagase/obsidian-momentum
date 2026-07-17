@@ -273,7 +273,7 @@ export class StudiesModule {
       showActionMenu(e, items);
     };
 
-    card.createEl("div", { text: c.title, cls: "pa-card-title" });
+    card.createDiv({ text: c.title, cls: "pa-card-title" });
     if (c.date) card.createDiv({ cls: "pa-muted pa-card-meta", text: c.date });
 
     const preview = card.createDiv({ cls: "pa-card-preview" });

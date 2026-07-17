@@ -1,4 +1,4 @@
-import { Plugin, WorkspaceLeaf, PluginSettingTab, App, Setting, TFolder, TFile, Platform } from "obsidian";
+import { Plugin, WorkspaceLeaf, PluginSettingTab, App, Setting, TFolder, TFile } from "obsidian";
 import { PADataStore, setDataRoot } from "./data";
 import { PAView, VIEW_TYPE_PA, PAHost } from "./view";
 import { PANavView, VIEW_TYPE_PA_NAV } from "./nav";
@@ -6,8 +6,8 @@ import { MomentumAIView, VIEW_TYPE_MOMENTUM_AI, AIHost } from "./aiview";
 import { AIConfig, DEFAULT_MODELS } from "./ai";
 import { WhatsNewModal, CHANGELOG, cmpVersion } from "./whatsnew";
 
-interface PASettings { dataRoot: string; aiProvider: string; aiApiKey: string; aiModel: string; aiBaseUrl: string; aiCommand: string; aiCommandArgs: string; lastSeenVersion: string; }
-const DEFAULT_SETTINGS: PASettings = { dataRoot: "Momentum Life", aiProvider: "gemini", aiApiKey: "", aiModel: "gemini-3.5-flash", aiBaseUrl: "", aiCommand: "", aiCommandArgs: "", lastSeenVersion: "" };
+interface PASettings { dataRoot: string; aiProvider: string; aiApiKey: string; aiModel: string; aiBaseUrl: string; lastSeenVersion: string; }
+const DEFAULT_SETTINGS: PASettings = { dataRoot: "Momentum Life", aiProvider: "gemini", aiApiKey: "", aiModel: "gemini-3.5-flash", aiBaseUrl: "", lastSeenVersion: "" };
 const LEGACY_DATA_ROOT = "Personal Assistant";
 
 export default class MomentumPlugin extends Plugin implements PAHost, AIHost {
@@ -83,8 +83,6 @@ export default class MomentumPlugin extends Plugin implements PAHost, AIHost {
       apiKey: this.settings.aiApiKey || "",
       model: this.settings.aiModel || "",
       baseUrl: this.settings.aiBaseUrl || "",
-      command: this.settings.aiCommand || "",
-      args: this.settings.aiCommandArgs || "",
     };
   }
 
@@ -205,26 +203,6 @@ class PASettingTab extends PluginSettingTab {
       providerFields.empty();
       const p = this.plugin.settings.aiProvider;
 
-      if (MOMENTUM_LOCAL_CMD && p === "local") {
-        if (!Platform.isDesktopApp) {
-          providerFields.createEl("p", { cls: "setting-item-description", text: "The local command option is only available on desktop." });
-          return;
-        }
-        new Setting(providerFields)
-          .setName("Command")
-          .setDesc("Full path to a local CLI binary to run. Runs on your machine, desktop only.")
-          .addText((t) =>
-            t.setValue(this.plugin.settings.aiCommand).onChange(async (v) => { this.plugin.settings.aiCommand = v.trim(); await this.plugin.saveSettings(); })
-          );
-        new Setting(providerFields)
-          .setName("Command arguments")
-          .setDesc("Arguments separated by spaces. Use {prompt} to pass the prompt as an argument; leave it out to send the prompt on standard input.")
-          .addText((t) =>
-            t.setValue(this.plugin.settings.aiCommandArgs).onChange(async (v) => { this.plugin.settings.aiCommandArgs = v; await this.plugin.saveSettings(); })
-          );
-        return;
-      }
-
       new Setting(providerFields)
         .setName("API key")
         .setDesc("Your own API key for the selected provider.")
@@ -257,10 +235,9 @@ class PASettingTab extends PluginSettingTab {
       d.addOption("anthropic", "Claude (Anthropic)");
       d.addOption("xai", "Grok");
       d.addOption("openai", "OpenAI-compatible (custom)");
-      if (MOMENTUM_LOCAL_CMD && Platform.isDesktopApp) d.addOption("local", "Local command (desktop, personal)");
       d.setValue(this.plugin.settings.aiProvider).onChange(async (v) => {
         this.plugin.settings.aiProvider = v;
-        if (v !== "local") this.plugin.settings.aiModel = DEFAULT_MODELS[v] || this.plugin.settings.aiModel;
+        this.plugin.settings.aiModel = DEFAULT_MODELS[v] || this.plugin.settings.aiModel;
         await this.plugin.saveSettings();
         renderProviderFields();
       });

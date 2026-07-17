@@ -9,6 +9,21 @@ const PRIORITIES = [
   { value: "high", label: "High" },
 ];
 
+const QUADRANTS = [
+  { id: "q1", title: "Do first", sub: "Urgent & important" },
+  { id: "q2", title: "Schedule", sub: "Important, not urgent" },
+  { id: "q3", title: "Delegate", sub: "Urgent, not important" },
+  { id: "q4", title: "Eliminate", sub: "Not urgent or important" },
+];
+
+const EISENHOWER_OPTS = [
+  { value: "", label: "Auto (by priority & due)" },
+  { value: "q1", label: "Do first (urgent & important)" },
+  { value: "q2", label: "Schedule (important, not urgent)" },
+  { value: "q3", label: "Delegate (urgent, not important)" },
+  { value: "q4", label: "Eliminate (neither)" },
+];
+
 const RING_COLORS = ["#d97706", "#7c3aed", "#16a34a"];
 const COLUMN_COLORS = ["#7c3aed", "#3b82f6", "#16a34a", "#f59e0b", "#ef4444", "#10b981"];
 
@@ -16,7 +31,7 @@ const COLUMN_COLORS = ["#7c3aed", "#3b82f6", "#16a34a", "#f59e0b", "#ef4444", "#
 export class TasksModule {
   private ctx: PAContext;
   private currentBoard = "all";
-  private view: "kanban" | "list" = "kanban";
+  private view: "kanban" | "list" | "matrix" = "kanban";
 
   constructor(ctx: PAContext) { this.ctx = ctx; }
 
@@ -49,6 +64,8 @@ export class TasksModule {
       this.renderStats(root, filtered);
       this.renderBoardBar(root, boards);
       this.renderKanban(root, filtered, boards);
+    } else if (this.view === "matrix") {
+      this.renderMatrix(root, filtered, boards);
     } else {
       this.renderList(root, filtered);
     }
@@ -78,12 +95,13 @@ export class TasksModule {
   // ---- View toggle ----
   private renderViewToggle(root: HTMLElement): void {
     const bar = root.createDiv({ cls: "pa-view-toggle" });
-    const mk = (id: "kanban" | "list", label: string) => {
+    const mk = (id: "kanban" | "list" | "matrix", label: string) => {
       const b = bar.createEl("button", { text: label, cls: "pa-toggle-btn" + (this.view === id ? " on" : "") });
       b.onclick = () => { this.view = id; this.ctx.refresh(); };
     };
     mk("kanban", "📋 Kanban");
     mk("list", "📃 List");
+    mk("matrix", "🎯 Matrix");
   }
 
   // ---- Board tabs ----
@@ -298,6 +316,83 @@ export class TasksModule {
     });
   }
 
+  // ---- Eisenhower matrix ----
+  /** Derive a quadrant from priority (importance) and due date (urgency) when none is set. */
+  private derivedQuadrant(t: Task): string {
+    const important = t.priority === "high";
+    let urgent = false;
+    if (t.due) {
+      const due = new Date(t.due + "T00:00:00");
+      if (!isNaN(due.getTime())) {
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        urgent = (due.getTime() - today.getTime()) / 86400000 <= 2; // due within 2 days or overdue
+      }
+    }
+    if (important && urgent) return "q1";
+    if (important) return "q2";
+    if (urgent) return "q3";
+    return "q4";
+  }
+
+  private quadrantOf(t: Task): string {
+    const q = t.eisenhower || "";
+    return QUADRANTS.some((x) => x.id === q) ? q : this.derivedQuadrant(t);
+  }
+
+  private renderMatrix(root: HTMLElement, filtered: Task[], boards: Board[]): void {
+    const cols = this.ctx.config.taskColumns;
+    const doneId = this.doneCol();
+    const colSet = new Set(cols);
+    const eff = (t: Task) => (colSet.has(t.status) ? t.status : cols[0]);
+    const open = filtered.filter((t) => eff(t) !== doneId);
+
+    root.createDiv({ text: "🎯 Eisenhower matrix", cls: "pa-h2" });
+    root.createDiv({ cls: "pa-muted pa-matrix-hint", text: "Drag a task between quadrants to set its urgency and importance." });
+
+    const grid = root.createDiv({ cls: "pa-matrix" });
+    QUADRANTS.forEach((q) => {
+      const qtasks = open.filter((t) => this.quadrantOf(t) === q.id);
+      const cell = grid.createDiv({ cls: "pa-matrix-cell pa-" + q.id });
+
+      const head = cell.createDiv({ cls: "pa-matrix-head" });
+      head.createDiv({ text: q.title, cls: "pa-matrix-title" });
+      head.createSpan({ text: String(qtasks.length), cls: "pa-matrix-count" });
+      head.createDiv({ text: q.sub, cls: "pa-matrix-sub pa-muted" });
+
+      const body = cell.createDiv({ cls: "pa-matrix-body" });
+      body.addEventListener("dragover", (e) => { e.preventDefault(); body.addClass("pa-drop"); });
+      body.addEventListener("dragleave", () => body.removeClass("pa-drop"));
+      body.addEventListener("drop", (e) => {
+        e.preventDefault();
+        body.removeClass("pa-drop");
+        const path = e.dataTransfer?.getData("text/plain");
+        if (!path) return;
+        const t = open.find((x) => x.path === path);
+        if (!t || this.quadrantOf(t) === q.id) return;
+        void (async () => { await this.ctx.store.updateTask(t, { eisenhower: q.id }); this.ctx.refresh(); })();
+      });
+
+      qtasks.forEach((t) => this.renderMatrixCard(body, t));
+
+      const addBtn = cell.createEl("button", { text: "+ add card", cls: "pa-add-card" });
+      addBtn.onclick = () => this.openTaskModal(null, cols[0], boards);
+    });
+  }
+
+  private renderMatrixCard(body: HTMLElement, t: Task): void {
+    const card = body.createDiv({ cls: "pa-card pa-task pa-matrix-card prio-" + (t.priority || "medium") });
+    card.dataset.path = t.path;
+    card.setAttr("draggable", "true");
+    card.addEventListener("dragstart", (e) => { e.dataTransfer?.setData("text/plain", t.path); card.addClass("pa-dragging"); });
+    card.addEventListener("dragend", () => card.removeClass("pa-dragging"));
+    card.onclick = () => this.ctx.app.workspace.openLinkText(t.path, "", true);
+
+    card.createDiv({ text: t.title, cls: "pa-card-title" });
+    const meta = [t.kanbanName, t.due ? "due " + t.due : ""].filter(Boolean).join(" · ");
+    if (meta) card.createDiv({ cls: "pa-muted pa-card-meta", text: meta });
+  }
+
   // ---- List view (single list per board, with collapsed Completed) ----
   private renderList(root: HTMLElement, filtered: Task[]): void {
     const cols = this.ctx.config.taskColumns;
@@ -372,10 +467,11 @@ export class TasksModule {
       { key: "kanbanName", label: "Board", type: "dropdown", options: boardOptions, value: presetBoard },
       { key: "group", label: "Group / tag", type: "text", value: task?.group || "" },
       { key: "due", label: "Due date", type: "text", value: task?.due || "", placeholder: "YYYY-MM-DD" },
+      { key: "eisenhower", label: "Eisenhower quadrant", type: "dropdown", options: EISENHOWER_OPTS, value: task?.eisenhower || "" },
     ];
     new FormModal(this.ctx.app, task ? "Edit task" : "New task", fields, async (v) => {
       if (!(v.title || "").trim()) return;
-      const data = { title: v.title.trim(), status: v.status, priority: v.priority, kanbanName: v.kanbanName, group: v.group, due: v.due };
+      const data = { title: v.title.trim(), status: v.status, priority: v.priority, kanbanName: v.kanbanName, group: v.group, due: v.due, eisenhower: v.eisenhower };
       if (task) await this.ctx.store.updateTask(task, data);
       else await this.ctx.store.createTask(data);
       this.ctx.refresh();

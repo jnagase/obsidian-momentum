@@ -6,6 +6,17 @@ export interface ChangeEntry { version: string; sections: ChangeSection[]; }
 /** Release notes shown in the "What's new" dialog, newest first. */
 export const CHANGELOG: ChangeEntry[] = [
   {
+    version: "0.2.3",
+    sections: [
+      {
+        title: "New",
+        items: [
+          "Tasks now have an Eisenhower matrix view (📋 Kanban / 📃 List / 🎯 Matrix). It sorts your open tasks into four quadrants by urgency and importance; drag a task between quadrants to set it, or pick a quadrant when editing a task.",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.1.9",
     sections: [
       {

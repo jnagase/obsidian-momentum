@@ -205,7 +205,7 @@ class PASettingTab extends PluginSettingTab {
       providerFields.empty();
       const p = this.plugin.settings.aiProvider;
 
-      if (p === "local") {
+      if (MOMENTUM_LOCAL_CMD && p === "local") {
         if (!Platform.isDesktopApp) {
           providerFields.createEl("p", { cls: "setting-item-description", text: "The local command option is only available on desktop." });
           return;
@@ -257,7 +257,7 @@ class PASettingTab extends PluginSettingTab {
       d.addOption("anthropic", "Claude (Anthropic)");
       d.addOption("xai", "Grok");
       d.addOption("openai", "OpenAI-compatible (custom)");
-      if (Platform.isDesktopApp) d.addOption("local", "Local command (desktop, personal)");
+      if (MOMENTUM_LOCAL_CMD && Platform.isDesktopApp) d.addOption("local", "Local command (desktop, personal)");
       d.setValue(this.plugin.settings.aiProvider).onChange(async (v) => {
         this.plugin.settings.aiProvider = v;
         if (v !== "local") this.plugin.settings.aiModel = DEFAULT_MODELS[v] || this.plugin.settings.aiModel;

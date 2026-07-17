@@ -63,32 +63,37 @@ function buildPrompt(system: string, messages: ChatMessage[]): string {
  * Not for the community build — executing local binaries is desktop-only and not review-safe.
  */
 async function localCommandChat(cfg: AIConfig, system: string, messages: ChatMessage[]): Promise<string> {
-  if (!Platform.isDesktopApp) throw new Error("The local command provider only works on desktop.");
-  const cmd = (cfg.command || "").trim();
-  if (!cmd) throw new Error("Set the command path in Settings → AI assistant → Command.");
+  // Guarded by a build-time flag so the community build tree-shakes this whole block
+  // (and its child_process import) out. Only a personal MOMENTUM_LOCAL=1 build keeps it.
+  if (MOMENTUM_LOCAL_CMD) {
+    if (!Platform.isDesktopApp) throw new Error("The local command provider only works on desktop.");
+    const cmd = (cfg.command || "").trim();
+    if (!cmd) throw new Error("Set the command path in Settings → AI assistant → Command.");
 
-  const prompt = buildPrompt(system, messages);
-  const raw = (cfg.args || "").trim();
-  const usesPlaceholder = raw.includes("{prompt}");
-  const args = raw.length ? raw.split(/\s+/).map((a) => a.replace("{prompt}", prompt)) : [];
+    const prompt = buildPrompt(system, messages);
+    const raw = (cfg.args || "").trim();
+    const usesPlaceholder = raw.includes("{prompt}");
+    const args = raw.length ? raw.split(/\s+/).map((a) => a.replace("{prompt}", prompt)) : [];
 
-  // eslint-disable-next-line @typescript-eslint/no-require-imports, import/no-nodejs-modules, no-undef -- personal desktop-only bridge, not shipped to the community store
-  const cp = require("child_process") as typeof import("child_process");
-  return await new Promise<string>((resolve, reject) => {
-    let out = "";
-    let err = "";
-    const child = cp.spawn(cmd, args, { shell: false });
-    const timer = window.setTimeout(() => { child.kill(); reject(new Error("Command timed out after 120s.")); }, 120000);
-    child.stdout.on("data", (d: unknown) => { out += String(d); });
-    child.stderr.on("data", (d: unknown) => { err += String(d); });
-    child.on("error", (e: Error) => { window.clearTimeout(timer); reject(new Error(`Failed to run command: ${e.message}`)); });
-    child.on("close", (code: number | null) => {
-      window.clearTimeout(timer);
-      if (code === 0) resolve(cleanCliOutput(out) || "(the command returned no output)");
-      else reject(new Error(stripAnsi(err).trim() || `Command exited with code ${code}`));
+    // eslint-disable-next-line @typescript-eslint/no-require-imports, import/no-nodejs-modules, no-undef -- personal desktop-only bridge, excluded from the community build
+    const cp = require("child_process") as typeof import("child_process");
+    return await new Promise<string>((resolve, reject) => {
+      let out = "";
+      let err = "";
+      const child = cp.spawn(cmd, args, { shell: false });
+      const timer = window.setTimeout(() => { child.kill(); reject(new Error("Command timed out after 120s.")); }, 120000);
+      child.stdout.on("data", (d: unknown) => { out += String(d); });
+      child.stderr.on("data", (d: unknown) => { err += String(d); });
+      child.on("error", (e: Error) => { window.clearTimeout(timer); reject(new Error(`Failed to run command: ${e.message}`)); });
+      child.on("close", (code: number | null) => {
+        window.clearTimeout(timer);
+        if (code === 0) resolve(cleanCliOutput(out) || "(the command returned no output)");
+        else reject(new Error(stripAnsi(err).trim() || `Command exited with code ${code}`));
+      });
+      if (!usesPlaceholder && child.stdin) { child.stdin.write(prompt); child.stdin.end(); }
     });
-    if (!usesPlaceholder && child.stdin) { child.stdin.write(prompt); child.stdin.end(); }
-  });
+  }
+  throw new Error("The local command provider is not available in this build.");
 }
 
 function apiError(status: number, json: unknown, fallback: string): Error {

@@ -6,6 +6,24 @@ export interface ChangeEntry { version: string; sections: ChangeSection[]; }
 /** Release notes shown in the "What's new" dialog, newest first. */
 export const CHANGELOG: ChangeEntry[] = [
   {
+    version: "0.2.5",
+    sections: [
+      {
+        title: "New",
+        items: [
+          "Recurring tasks: open the 🔁 Recurring panel in the Tasks tab to set up tasks that repeat daily, weekly or monthly. They're created automatically on schedule while the app is open.",
+          "Optional desktop notifications (Settings → Task notifications) for new recurring tasks and tasks due today. Desktop only, and only while the app is running.",
+        ],
+      },
+      {
+        title: "Improved",
+        items: [
+          "Matrix cards now have the same quick actions as the Kanban cards: a done button plus a menu to open, edit or delete the task.",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.2.4",
     sections: [
       {

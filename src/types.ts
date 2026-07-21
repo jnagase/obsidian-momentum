@@ -148,6 +148,19 @@ export interface RecurringItem {
   weekday?: number; // weekly: 0=Sun .. 6=Sat
 }
 
+/** A recurring task template that auto-creates a task on its schedule. */
+export interface RecurringTask {
+  id: string;
+  title: string;
+  board?: string; // kanban board name
+  priority?: string; // "low" | "medium" | "high"
+  eisenhower?: string; // "q1".."q4" or empty
+  freq: string; // "daily" | "weekly" | "monthly"
+  weekday?: number; // weekly: 0=Sun .. 6=Sat
+  day?: number; // monthly: day of month (1-28)
+  lastGenerated?: string; // YYYY-MM-DD of the last occurrence generated
+}
+
 export interface PAConfig {
   calorieTarget: number;
   proteinTarget: number;

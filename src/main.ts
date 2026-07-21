@@ -1,13 +1,14 @@
 import { Plugin, WorkspaceLeaf, PluginSettingTab, App, Setting, TFolder, TFile, Platform } from "obsidian";
 import { PADataStore, setDataRoot } from "./data";
+import { todayLocal } from "./util";
 import { PAView, VIEW_TYPE_PA, PAHost } from "./view";
 import { PANavView, VIEW_TYPE_PA_NAV } from "./nav";
 import { MomentumAIView, VIEW_TYPE_MOMENTUM_AI, AIHost } from "./aiview";
 import { AIConfig, DEFAULT_MODELS } from "./ai";
 import { WhatsNewModal, CHANGELOG, cmpVersion } from "./whatsnew";
 
-interface PASettings { dataRoot: string; aiProvider: string; aiApiKey: string; aiModel: string; aiBaseUrl: string; aiCommand: string; aiCommandArgs: string; lastSeenVersion: string; }
-const DEFAULT_SETTINGS: PASettings = { dataRoot: "Momentum Life", aiProvider: "gemini", aiApiKey: "", aiModel: "gemini-3.5-flash", aiBaseUrl: "", aiCommand: "", aiCommandArgs: "", lastSeenVersion: "" };
+interface PASettings { dataRoot: string; aiProvider: string; aiApiKey: string; aiModel: string; aiBaseUrl: string; aiCommand: string; aiCommandArgs: string; notifyTasks: boolean; lastSeenVersion: string; }
+const DEFAULT_SETTINGS: PASettings = { dataRoot: "Momentum Life", aiProvider: "gemini", aiApiKey: "", aiModel: "gemini-3.5-flash", aiBaseUrl: "", aiCommand: "", aiCommandArgs: "", notifyTasks: false, lastSeenVersion: "" };
 const LEGACY_DATA_ROOT = "Personal Assistant";
 
 export default class MomentumPlugin extends Plugin implements PAHost, AIHost {
@@ -61,7 +62,11 @@ export default class MomentumPlugin extends Plugin implements PAHost, AIHost {
       }
       void this.store.syncTaskLists();
       this.maybeShowWhatsNew();
+      void this.runTaskAutomations();
     });
+
+    // Re-check recurring tasks and due reminders every 30 minutes while Obsidian is open.
+    this.registerInterval(window.setInterval(() => void this.runTaskAutomations(), 30 * 60 * 1000));
 
     // When a task-list mirror file is edited (e.g. a checkbox toggled from another
     // plugin), reflect the done/undone change back into the board tasks.
@@ -144,6 +149,42 @@ export default class MomentumPlugin extends Plugin implements PAHost, AIHost {
     if (entries.length) new WhatsNewModal(this.app, this.manifest.name, entries).open();
   }
 
+  private lastDueNotified = "";
+
+  /** Generate any due recurring tasks and fire desktop notifications (while Obsidian is open). */
+  private async runTaskAutomations(): Promise<void> {
+    try {
+      const created = await this.store.generateDueRecurringTasks();
+      if (created.length) {
+        await this.notify("Momentum Life", created.length === 1 ? `New recurring task: ${created[0]}` : `${created.length} recurring tasks added`);
+        this.app.workspace.getLeavesOfType(VIEW_TYPE_PA).forEach((l) => { if (l.view instanceof PAView) l.view.setPage(this.currentPage); });
+      }
+      await this.maybeNotifyDue();
+    } catch { /* automations are best-effort */ }
+  }
+
+  /** Once per day, notify about tasks whose due date is today and are not done. */
+  private async maybeNotifyDue(): Promise<void> {
+    if (!this.settings.notifyTasks) return;
+    const today = todayLocal();
+    if (this.lastDueNotified === today) return;
+    const due = this.store.loadTasks().filter((t) => t.due === today && t.status !== "done");
+    if (!due.length) return;
+    this.lastDueNotified = today;
+    await this.notify("Tasks due today", due.length === 1 ? due[0].title : `${due.length} tasks are due today`);
+  }
+
+  /** Show a native desktop notification, if enabled and available. Desktop-only. */
+  private async notify(title: string, body: string): Promise<void> {
+    if (!this.settings.notifyTasks || !Platform.isDesktopApp) return;
+    try {
+      const N = window.Notification;
+      if (!N) return;
+      if (N.permission === "default") await N.requestPermission();
+      if (N.permission === "granted") new N(title, { body });
+    } catch { /* notifications are best-effort */ }
+  }
+
   onunload(): void {}
 
   async saveSettings(): Promise<void> {
@@ -167,6 +208,18 @@ class PASettingTab extends PluginSettingTab {
       .addText((t) =>
         t.setValue(this.plugin.settings.dataRoot).onChange(async (v) => {
           this.plugin.settings.dataRoot = v.trim();
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl).setName("Tasks").setHeading();
+
+    new Setting(containerEl)
+      .setName("Task notifications")
+      .setDesc("Show desktop notifications for new recurring tasks and tasks due today. Desktop only, and only while the app is open.")
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.notifyTasks).onChange(async (v) => {
+          this.plugin.settings.notifyTasks = v;
           await this.plugin.saveSettings();
         })
       );

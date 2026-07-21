@@ -213,6 +213,7 @@ export class PADataStore {
           created: str(m.created),
           modified: str(m.modified),
           order: (m.order !== undefined && m.order !== null) ? Number(m.order) : undefined,
+          eisenhower: str(m.eisenhower),
           path: f.path,
         };
       });
@@ -245,6 +246,7 @@ export class PADataStore {
       group: t.group || "",
     };
     if (t.due) meta.due = t.due;
+    if (t.eisenhower) meta.eisenhower = t.eisenhower;
     await this.writeFile(this.uniquePath("Tasks", title), this.buildDoc(meta, `# ${title}\n`));
   }
 
@@ -268,6 +270,7 @@ export class PADataStore {
       if (changes.group !== undefined) fm.group = changes.group;
       if (changes.due !== undefined) fm.due = changes.due;
       if (changes.order !== undefined) fm.order = changes.order;
+      if (changes.eisenhower !== undefined) fm.eisenhower = changes.eisenhower;
       fm.modified = new Date().toISOString();
     });
   }

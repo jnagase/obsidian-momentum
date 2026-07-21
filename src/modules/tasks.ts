@@ -1,12 +1,27 @@
 import { PAContext } from "../context";
 import { Board, Task } from "../types";
 import { ConfirmModal, FieldSpec, FormModal, showActionMenu, toast } from "../ui";
-import { drawRing } from "../charts";
+import { drawRing, drawScatter, ScatterPoint } from "../charts";
 
 const PRIORITIES = [
   { value: "low", label: "Low" },
   { value: "medium", label: "Medium" },
   { value: "high", label: "High" },
+];
+
+const QUADRANTS = [
+  { id: "q1", title: "Do first", sub: "Urgent & important" },
+  { id: "q2", title: "Schedule", sub: "Important, not urgent" },
+  { id: "q3", title: "Delegate", sub: "Urgent, not important" },
+  { id: "q4", title: "Eliminate", sub: "Not urgent or important" },
+];
+
+const EISENHOWER_OPTS = [
+  { value: "", label: "Auto (by priority & due)" },
+  { value: "q1", label: "Do first (urgent & important)" },
+  { value: "q2", label: "Schedule (important, not urgent)" },
+  { value: "q3", label: "Delegate (urgent, not important)" },
+  { value: "q4", label: "Eliminate (neither)" },
 ];
 
 const RING_COLORS = ["#d97706", "#7c3aed", "#16a34a"];
@@ -16,7 +31,7 @@ const COLUMN_COLORS = ["#7c3aed", "#3b82f6", "#16a34a", "#f59e0b", "#ef4444", "#
 export class TasksModule {
   private ctx: PAContext;
   private currentBoard = "all";
-  private view: "kanban" | "list" = "kanban";
+  private view: "kanban" | "list" | "matrix" = "kanban";
 
   constructor(ctx: PAContext) { this.ctx = ctx; }
 
@@ -49,6 +64,8 @@ export class TasksModule {
       this.renderStats(root, filtered);
       this.renderBoardBar(root, boards);
       this.renderKanban(root, filtered, boards);
+    } else if (this.view === "matrix") {
+      this.renderMatrix(root, filtered, boards);
     } else {
       this.renderList(root, filtered);
     }
@@ -78,12 +95,13 @@ export class TasksModule {
   // ---- View toggle ----
   private renderViewToggle(root: HTMLElement): void {
     const bar = root.createDiv({ cls: "pa-view-toggle" });
-    const mk = (id: "kanban" | "list", label: string) => {
+    const mk = (id: "kanban" | "list" | "matrix", label: string) => {
       const b = bar.createEl("button", { text: label, cls: "pa-toggle-btn" + (this.view === id ? " on" : "") });
       b.onclick = () => { this.view = id; this.ctx.refresh(); };
     };
     mk("kanban", "📋 Kanban");
     mk("list", "📃 List");
+    mk("matrix", "🎯 Matrix");
   }
 
   // ---- Board tabs ----
@@ -286,7 +304,7 @@ export class TasksModule {
       ]);
     };
 
-    card.createEl("div", { text: t.title, cls: "pa-card-title" });
+    card.createDiv({ text: t.title, cls: "pa-card-title" });
     const dateStr = (t.created || "").substring(0, 10);
     card.createDiv({ cls: "pa-muted pa-card-meta", text: [t.priority, dateStr].filter(Boolean).join(" · ") });
 
@@ -296,6 +314,127 @@ export class TasksModule {
       if (lines.length) preview.setText(lines.join("\n"));
       else preview.remove();
     });
+  }
+
+  // ---- Eisenhower matrix ----
+  /** Derive a quadrant from priority (importance) and due date (urgency) when none is set. */
+  private derivedQuadrant(t: Task): string {
+    const important = t.priority === "high";
+    let urgent = false;
+    if (t.due) {
+      const due = new Date(t.due + "T00:00:00");
+      if (!isNaN(due.getTime())) {
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        urgent = (due.getTime() - today.getTime()) / 86400000 <= 2; // due within 2 days or overdue
+      }
+    }
+    if (important && urgent) return "q1";
+    if (important) return "q2";
+    if (urgent) return "q3";
+    return "q4";
+  }
+
+  private quadrantOf(t: Task): string {
+    const q = t.eisenhower || "";
+    return QUADRANTS.some((x) => x.id === q) ? q : this.derivedQuadrant(t);
+  }
+
+  /** Small deterministic offset (±0.06) from the task path, so dots don't stack exactly. */
+  private hashJitter(s: string): number {
+    let h = 0;
+    for (let k = 0; k < s.length; k++) h = (h * 31 + s.charCodeAt(k)) % 1000;
+    return (h / 1000 - 0.5) * 0.12;
+  }
+
+  /** Continuous urgency (x) and importance (y) in 0..1 for the scatter chart. */
+  private taskScores(t: Task): { u: number; i: number } {
+    const impMap: Record<string, number> = { high: 0.8, medium: 0.5, low: 0.22 };
+    let imp = impMap[t.priority] ?? 0.5;
+    let urg = 0.2;
+    if (t.due) {
+      const due = new Date(t.due + "T00:00:00");
+      if (!isNaN(due.getTime())) {
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const days = (due.getTime() - today.getTime()) / 86400000;
+        urg = days <= 0 ? 0.92 : days <= 2 ? 0.8 : days <= 7 ? 0.6 : days <= 30 ? 0.42 : 0.28;
+      }
+    }
+    // Keep the dot in the quadrant the user pinned it to, if any.
+    const q = t.eisenhower || "";
+    if (q === "q1") { urg = Math.max(urg, 0.6); imp = Math.max(imp, 0.6); }
+    else if (q === "q2") { urg = Math.min(urg, 0.4); imp = Math.max(imp, 0.6); }
+    else if (q === "q3") { urg = Math.max(urg, 0.6); imp = Math.min(imp, 0.4); }
+    else if (q === "q4") { urg = Math.min(urg, 0.4); imp = Math.min(imp, 0.4); }
+    const j = this.hashJitter(t.path);
+    return { u: Math.max(0.04, Math.min(0.96, urg + j)), i: Math.max(0.04, Math.min(0.96, imp - j)) };
+  }
+
+  private renderMatrixChart(root: HTMLElement, open: Task[]): void {
+    if (!open.length) { root.createEl("p", { cls: "pa-muted", text: "No open tasks to plot." }); return; }
+    const prioColor: Record<string, string> = { high: "#ef4444", medium: "#f59e0b", low: "#9ca3af" };
+    const points: ScatterPoint[] = open.map((t) => {
+      const { u, i } = this.taskScores(t);
+      return { x: u, y: i, color: prioColor[t.priority] || "#9ca3af", title: t.title, onClick: () => { void this.ctx.app.workspace.openLinkText(t.path, "", true); } };
+    });
+    drawScatter(root, points, { xLabel: "Urgency →", yLabel: "Importance →" });
+  }
+
+  private renderMatrix(root: HTMLElement, filtered: Task[], boards: Board[]): void {
+    const cols = this.ctx.config.taskColumns;
+    const doneId = this.doneCol();
+    const colSet = new Set(cols);
+    const eff = (t: Task) => (colSet.has(t.status) ? t.status : cols[0]);
+    const open = filtered.filter((t) => eff(t) !== doneId);
+
+    root.createDiv({ text: "🎯 Eisenhower matrix", cls: "pa-h2" });
+
+    this.renderMatrixChart(root, open);
+
+    root.createDiv({ cls: "pa-muted pa-matrix-hint", text: "Drag a task between quadrants to set its urgency and importance." });
+
+    const grid = root.createDiv({ cls: "pa-matrix" });
+    QUADRANTS.forEach((q) => {
+      const qtasks = open.filter((t) => this.quadrantOf(t) === q.id);
+      const cell = grid.createDiv({ cls: "pa-matrix-cell pa-" + q.id });
+
+      const head = cell.createDiv({ cls: "pa-matrix-head" });
+      head.createDiv({ text: q.title, cls: "pa-matrix-title" });
+      head.createSpan({ text: String(qtasks.length), cls: "pa-matrix-count" });
+      head.createDiv({ text: q.sub, cls: "pa-matrix-sub pa-muted" });
+
+      const body = cell.createDiv({ cls: "pa-matrix-body" });
+      body.addEventListener("dragover", (e) => { e.preventDefault(); body.addClass("pa-drop"); });
+      body.addEventListener("dragleave", () => body.removeClass("pa-drop"));
+      body.addEventListener("drop", (e) => {
+        e.preventDefault();
+        body.removeClass("pa-drop");
+        const path = e.dataTransfer?.getData("text/plain");
+        if (!path) return;
+        const t = open.find((x) => x.path === path);
+        if (!t || this.quadrantOf(t) === q.id) return;
+        void (async () => { await this.ctx.store.updateTask(t, { eisenhower: q.id }); this.ctx.refresh(); })();
+      });
+
+      qtasks.forEach((t) => this.renderMatrixCard(body, t));
+
+      const addBtn = cell.createEl("button", { text: "+ add card", cls: "pa-add-card" });
+      addBtn.onclick = () => this.openTaskModal(null, cols[0], boards);
+    });
+  }
+
+  private renderMatrixCard(body: HTMLElement, t: Task): void {
+    const card = body.createDiv({ cls: "pa-card pa-task pa-matrix-card prio-" + (t.priority || "medium") });
+    card.dataset.path = t.path;
+    card.setAttr("draggable", "true");
+    card.addEventListener("dragstart", (e) => { e.dataTransfer?.setData("text/plain", t.path); card.addClass("pa-dragging"); });
+    card.addEventListener("dragend", () => card.removeClass("pa-dragging"));
+    card.onclick = () => this.ctx.app.workspace.openLinkText(t.path, "", true);
+
+    card.createDiv({ text: t.title, cls: "pa-card-title" });
+    const meta = [t.kanbanName, t.due ? "due " + t.due : ""].filter(Boolean).join(" · ");
+    if (meta) card.createDiv({ cls: "pa-muted pa-card-meta", text: meta });
   }
 
   // ---- List view (single list per board, with collapsed Completed) ----
@@ -372,10 +511,11 @@ export class TasksModule {
       { key: "kanbanName", label: "Board", type: "dropdown", options: boardOptions, value: presetBoard },
       { key: "group", label: "Group / tag", type: "text", value: task?.group || "" },
       { key: "due", label: "Due date", type: "text", value: task?.due || "", placeholder: "YYYY-MM-DD" },
+      { key: "eisenhower", label: "Eisenhower quadrant", type: "dropdown", options: EISENHOWER_OPTS, value: task?.eisenhower || "" },
     ];
     new FormModal(this.ctx.app, task ? "Edit task" : "New task", fields, async (v) => {
       if (!(v.title || "").trim()) return;
-      const data = { title: v.title.trim(), status: v.status, priority: v.priority, kanbanName: v.kanbanName, group: v.group, due: v.due };
+      const data = { title: v.title.trim(), status: v.status, priority: v.priority, kanbanName: v.kanbanName, group: v.group, due: v.due, eisenhower: v.eisenhower };
       if (task) await this.ctx.store.updateTask(task, data);
       else await this.ctx.store.createTask(data);
       this.ctx.refresh();

@@ -24,6 +24,7 @@ export interface Task {
   created?: string;
   modified?: string;
   order?: number;
+  eisenhower?: string; // manual Eisenhower quadrant: "q1" | "q2" | "q3" | "q4" (empty = auto)
   path: string; // vault path of the source file
   body?: string;
 }

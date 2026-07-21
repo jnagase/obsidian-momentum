@@ -325,8 +325,22 @@ export class TasksModule {
   private freqLabel(r: RecurringTask): string {
     const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
     if (r.freq === "daily") return "Every day";
-    if (r.freq === "weekly") return "Every " + (days[r.weekday ?? 1] || "Monday");
+    if (r.freq === "weekly") {
+      const wd = days[r.weekday ?? 1] || "Monday";
+      const n = Math.min(Math.max(r.interval ?? 1, 1), 4);
+      return n <= 1 ? "Every " + wd : `Every ${n} weeks on ${wd}`;
+    }
     return "Monthly on day " + (r.day ?? 1);
+  }
+
+  /** The most recent date (on/before today) that falls on the given weekday, as YYYY-MM-DD. */
+  private mostRecentWeekday(wd: number): string {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const back = (today.getDay() - wd + 7) % 7;
+    const d = new Date(today);
+    d.setDate(today.getDate() - back);
+    return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
   }
 
   private renderRecurringPanel(root: HTMLElement, boards: Board[]): void {
@@ -371,18 +385,34 @@ export class TasksModule {
       { value: "monthly", label: "Monthly" },
     ];
     const weekdayOptions = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"].map((d, i) => ({ value: String(i), label: d }));
+    const intervalOptions = [
+      { value: "1", label: "Every week" },
+      { value: "2", label: "Every 2 weeks" },
+      { value: "3", label: "Every 3 weeks" },
+      { value: "4", label: "Every 4 weeks" },
+    ];
     const fields: FieldSpec[] = [
       { key: "title", label: "Title", type: "text", value: rule?.title || "" },
       { key: "board", label: "Board", type: "dropdown", options: boardOptions, value: rule?.board || (this.currentBoard !== "all" ? this.currentBoard : "") },
       { key: "priority", label: "Priority", type: "dropdown", options: PRIORITIES, value: rule?.priority || "medium" },
       { key: "freq", label: "Repeat", type: "dropdown", options: freqOptions, value: rule?.freq || "weekly" },
       { key: "weekday", label: "Weekday (for weekly)", type: "dropdown", options: weekdayOptions, value: String(rule?.weekday ?? 1) },
+      { key: "interval", label: "Frequency (for weekly)", type: "dropdown", options: intervalOptions, value: String(Math.min(Math.max(rule?.interval ?? 1, 1), 4)) },
       { key: "day", label: "Day of month (for monthly, 1-28)", type: "number", value: rule?.day ?? 1 },
     ];
     new FormModal(this.ctx.app, rule ? "Edit recurring task" : "New recurring task", fields, async (v) => {
       const title = (v.title || "").trim();
       if (!title) return;
       const freq = ["daily", "weekly", "monthly"].includes(v.freq) ? v.freq : "weekly";
+      const weekday = freq === "weekly" ? (parseInt(v.weekday, 10) || 0) : undefined;
+      const interval = freq === "weekly" ? Math.min(Math.max(parseInt(v.interval, 10) || 1, 1), 4) : undefined;
+      // For multi-week intervals, anchor the phase; recompute if new or the weekday changed.
+      let anchor = rule?.anchor;
+      if (freq === "weekly" && interval && interval > 1) {
+        if (!anchor || rule?.weekday !== weekday) anchor = this.mostRecentWeekday(weekday ?? 1);
+      } else {
+        anchor = undefined;
+      }
       const rules = this.ctx.store.loadRecurringTasks();
       const item: RecurringTask = {
         id: rule?.id || "rt" + Date.now() + Math.floor(Math.random() * 1000),
@@ -391,7 +421,9 @@ export class TasksModule {
         priority: v.priority || "medium",
         eisenhower: rule?.eisenhower || "",
         freq,
-        weekday: freq === "weekly" ? (parseInt(v.weekday, 10) || 0) : undefined,
+        weekday,
+        interval,
+        anchor,
         day: freq === "monthly" ? Math.min(Math.max(parseInt(v.day, 10) || 1, 1), 28) : undefined,
         lastGenerated: rule?.lastGenerated,
       };

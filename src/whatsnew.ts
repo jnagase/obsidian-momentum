@@ -6,6 +6,17 @@ export interface ChangeEntry { version: string; sections: ChangeSection[]; }
 /** Release notes shown in the "What's new" dialog, newest first. */
 export const CHANGELOG: ChangeEntry[] = [
   {
+    version: "0.2.6",
+    sections: [
+      {
+        title: "New",
+        items: [
+          "Weekly recurring tasks can now repeat every 1, 2, 3 or 4 weeks. For longer cycles, use the monthly option.",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.2.5",
     sections: [
       {

@@ -865,6 +865,8 @@ export class PADataStore {
       eisenhower: str(r.eisenhower),
       freq: ["daily", "weekly", "monthly"].includes(str(r.freq)) ? str(r.freq) : "weekly",
       weekday: r.weekday != null ? num(r.weekday) : undefined,
+      interval: r.interval != null ? num(r.interval) : undefined,
+      anchor: str(r.anchor),
       day: r.day != null ? num(r.day) : undefined,
       lastGenerated: str(r.lastGenerated),
     })).filter((r) => r.title.trim().length > 0);
@@ -881,9 +883,20 @@ export class PADataStore {
     if (rule.freq === "weekly") {
       const wd = rule.weekday ?? 1;
       const back = (today.getDay() - wd + 7) % 7;
-      const d = new Date(today);
-      d.setDate(today.getDate() - back);
-      return d;
+      const occ = new Date(today);
+      occ.setDate(today.getDate() - back); // most recent <wd> on/before today
+      const interval = Math.min(Math.max(rule.interval ?? 1, 1), 4);
+      if (interval <= 1) return occ;
+      // Align to the N-week phase defined by the anchor.
+      const anchor = rule.anchor ? new Date(rule.anchor + "T00:00:00") : occ;
+      if (isNaN(anchor.getTime())) return occ;
+      const cur = new Date(occ);
+      while (cur.getTime() >= anchor.getTime()) {
+        const weeks = Math.round((cur.getTime() - anchor.getTime()) / (7 * 86400000));
+        if (weeks % interval === 0) return cur;
+        cur.setDate(cur.getDate() - 7);
+      }
+      return null;
     }
     // monthly
     const day = Math.min(Math.max(rule.day ?? 1, 1), 28);

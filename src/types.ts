@@ -157,6 +157,8 @@ export interface RecurringTask {
   eisenhower?: string; // "q1".."q4" or empty
   freq: string; // "daily" | "weekly" | "monthly"
   weekday?: number; // weekly: 0=Sun .. 6=Sat
+  interval?: number; // weekly: repeat every N weeks (1-4)
+  anchor?: string; // weekly: YYYY-MM-DD reference occurrence for the N-week phase
   day?: number; // monthly: day of month (1-28)
   lastGenerated?: string; // YYYY-MM-DD of the last occurrence generated
 }

@@ -263,9 +263,9 @@ export function drawScatter(
   opts: { xLabel?: string; yLabel?: string; corners?: [string, string, string, string]; height?: number } = {}
 ): void {
   const wrap = parent.createDiv({ cls: "pa-scatter" });
-  const height = opts.height ?? 300;
-  const w = 420;
-  const padL = 30, padR = 14, padT = 14, padB = 28;
+  const height = opts.height ?? 460;
+  const w = 520;
+  const padL = 40, padR = 18, padT = 20, padB = 36;
   const plotW = w - padL - padR;
   const plotH = height - padT - padB;
   const x0 = padL, y0 = padT, x1 = padL + plotW, y1 = padT + plotH;
@@ -288,26 +288,26 @@ export function drawScatter(
 
   const corners = opts.corners ?? ["Do first", "Schedule", "Delegate", "Eliminate"];
   const corner = (text: string, tx: number, ty: number, anchor: string) => {
-    const el = svgEl("text", { x: tx, y: ty, "text-anchor": anchor, "font-size": 9, "font-weight": 700, fill: "var(--text-muted)" });
+    const el = svgEl("text", { x: tx, y: ty, "text-anchor": anchor, "font-size": 12, "font-weight": 700, fill: "var(--text-muted)" });
     el.textContent = text;
     svg.appendChild(el);
   };
-  corner(corners[0], x1 - 4, y0 + 12, "end");
-  corner(corners[1], x0 + 4, y0 + 12, "start");
-  corner(corners[2], x1 - 4, y1 - 5, "end");
-  corner(corners[3], x0 + 4, y1 - 5, "start");
+  corner(corners[0], x1 - 6, y0 + 16, "end");
+  corner(corners[1], x0 + 6, y0 + 16, "start");
+  corner(corners[2], x1 - 6, y1 - 7, "end");
+  corner(corners[3], x0 + 6, y1 - 7, "start");
 
-  const xlab = svgEl("text", { x: midX, y: height - 5, "text-anchor": "middle", "font-size": 10, fill: "var(--text-muted)" });
+  const xlab = svgEl("text", { x: midX, y: height - 7, "text-anchor": "middle", "font-size": 12, fill: "var(--text-muted)" });
   xlab.textContent = opts.xLabel ?? "";
   svg.appendChild(xlab);
-  const ylab = svgEl("text", { x: 10, y: midY, "text-anchor": "middle", "font-size": 10, fill: "var(--text-muted)", transform: `rotate(-90 10 ${midY})` });
+  const ylab = svgEl("text", { x: 13, y: midY, "text-anchor": "middle", "font-size": 12, fill: "var(--text-muted)", transform: `rotate(-90 13 ${midY})` });
   ylab.textContent = opts.yLabel ?? "";
   svg.appendChild(ylab);
 
   points.forEach((p) => {
     const cx = x0 + Math.max(0, Math.min(1, p.x)) * plotW;
     const cy = y1 - Math.max(0, Math.min(1, p.y)) * plotH;
-    const attrs: Record<string, string | number> = { cx, cy, r: 6, fill: p.color, "fill-opacity": 0.85, stroke: "var(--background-primary)", "stroke-width": 1.5 };
+    const attrs: Record<string, string | number> = { cx, cy, r: 9, fill: p.color, "fill-opacity": 0.85, stroke: "var(--background-primary)", "stroke-width": 2 };
     if (p.onClick) attrs.class = "pa-scatter-dot";
     const dot = svgEl("circle", attrs);
     const title = svgEl("title", {});

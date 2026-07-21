@@ -402,3 +402,15 @@
 .pa-scatter{margin:6px 0 12px;border:1px solid var(--background-modifier-border);border-radius:10px;background:var(--background-secondary);padding:8px}
 .pa-scatter-dot{cursor:pointer}
 .pa-scatter-dot:hover{fill-opacity:1}
+
+.pa-recurring-panel{margin:10px 0;padding:12px;border:1px solid var(--background-modifier-border);border-radius:10px;background:var(--background-secondary)}
+.pa-recurring-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:4px}
+.pa-recurring-title{font-weight:700}
+.pa-recurring-hint{font-size:.78rem;margin-bottom:8px}
+.pa-recurring-item{display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--background-modifier-border)}
+.pa-recurring-item:last-of-type{border-bottom:none}
+.pa-recurring-item-main{flex:1;min-width:0}
+.pa-recurring-item-title{font-weight:600}
+.pa-recurring-item-sub{font-size:.74rem}
+.pa-recurring-item-acts{display:flex;gap:4px}
+.pa-card-done{color:#16a34a}

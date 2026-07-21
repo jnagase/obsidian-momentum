@@ -1,7 +1,7 @@
 import { App, TFile, TFolder, normalizePath } from "obsidian";
 import {
   Board, Task, Note, Habit, Exercise, Workout, WorkoutExercise, Split,
-  StudyCard, Meal, MealItem, MealLog, Transaction, RecurringItem, PAConfig, defaultConfig,
+  StudyCard, Meal, MealItem, MealLog, Transaction, RecurringItem, RecurringTask, PAConfig, defaultConfig,
 } from "./types";
 import { todayLocal } from "./util";
 
@@ -849,6 +849,82 @@ export class PADataStore {
   async saveRecurring(items: RecurringItem[]): Promise<void> {
     await this.writeFile("Finance/recurring.md", this.buildDoc({ type: "recurring-config", items }, "# Recurring costs\n"));
   }
+
+  // ============================================================
+  // RECURRING TASKS
+  // ============================================================
+  loadRecurringTasks(): RecurringTask[] {
+    const f = this.fileAt("Tasks/recurring.md");
+    if (!f) return [];
+    const list = coerce<Array<Record<string, unknown>>>(this.frontmatter(f).items, []);
+    return list.map((r) => ({
+      id: str(r.id) || ("rt" + Math.random().toString(36).slice(2, 8)),
+      title: str(r.title),
+      board: str(r.board),
+      priority: str(r.priority) || "medium",
+      eisenhower: str(r.eisenhower),
+      freq: ["daily", "weekly", "monthly"].includes(str(r.freq)) ? str(r.freq) : "weekly",
+      weekday: r.weekday != null ? num(r.weekday) : undefined,
+      day: r.day != null ? num(r.day) : undefined,
+      lastGenerated: str(r.lastGenerated),
+    })).filter((r) => r.title.trim().length > 0);
+  }
+
+  async saveRecurringTasks(items: RecurringTask[]): Promise<void> {
+    await this.writeFile("Tasks/recurring.md", this.buildDoc({ type: "recurring-tasks-config", items }, "# Recurring tasks\n"));
+  }
+
+  /** The most recent occurrence date (<= today) for a rule, or null if none is due yet. */
+  private lastOccurrence(rule: RecurringTask, now: Date): Date | null {
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    if (rule.freq === "daily") return today;
+    if (rule.freq === "weekly") {
+      const wd = rule.weekday ?? 1;
+      const back = (today.getDay() - wd + 7) % 7;
+      const d = new Date(today);
+      d.setDate(today.getDate() - back);
+      return d;
+    }
+    // monthly
+    const day = Math.min(Math.max(rule.day ?? 1, 1), 28);
+    const thisMonth = new Date(today.getFullYear(), today.getMonth(), day);
+    if (thisMonth.getTime() <= today.getTime()) return thisMonth;
+    return new Date(today.getFullYear(), today.getMonth() - 1, day);
+  }
+
+  /**
+   * Create task instances for any recurring rule whose current occurrence hasn't
+   * been generated yet. Returns the titles of tasks that were created.
+   */
+  async generateDueRecurringTasks(): Promise<string[]> {
+    const rules = this.loadRecurringTasks();
+    if (!rules.length) return [];
+    const now = new Date();
+    const created: string[] = [];
+    let changed = false;
+    for (const rule of rules) {
+      const occ = this.lastOccurrence(rule, now);
+      if (!occ) continue;
+      const occStr = ymdLocal(occ);
+      if (rule.lastGenerated && rule.lastGenerated >= occStr) continue;
+      await this.createTask({
+        title: rule.title,
+        priority: rule.priority || "medium",
+        kanbanName: rule.board || "",
+        due: occStr,
+        eisenhower: rule.eisenhower || "",
+      });
+      rule.lastGenerated = occStr;
+      created.push(rule.title);
+      changed = true;
+    }
+    if (changed) await this.saveRecurringTasks(rules);
+    return created;
+  }
+}
+
+function ymdLocal(d: Date): string {
+  return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
 }
 
 function cryptoId(): string {

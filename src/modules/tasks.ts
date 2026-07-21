@@ -1,5 +1,5 @@
 import { PAContext } from "../context";
-import { Board, Task } from "../types";
+import { Board, Task, RecurringTask } from "../types";
 import { ConfirmModal, FieldSpec, FormModal, showActionMenu, toast } from "../ui";
 import { drawRing, drawScatter, ScatterPoint } from "../charts";
 
@@ -32,6 +32,7 @@ export class TasksModule {
   private ctx: PAContext;
   private currentBoard = "all";
   private view: "kanban" | "list" | "matrix" = "kanban";
+  private showRecurring = false;
 
   constructor(ctx: PAContext) { this.ctx = ctx; }
 
@@ -59,6 +60,8 @@ export class TasksModule {
     this.renderHeader(root, filtered);
     this.renderViewToggle(root);
     this.renderBoardTabs(root, boards);
+
+    if (this.showRecurring) this.renderRecurringPanel(root, boards);
 
     if (this.view === "kanban") {
       this.renderStats(root, filtered);
@@ -102,6 +105,8 @@ export class TasksModule {
     mk("kanban", "📋 Kanban");
     mk("list", "📃 List");
     mk("matrix", "🎯 Matrix");
+    const rec = bar.createEl("button", { text: "🔁 Recurring", cls: "pa-toggle-btn pa-toggle-recurring" + (this.showRecurring ? " on" : "") });
+    rec.onclick = () => { this.showRecurring = !this.showRecurring; this.ctx.refresh(); };
   }
 
   // ---- Board tabs ----
@@ -316,6 +321,87 @@ export class TasksModule {
     });
   }
 
+  // ---- Recurring tasks ----
+  private freqLabel(r: RecurringTask): string {
+    const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+    if (r.freq === "daily") return "Every day";
+    if (r.freq === "weekly") return "Every " + (days[r.weekday ?? 1] || "Monday");
+    return "Monthly on day " + (r.day ?? 1);
+  }
+
+  private renderRecurringPanel(root: HTMLElement, boards: Board[]): void {
+    const rules = this.ctx.store.loadRecurringTasks();
+    const panel = root.createDiv({ cls: "pa-recurring-panel" });
+
+    const head = panel.createDiv({ cls: "pa-recurring-head" });
+    head.createDiv({ text: "🔁 Recurring tasks", cls: "pa-recurring-title" });
+    const close = head.createEl("button", { text: "✕", cls: "pa-icon-btn" });
+    close.onclick = () => { this.showRecurring = false; this.ctx.refresh(); };
+
+    panel.createDiv({ cls: "pa-muted pa-recurring-hint", text: "New tasks are created automatically on schedule while the app is open." });
+
+    if (!rules.length) {
+      panel.createEl("p", { cls: "pa-muted", text: "No recurring tasks yet." });
+    } else {
+      rules.forEach((r) => {
+        const row = panel.createDiv({ cls: "pa-recurring-item" });
+        const main = row.createDiv({ cls: "pa-recurring-item-main" });
+        main.createDiv({ text: r.title, cls: "pa-recurring-item-title" });
+        main.createDiv({ cls: "pa-muted pa-recurring-item-sub", text: [this.freqLabel(r), r.board].filter(Boolean).join(" · ") });
+        const acts = row.createDiv({ cls: "pa-recurring-item-acts" });
+        const edit = acts.createEl("button", { text: "✎", cls: "pa-icon-btn" });
+        edit.onclick = () => this.openRecurringTaskModal(r, boards);
+        const del = acts.createEl("button", { text: "🗑", cls: "pa-icon-btn" });
+        del.onclick = () => new ConfirmModal(this.ctx.app, `Delete recurring task "${r.title}"?`, async () => {
+          await this.ctx.store.saveRecurringTasks(rules.filter((x) => x.id !== r.id));
+          this.ctx.refresh();
+        }).open();
+      });
+    }
+
+    const add = panel.createEl("button", { text: "+ recurring task", cls: "pa-add-card" });
+    add.onclick = () => this.openRecurringTaskModal(null, boards);
+  }
+
+  private openRecurringTaskModal(rule: RecurringTask | null, boards: Board[]): void {
+    const boardOptions = [{ value: "", label: "— none —" }].concat(boards.map((b) => ({ value: b.name, label: b.name })));
+    const freqOptions = [
+      { value: "daily", label: "Every day" },
+      { value: "weekly", label: "Weekly" },
+      { value: "monthly", label: "Monthly" },
+    ];
+    const weekdayOptions = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"].map((d, i) => ({ value: String(i), label: d }));
+    const fields: FieldSpec[] = [
+      { key: "title", label: "Title", type: "text", value: rule?.title || "" },
+      { key: "board", label: "Board", type: "dropdown", options: boardOptions, value: rule?.board || (this.currentBoard !== "all" ? this.currentBoard : "") },
+      { key: "priority", label: "Priority", type: "dropdown", options: PRIORITIES, value: rule?.priority || "medium" },
+      { key: "freq", label: "Repeat", type: "dropdown", options: freqOptions, value: rule?.freq || "weekly" },
+      { key: "weekday", label: "Weekday (for weekly)", type: "dropdown", options: weekdayOptions, value: String(rule?.weekday ?? 1) },
+      { key: "day", label: "Day of month (for monthly, 1-28)", type: "number", value: rule?.day ?? 1 },
+    ];
+    new FormModal(this.ctx.app, rule ? "Edit recurring task" : "New recurring task", fields, async (v) => {
+      const title = (v.title || "").trim();
+      if (!title) return;
+      const freq = ["daily", "weekly", "monthly"].includes(v.freq) ? v.freq : "weekly";
+      const rules = this.ctx.store.loadRecurringTasks();
+      const item: RecurringTask = {
+        id: rule?.id || "rt" + Date.now() + Math.floor(Math.random() * 1000),
+        title,
+        board: v.board || "",
+        priority: v.priority || "medium",
+        eisenhower: rule?.eisenhower || "",
+        freq,
+        weekday: freq === "weekly" ? (parseInt(v.weekday, 10) || 0) : undefined,
+        day: freq === "monthly" ? Math.min(Math.max(parseInt(v.day, 10) || 1, 1), 28) : undefined,
+        lastGenerated: rule?.lastGenerated,
+      };
+      const next = rule ? rules.map((x) => (x.id === rule.id ? item : x)) : [...rules, item];
+      await this.ctx.store.saveRecurringTasks(next);
+      await this.ctx.store.generateDueRecurringTasks();
+      this.ctx.refresh();
+    }, rule ? "Save" : "Create").open();
+  }
+
   // ---- Eisenhower matrix ----
   /** Derive a quadrant from priority (importance) and due date (urgency) when none is set. */
   private derivedQuadrant(t: Task): string {
@@ -431,6 +517,27 @@ export class TasksModule {
     card.addEventListener("dragstart", (e) => { e.dataTransfer?.setData("text/plain", t.path); card.addClass("pa-dragging"); });
     card.addEventListener("dragend", () => card.removeClass("pa-dragging"));
     card.onclick = () => this.ctx.app.workspace.openLinkText(t.path, "", true);
+
+    const topRow = card.createDiv({ cls: "pa-card-top" });
+    const badgeText = (t.group || t.cat || t.kanbanName || "").toUpperCase();
+    topRow.createDiv({ text: badgeText, cls: "pa-card-cat" });
+    const acts = topRow.createDiv({ cls: "pa-card-top-actions" });
+    const doneBtn = acts.createEl("button", { text: "✓", cls: "pa-icon-btn pa-card-done" });
+    doneBtn.setAttr("aria-label", "Mark done");
+    doneBtn.onclick = (e) => {
+      e.stopPropagation();
+      void (async () => { await this.ctx.store.updateTask(t, { status: this.doneCol() }); this.ctx.refresh(); })();
+    };
+    const menuBtn = acts.createEl("button", { text: "⋮", cls: "pa-icon-btn pa-card-menu" });
+    menuBtn.onclick = (e) => {
+      e.stopPropagation();
+      showActionMenu(e, [
+        { title: "Open note", icon: "file-text", onClick: () => { void this.ctx.app.workspace.openLinkText(t.path, "", true); } },
+        { title: "Edit", icon: "pencil", onClick: () => this.openTaskModal(t, t.status, this.ctx.store.loadBoards()) },
+        { title: "Mark done", icon: "check", onClick: () => { void (async () => { await this.ctx.store.updateTask(t, { status: this.doneCol() }); this.ctx.refresh(); })(); } },
+        { title: "Delete", icon: "trash", warning: true, onClick: () => new ConfirmModal(this.ctx.app, `Delete task "${t.title}"?`, async () => { await this.ctx.store.deleteTask(t); this.ctx.refresh(); }).open() },
+      ]);
+    };
 
     card.createDiv({ text: t.title, cls: "pa-card-title" });
     const meta = [t.kanbanName, t.due ? "due " + t.due : ""].filter(Boolean).join(" · ");

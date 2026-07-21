@@ -1,7 +1,7 @@
 import { PAContext } from "../context";
 import { Board, Task } from "../types";
 import { ConfirmModal, FieldSpec, FormModal, showActionMenu, toast } from "../ui";
-import { drawRing } from "../charts";
+import { drawRing, drawScatter, ScatterPoint } from "../charts";
 
 const PRIORITIES = [
   { value: "low", label: "Low" },
@@ -340,6 +340,47 @@ export class TasksModule {
     return QUADRANTS.some((x) => x.id === q) ? q : this.derivedQuadrant(t);
   }
 
+  /** Small deterministic offset (±0.06) from the task path, so dots don't stack exactly. */
+  private hashJitter(s: string): number {
+    let h = 0;
+    for (let k = 0; k < s.length; k++) h = (h * 31 + s.charCodeAt(k)) % 1000;
+    return (h / 1000 - 0.5) * 0.12;
+  }
+
+  /** Continuous urgency (x) and importance (y) in 0..1 for the scatter chart. */
+  private taskScores(t: Task): { u: number; i: number } {
+    const impMap: Record<string, number> = { high: 0.8, medium: 0.5, low: 0.22 };
+    let imp = impMap[t.priority] ?? 0.5;
+    let urg = 0.2;
+    if (t.due) {
+      const due = new Date(t.due + "T00:00:00");
+      if (!isNaN(due.getTime())) {
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const days = (due.getTime() - today.getTime()) / 86400000;
+        urg = days <= 0 ? 0.92 : days <= 2 ? 0.8 : days <= 7 ? 0.6 : days <= 30 ? 0.42 : 0.28;
+      }
+    }
+    // Keep the dot in the quadrant the user pinned it to, if any.
+    const q = t.eisenhower || "";
+    if (q === "q1") { urg = Math.max(urg, 0.6); imp = Math.max(imp, 0.6); }
+    else if (q === "q2") { urg = Math.min(urg, 0.4); imp = Math.max(imp, 0.6); }
+    else if (q === "q3") { urg = Math.max(urg, 0.6); imp = Math.min(imp, 0.4); }
+    else if (q === "q4") { urg = Math.min(urg, 0.4); imp = Math.min(imp, 0.4); }
+    const j = this.hashJitter(t.path);
+    return { u: Math.max(0.04, Math.min(0.96, urg + j)), i: Math.max(0.04, Math.min(0.96, imp - j)) };
+  }
+
+  private renderMatrixChart(root: HTMLElement, open: Task[]): void {
+    if (!open.length) { root.createEl("p", { cls: "pa-muted", text: "No open tasks to plot." }); return; }
+    const prioColor: Record<string, string> = { high: "#ef4444", medium: "#f59e0b", low: "#9ca3af" };
+    const points: ScatterPoint[] = open.map((t) => {
+      const { u, i } = this.taskScores(t);
+      return { x: u, y: i, color: prioColor[t.priority] || "#9ca3af", title: t.title, onClick: () => { void this.ctx.app.workspace.openLinkText(t.path, "", true); } };
+    });
+    drawScatter(root, points, { xLabel: "Urgency →", yLabel: "Importance →" });
+  }
+
   private renderMatrix(root: HTMLElement, filtered: Task[], boards: Board[]): void {
     const cols = this.ctx.config.taskColumns;
     const doneId = this.doneCol();
@@ -348,6 +389,9 @@ export class TasksModule {
     const open = filtered.filter((t) => eff(t) !== doneId);
 
     root.createDiv({ text: "🎯 Eisenhower matrix", cls: "pa-h2" });
+
+    this.renderMatrixChart(root, open);
+
     root.createDiv({ cls: "pa-muted pa-matrix-hint", text: "Drag a task between quadrants to set its urgency and importance." });
 
     const grid = root.createDiv({ cls: "pa-matrix" });

@@ -6,6 +6,17 @@ export interface ChangeEntry { version: string; sections: ChangeSection[]; }
 /** Release notes shown in the "What's new" dialog, newest first. */
 export const CHANGELOG: ChangeEntry[] = [
   {
+    version: "0.2.4",
+    sections: [
+      {
+        title: "New",
+        items: [
+          "The Eisenhower view now includes a scatter chart: each open task is a dot placed by urgency (x) and importance (y), on top of the four quadrants. Click a dot to open the task.",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.2.3",
     sections: [
       {

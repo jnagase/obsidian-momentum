@@ -247,3 +247,75 @@ export function drawLineChart(
     });
   }
 }
+
+export interface ScatterPoint {
+  x: number; // 0..1 (left..right)
+  y: number; // 0..1 (bottom..top)
+  color: string;
+  title: string;
+  onClick?: () => void;
+}
+
+/** A 2x2 quadrant scatter plot (used for the Eisenhower chart). x/y are 0..1. */
+export function drawScatter(
+  parent: HTMLElement,
+  points: ScatterPoint[],
+  opts: { xLabel?: string; yLabel?: string; corners?: [string, string, string, string]; height?: number } = {}
+): void {
+  const wrap = parent.createDiv({ cls: "pa-scatter" });
+  const height = opts.height ?? 300;
+  const w = 420;
+  const padL = 30, padR = 14, padT = 14, padB = 28;
+  const plotW = w - padL - padR;
+  const plotH = height - padT - padB;
+  const x0 = padL, y0 = padT, x1 = padL + plotW, y1 = padT + plotH;
+  const midX = padL + plotW / 2, midY = padT + plotH / 2;
+
+  const svg = svgEl("svg", { width: "100%", height, viewBox: `0 0 ${w} ${height}` });
+
+  // Quadrant tints: [top-right, top-left, bottom-right, bottom-left]
+  const tints = [
+    { x: midX, y: y0, w: x1 - midX, h: midY - y0, color: "#ef4444" },
+    { x: x0, y: y0, w: midX - x0, h: midY - y0, color: "#3b82f6" },
+    { x: midX, y: midY, w: x1 - midX, h: y1 - midY, color: "#f59e0b" },
+    { x: x0, y: midY, w: midX - x0, h: y1 - midY, color: "#6b7280" },
+  ];
+  tints.forEach((r) => svg.appendChild(svgEl("rect", { x: r.x, y: r.y, width: r.w, height: r.h, fill: r.color, "fill-opacity": 0.08 })));
+
+  svg.appendChild(svgEl("rect", { x: x0, y: y0, width: plotW, height: plotH, fill: "none", stroke: "var(--background-modifier-border)", "stroke-width": 1 }));
+  svg.appendChild(svgEl("line", { x1: midX, y1: y0, x2: midX, y2: y1, stroke: "var(--background-modifier-border)", "stroke-width": 1, "stroke-dasharray": "4 4" }));
+  svg.appendChild(svgEl("line", { x1: x0, y1: midY, x2: x1, y2: midY, stroke: "var(--background-modifier-border)", "stroke-width": 1, "stroke-dasharray": "4 4" }));
+
+  const corners = opts.corners ?? ["Do first", "Schedule", "Delegate", "Eliminate"];
+  const corner = (text: string, tx: number, ty: number, anchor: string) => {
+    const el = svgEl("text", { x: tx, y: ty, "text-anchor": anchor, "font-size": 9, "font-weight": 700, fill: "var(--text-muted)" });
+    el.textContent = text;
+    svg.appendChild(el);
+  };
+  corner(corners[0], x1 - 4, y0 + 12, "end");
+  corner(corners[1], x0 + 4, y0 + 12, "start");
+  corner(corners[2], x1 - 4, y1 - 5, "end");
+  corner(corners[3], x0 + 4, y1 - 5, "start");
+
+  const xlab = svgEl("text", { x: midX, y: height - 5, "text-anchor": "middle", "font-size": 10, fill: "var(--text-muted)" });
+  xlab.textContent = opts.xLabel ?? "";
+  svg.appendChild(xlab);
+  const ylab = svgEl("text", { x: 10, y: midY, "text-anchor": "middle", "font-size": 10, fill: "var(--text-muted)", transform: `rotate(-90 10 ${midY})` });
+  ylab.textContent = opts.yLabel ?? "";
+  svg.appendChild(ylab);
+
+  points.forEach((p) => {
+    const cx = x0 + Math.max(0, Math.min(1, p.x)) * plotW;
+    const cy = y1 - Math.max(0, Math.min(1, p.y)) * plotH;
+    const attrs: Record<string, string | number> = { cx, cy, r: 6, fill: p.color, "fill-opacity": 0.85, stroke: "var(--background-primary)", "stroke-width": 1.5 };
+    if (p.onClick) attrs.class = "pa-scatter-dot";
+    const dot = svgEl("circle", attrs);
+    const title = svgEl("title", {});
+    title.textContent = p.title;
+    dot.appendChild(title);
+    if (p.onClick) dot.addEventListener("click", p.onClick);
+    svg.appendChild(dot);
+  });
+
+  wrap.appendChild(svg);
+}

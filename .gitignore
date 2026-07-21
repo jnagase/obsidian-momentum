@@ -6,3 +6,6 @@ main.js
 
 # Local copy of the sibling web app, used only as porting reference
 reference/
+
+# Scratch/verification temp files
+_*.txt

@@ -6,6 +6,17 @@ export interface ChangeEntry { version: string; sections: ChangeSection[]; }
 /** Release notes shown in the "What's new" dialog, newest first. */
 export const CHANGELOG: ChangeEntry[] = [
   {
+    version: "0.2.10",
+    sections: [
+      {
+        title: "Fixed",
+        items: [
+          "Adding a card from a quadrant in the Eisenhower matrix now creates the task in that quadrant, instead of always landing in Eliminate.",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.2.9",
     sections: [
       {

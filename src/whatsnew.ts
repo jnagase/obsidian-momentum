@@ -6,6 +6,17 @@ export interface ChangeEntry { version: string; sections: ChangeSection[]; }
 /** Release notes shown in the "What's new" dialog, newest first. */
 export const CHANGELOG: ChangeEntry[] = [
   {
+    version: "0.2.8",
+    sections: [
+      {
+        title: "Improved",
+        items: [
+          "Data files now read as plain markdown. Recurring tasks, recurring costs, boards and workout splits show a human-readable list in the note body, so you can read them without the plugin. The plugin still keeps the exact data in the note properties.",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.2.6",
     sections: [
       {

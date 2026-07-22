@@ -185,7 +185,7 @@ export class PADataStore {
   loadStudyBoards(): Board[] { return this.boardsFrom(this.fileAt("Studies/boards.md")); }
 
   async saveBoards(boards: Board[]): Promise<void> {
-    await this.writeFile("Tasks/boards.md", this.buildDoc({ type: "boards-config", boards }, "# Boards\n"));
+    await this.writeFile("Tasks/boards.md", this.buildDoc({ type: "boards-config", boards }, boardsBody("Task boards", boards)));
   }
 
   // ============================================================
@@ -549,7 +549,7 @@ export class PADataStore {
   }
 
   async saveSplits(splits: Split[]): Promise<void> {
-    await this.writeFile("Fitness/splits.md", this.buildDoc({ type: "splits-config", splits }, "# Workout Splits\n"));
+    await this.writeFile("Fitness/splits.md", this.buildDoc({ type: "splits-config", splits }, splitsBody(splits)));
   }
 
   async logWorkout(splitId: string, duration: number, exercises: WorkoutExercise[], date: string = todayLocal()): Promise<void> {
@@ -608,7 +608,7 @@ export class PADataStore {
   async saveStudyBoards(boards: Board[]): Promise<void> {
     await this.writeFile(
       "Studies/boards.md",
-      this.buildDoc({ type: "study-boards-config", boards }, "# Study Boards\n")
+      this.buildDoc({ type: "study-boards-config", boards }, boardsBody("Study topics", boards))
     );
   }
 
@@ -847,7 +847,8 @@ export class PADataStore {
   }
 
   async saveRecurring(items: RecurringItem[]): Promise<void> {
-    await this.writeFile("Finance/recurring.md", this.buildDoc({ type: "recurring-config", items }, "# Recurring costs\n"));
+    const cur = (await this.loadConfig()).currency || "$";
+    await this.writeFile("Finance/recurring.md", this.buildDoc({ type: "recurring-config", items }, recurringCostsBody(items, cur)));
   }
 
   // ============================================================
@@ -873,7 +874,7 @@ export class PADataStore {
   }
 
   async saveRecurringTasks(items: RecurringTask[]): Promise<void> {
-    await this.writeFile("Tasks/recurring.md", this.buildDoc({ type: "recurring-tasks-config", items }, "# Recurring tasks\n"));
+    await this.writeFile("Tasks/recurring.md", this.buildDoc({ type: "recurring-tasks-config", items }, recurringTasksBody(items)));
   }
 
   /** The most recent occurrence date (<= today) for a rule, or null if none is due yet. */
@@ -938,6 +939,54 @@ export class PADataStore {
 
 function ymdLocal(d: Date): string {
   return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+}
+
+const WEEKDAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+/** Human-readable markdown body for the recurring-tasks file (JSON in frontmatter stays the source of truth). */
+function recurringTasksBody(items: RecurringTask[]): string {
+  const desc = (r: RecurringTask): string => {
+    let when: string;
+    if (r.freq === "daily") when = "every day";
+    else if (r.freq === "weekly") {
+      const wd = WEEKDAY_NAMES[r.weekday ?? 1] || "Monday";
+      const n = Math.min(Math.max(r.interval ?? 1, 1), 4);
+      when = n <= 1 ? `every ${wd}` : `every ${n} weeks on ${wd}`;
+    } else when = `monthly on day ${r.day ?? 1}`;
+    const extras = [r.board, r.priority ? `${r.priority} priority` : ""].filter(Boolean).join(" · ");
+    return `- **${r.title}** — ${when}${extras ? ` · ${extras}` : ""}`;
+  };
+  const lines = items.map(desc);
+  return "# Recurring tasks\n\n" + (lines.length ? lines.join("\n") + "\n" : "_No recurring tasks yet._\n");
+}
+
+/** Human-readable markdown body for the recurring finance file. */
+function recurringCostsBody(items: RecurringItem[], currency: string): string {
+  const desc = (r: RecurringItem): string => {
+    const when = r.freq === "weekly" ? `weekly (${WEEKDAY_NAMES[r.weekday ?? 1] || "Monday"})` : `monthly (day ${r.day ?? 1})`;
+    const sign = r.type === "income" ? "+" : "-";
+    const note = r.note ? ` — ${r.note}` : "";
+    return `- **${r.category}** — ${sign}${currency}${r.amount} · ${when}${note}`;
+  };
+  const income = items.filter((r) => r.type === "income");
+  const expense = items.filter((r) => r.type !== "income");
+  let body = "# Recurring costs\n\n";
+  if (expense.length) body += "## Expenses\n" + expense.map(desc).join("\n") + "\n\n";
+  if (income.length) body += "## Income\n" + income.map(desc).join("\n") + "\n\n";
+  if (!items.length) body += "_No recurring items yet._\n";
+  return body;
+}
+
+/** Human-readable markdown body for a boards file. */
+function boardsBody(title: string, boards: Board[]): string {
+  const lines = boards.map((b) => `- ${b.emoji ? b.emoji + " " : ""}**${b.name}**`);
+  return `# ${title}\n\n` + (lines.length ? lines.join("\n") + "\n" : "_None yet._\n");
+}
+
+/** Human-readable markdown body for the workout splits file. */
+function splitsBody(splits: Split[]): string {
+  const lines = splits.map((s) => `- **${s.name}**`);
+  return "# Workout splits\n\n" + (lines.length ? lines.join("\n") + "\n" : "_No splits yet._\n");
 }
 
 function cryptoId(): string {

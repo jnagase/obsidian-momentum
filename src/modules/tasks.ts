@@ -540,7 +540,7 @@ export class TasksModule {
       qtasks.forEach((t) => this.renderMatrixCard(body, t));
 
       const addBtn = cell.createEl("button", { text: "+ add card", cls: "pa-add-card" });
-      addBtn.onclick = () => this.openTaskModal(null, cols[0], boards);
+      addBtn.onclick = () => this.openTaskModal(null, cols[0], boards, undefined, q.id);
     });
   }
 
@@ -641,7 +641,7 @@ export class TasksModule {
     }).open();
   }
 
-  private openTaskModal(task: Task | null, defaultStatus: string, boards: Board[], defaultBoard?: string): void {
+  private openTaskModal(task: Task | null, defaultStatus: string, boards: Board[], defaultBoard?: string, defaultQuadrant?: string): void {
     const boardOptions = [{ value: "", label: "— none —" }].concat(boards.map((b) => ({ value: b.name, label: b.name })));
     const colOptions = this.ctx.config.taskColumns.map((c) => ({ value: c, label: this.ctx.config.taskColumnNames[c] || c }));
     const presetBoard = task?.kanbanName || defaultBoard || (this.currentBoard !== "all" ? this.currentBoard : "");
@@ -652,7 +652,7 @@ export class TasksModule {
       { key: "kanbanName", label: "Board", type: "dropdown", options: boardOptions, value: presetBoard },
       { key: "group", label: "Group / tag", type: "text", value: task?.group || "" },
       { key: "due", label: "Due date", type: "text", value: task?.due || "", placeholder: "YYYY-MM-DD" },
-      { key: "eisenhower", label: "Eisenhower quadrant", type: "dropdown", options: EISENHOWER_OPTS, value: task?.eisenhower || "" },
+      { key: "eisenhower", label: "Eisenhower quadrant", type: "dropdown", options: EISENHOWER_OPTS, value: task?.eisenhower || defaultQuadrant || "" },
     ];
     new FormModal(this.ctx.app, task ? "Edit task" : "New task", fields, async (v) => {
       if (!(v.title || "").trim()) return;

@@ -6,6 +6,17 @@ export interface ChangeEntry { version: string; sections: ChangeSection[]; }
 /** Release notes shown in the "What's new" dialog, newest first. */
 export const CHANGELOG: ChangeEntry[] = [
   {
+    version: "0.2.9",
+    sections: [
+      {
+        title: "Fixed",
+        items: [
+          "The Eisenhower quadrant grid now matches the scatter chart's axes: urgent on the right, important on top (Do first top-right, Schedule top-left, Delegate bottom-right, Eliminate bottom-left).",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.2.8",
     sections: [
       {

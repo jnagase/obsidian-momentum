@@ -9,11 +9,13 @@ const PRIORITIES = [
   { value: "high", label: "High" },
 ];
 
+// Grid order matches the scatter chart's axes (urgent → right, important → top):
+// top-left = Schedule, top-right = Do first, bottom-left = Eliminate, bottom-right = Delegate.
 const QUADRANTS = [
-  { id: "q1", title: "Do first", sub: "Urgent & important" },
   { id: "q2", title: "Schedule", sub: "Important, not urgent" },
-  { id: "q3", title: "Delegate", sub: "Urgent, not important" },
+  { id: "q1", title: "Do first", sub: "Urgent & important" },
   { id: "q4", title: "Eliminate", sub: "Not urgent or important" },
+  { id: "q3", title: "Delegate", sub: "Urgent, not important" },
 ];
 
 const EISENHOWER_OPTS = [

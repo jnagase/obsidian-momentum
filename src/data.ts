@@ -4,12 +4,74 @@ import {
   StudyCard, Meal, MealItem, MealLog, Transaction, RecurringItem, RecurringTask, PAConfig, defaultConfig,
 } from "./types";
 import { todayLocal } from "./util";
+import { monthHubTitle, monthKeyOf, monthName, financeTxTitle, mealLogTitle, workoutTitle, formatAmount, mergeBody } from "./readablenotes";
+import { mapTransaction, mapMealLog, mapWorkout } from "./loaders";
 
 /** Root folder inside the vault that holds all Personal Assistant data. */
 export let DATA_ROOT = "Momentum Life";
 export function setDataRoot(root: string) { DATA_ROOT = root || ""; }
 
 type FM = Record<string, unknown>;
+
+/** Anything a month hub can summarize: it only needs a `YYYY-MM-DD` date. */
+export interface MonthItem { date: string; }
+
+/**
+ * Per-module configuration that drives the generic month-hub machinery.
+ * Finance, Nutrition, and Fitness each supply one of these (tasks 4/5/6).
+ * - `folder`    logical folder holding the per-item notes (e.g. "Finance/Transactions").
+ * - `hubFolder` logical folder holding the month hubs (e.g. "Finance/Months").
+ * - `module`    hub name prefix used by `monthHubTitle` (e.g. "Finance").
+ * - `loadItems` returns ALL items of the module (each carrying a `date`).
+ * - `summaryBody` builds the deterministic hub body for a month's items. It may be
+ *   async so a module can load whatever it needs (e.g. Finance reads the configured
+ *   currency from `loadConfig()`); `syncMonthHub` awaits it.
+ * - `desiredTitle` computes the readable base filename (no extension, no collision
+ *   suffix) for a note from its frontmatter. It doubles as the module's required-field
+ *   validator: returning `null`/empty means the frontmatter is missing/malformed
+ *   (e.g. Finance needs date+amount; Nutrition/Fitness need a date) so the migration
+ *   skips that file with a warning. May be async so a module can resolve display names
+ *   from config (e.g. Fitness split names). This keeps `migrateReadableNotes`
+ *   module-agnostic.
+ */
+export interface ModuleHubConfig<T extends MonthItem = MonthItem> {
+  folder: string;
+  hubFolder: string;
+  module: string;
+  loadItems: () => T[];
+  summaryBody: (monthItems: T[], monthKey: string) => string | Promise<string>;
+  desiredTitle: (frontmatter: Record<string, unknown>) => string | null | Promise<string | null>;
+}
+
+/**
+ * Aggregate result of a `migrateReadableNotes` run for one module.
+ * - `renamed`     files renamed to the readable scheme (counted in dry-run too).
+ * - `skipped`     already-correctly-named files (idempotent no-ops).
+ * - `hubsWritten` month hubs created/updated during regeneration.
+ * - `hubsRemoved` empty-month hubs trashed during regeneration.
+ * - `warnings`    malformed frontmatter skips and per-file rename failures.
+ */
+export interface MigrationReport {
+  renamed: number;
+  skipped: number;
+  hubsWritten: number;
+  hubsRemoved: number;
+  warnings: string[];
+}
+
+/**
+ * Outcome of a single `syncMonthHub` call, so callers (notably migration) can
+ * account precisely for what happened without re-probing the filesystem:
+ * - `written`   the hub was created or its body updated.
+ * - `removed`   an empty-month hub was trashed.
+ * - `unchanged` nothing to write (idempotent no-op) or no hub to remove.
+ */
+export type HubSyncResult = "written" | "removed" | "unchanged";
+
+/** Escape a string for safe use inside a `RegExp` (idempotency name matching). */
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 /** Accept either an already-parsed object/array or a JSON string. */
 function coerce<T>(v: unknown, fallback: T): T {
@@ -294,6 +356,205 @@ export class PADataStore {
     }
   }
 
+  // ============================================================
+  // GENERIC MONTH HUBS (shared by Finance / Nutrition / Fitness)
+  // ============================================================
+
+  /**
+   * Return the body of a `buildDoc` document (everything after the frontmatter
+   * fence), or the whole string when there is no frontmatter. Used to compare
+   * hub bodies while ignoring the volatile `generated` timestamp.
+   */
+  private bodyOf(raw: string): string {
+    if (!raw.startsWith("---")) return raw;
+    const fenceEnd = raw.indexOf("\n---", 3);
+    if (fenceEnd === -1) return raw;
+    const afterFence = raw.indexOf("\n", fenceEnd + 1); // end of the closing "---" line
+    return afterFence === -1 ? "" : raw.slice(afterFence + 1);
+  }
+
+  /**
+   * Write a hub document only when its BODY changes, ignoring frontmatter (so the
+   * volatile `generated` timestamp never triggers a rewrite). Keeps hubs churn-free
+   * and safe against Obsidian Sync feedback loops.
+   */
+  private async writeHubIfBodyChanged(rel: string, meta: FM, body: string): Promise<boolean> {
+    const content = this.buildDoc(meta, body);
+    const existing = this.fileAt(rel);
+    if (existing) {
+      const cur = await this.app.vault.read(existing);
+      if (this.bodyOf(cur) === this.bodyOf(content)) return false; // body unchanged -> true no-op
+      await this.app.vault.process(existing, () => content);
+    } else {
+      const full = this.full(rel);
+      await this.ensureFolder(full);
+      await this.app.vault.create(full, content);
+    }
+    return true;
+  }
+
+  /**
+   * Regenerate (or remove) one module's month hub based on the module's current items.
+   * - Loads all items via `cfg.loadItems()` and keeps those in `monthKey`.
+   * - Empty month -> trashes the hub (keeps the Graph View clean).
+   * - Otherwise writes `cfg.summaryBody(...)` via `writeHubIfBodyChanged` (body-only compare).
+   * Generic across modules; each module supplies its own `ModuleHubConfig`.
+   */
+  async syncMonthHub<T extends MonthItem>(cfg: ModuleHubConfig<T>, monthKey: string): Promise<HubSyncResult> {
+    const monthItems = cfg.loadItems().filter((it) => monthKeyOf(it.date) === monthKey);
+    const rel = `${cfg.hubFolder}/${monthHubTitle(cfg.module, monthKey)}.md`;
+
+    if (!monthItems.length) {
+      const existing = this.fileAt(rel);
+      if (existing) {
+        await this.removeFile(existing);
+        return "removed";
+      }
+      return "unchanged";
+    }
+
+    const body = await cfg.summaryBody(monthItems, monthKey);
+    const meta: FM = {
+      type: `${cfg.module.toLowerCase()}-month-hub`,
+      month: monthKey,
+      generated: new Date().toISOString(),
+    };
+    const wrote = await this.writeHubIfBodyChanged(rel, meta, body);
+    return wrote ? "written" : "unchanged";
+  }
+
+  /**
+   * Split a raw document into its frontmatter block (including the closing `---`) and
+   * its body (everything after). Used by migration to rewrite ONLY the body while
+   * preserving the exact frontmatter text. Mirrors `bodyOf`'s fence detection.
+   */
+  private splitFrontmatter(raw: string): { fmText: string; body: string } {
+    if (!raw.startsWith("---")) return { fmText: "", body: raw };
+    const fenceEnd = raw.indexOf("\n---", 3);
+    if (fenceEnd === -1) return { fmText: "", body: raw };
+    const afterFence = raw.indexOf("\n", fenceEnd + 1); // end of the closing "---" line
+    if (afterFence === -1) return { fmText: raw, body: "" };
+    return { fmText: raw.slice(0, afterFence), body: raw.slice(afterFence + 1) };
+  }
+
+  /**
+   * Generic, idempotent, body-preserving, backlink-safe migration for one module.
+   *
+   * For every markdown note under `cfg.folder`:
+   *  - reads frontmatter and asks `cfg.desiredTitle` for the readable base name; a
+   *    null/empty result means required fields are missing/malformed → skip + warn
+   *    (Req 5.8);
+   *  - ensures a stable frontmatter `id` before any rename so identity never depends
+   *    on the filename (Req 5.2) — skipped in dry-run;
+   *  - if the basename already equals `<desired>` or `<desired> N`, treats it as an
+   *    idempotent no-op (Req 5.6); otherwise renames via `app.fileManager.renameFile`
+   *    to a collision-free `uniquePath` so existing backlinks stay valid (Req 5.3);
+   *  - merges the module's month-hub wikilink into the body via `mergeBody`, preserving
+   *    every user-added line and adding the link at most once (Req 5.4, 5.5);
+   *  - records touched months and, after processing, regenerates each touched month's
+   *    hub (Req 5.13);
+   *  - catches per-file rename/read errors, records a warning, and continues (Req 5.9).
+   *
+   * With `opts.dryRun` set, it computes and returns the report WITHOUT writing anything
+   * (no id patch, no rename, no body rewrite, no hub regeneration) (Req 5.7). Module
+   * agnostic (Req 11.1) — Finance/Nutrition/Fitness differ only via their `cfg`.
+   */
+  async migrateReadableNotes<T extends MonthItem>(
+    cfg: ModuleHubConfig<T>,
+    opts: { dryRun?: boolean } = {},
+  ): Promise<MigrationReport> {
+    const dryRun = !!opts.dryRun;
+    const report: MigrationReport = { renamed: 0, skipped: 0, hubsWritten: 0, hubsRemoved: 0, warnings: [] };
+    const touchedMonths = new Set<string>();
+    const files = this.listMarkdown(cfg.folder);
+
+    for (const file of files) {
+      try {
+        const fm = this.frontmatter(file);
+        const desired = await cfg.desiredTitle(fm);
+        if (!desired) {
+          report.warnings.push(`Skipped (missing/malformed frontmatter): ${file.path}`);
+          continue;
+        }
+
+        const date = str(fm.date).slice(0, 10);
+        if (date) touchedMonths.add(monthKeyOf(date));
+
+        // 1) Ensure a stable id so identity never depends on the filename (Req 5.2).
+        if (fm.id == null && !dryRun) {
+          await this.patchFrontmatter(file, (m) => { m.id = Date.now(); });
+        }
+
+        // 2) Rename to the readable scheme unless already named `<desired>`/`<desired> N`.
+        const alreadyNamed = file.basename === desired
+          || new RegExp(`^${escapeRegExp(desired)} \\d+$`).test(file.basename);
+
+        let targetFile: TFile = file;
+        if (alreadyNamed) {
+          report.skipped++;
+        } else {
+          const targetRel = this.uniquePath(cfg.folder, desired);
+          if (!dryRun) {
+            await this.app.fileManager.renameFile(file, this.full(targetRel)); // backlink-safe
+            targetFile = this.fileAt(targetRel) ?? file;
+          }
+          report.renamed++;
+        }
+
+        // 3) Ensure the body links the month hub, preserving user-added lines (Req 5.4/5.5).
+        if (!dryRun && date) {
+          const hubLink = `[[${monthHubTitle(cfg.module, monthKeyOf(date))}]]`;
+          const raw = await this.app.vault.read(targetFile);
+          const { fmText, body } = this.splitFrontmatter(raw);
+          const merged = mergeBody(body, hubLink);
+          if (merged !== body) {
+            const content = fmText ? `${fmText}\n${merged}` : merged;
+            await this.app.vault.process(targetFile, () => content);
+          }
+        }
+      } catch (e) {
+        // Req 5.9: record the failure, continue with the remaining files.
+        report.warnings.push(`Failed to migrate ${file.path}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+
+    // 4) Regenerate every touched month hub (Req 5.13). Skipped entirely in dry-run
+    //    so no writes occur (Req 5.7).
+    if (!dryRun) {
+      for (const key of touchedMonths) {
+        const outcome = await this.syncMonthHub(cfg, key);
+        if (outcome === "written") report.hubsWritten++;
+        else if (outcome === "removed") report.hubsRemoved++;
+      }
+    }
+
+    return report;
+  }
+
+  /**
+   * Run `migrateReadableNotes` for every module (Finance, Nutrition, Fitness) and fold
+   * the per-module reports into a single aggregate `MigrationReport`. Counts are summed
+   * and warnings are concatenated, each prefixed with its module name so the origin
+   * stays clear. Keeps the private per-module hub configs encapsulated so callers can
+   * trigger the whole migration without knowing module internals (Req 11.4).
+   */
+  async migrateAllReadableNotes(opts: { dryRun?: boolean } = {}): Promise<MigrationReport> {
+    const total: MigrationReport = { renamed: 0, skipped: 0, hubsWritten: 0, hubsRemoved: 0, warnings: [] };
+    // Call per module: `T` in `ModuleHubConfig` is contravariant (via `summaryBody`), so the
+    // concrete configs can't share one array type — inferring `T` per call keeps types sound.
+    const fold = (module: string, report: MigrationReport): void => {
+      total.renamed += report.renamed;
+      total.skipped += report.skipped;
+      total.hubsWritten += report.hubsWritten;
+      total.hubsRemoved += report.hubsRemoved;
+      for (const w of report.warnings) total.warnings.push(`[${module}] ${w}`);
+    };
+    fold("Finance", await this.migrateReadableNotes(this.financeHubConfig(), opts));
+    fold("Nutrition", await this.migrateReadableNotes(this.nutritionHubConfig(), opts));
+    fold("Fitness", await this.migrateReadableNotes(this.fitnessHubConfig(), opts));
+    return total;
+  }
+
   /** Board name a task belongs to for the list mirror ("No board" when unassigned). */
   private taskGroup(t: Task): string { return t.kanbanName || "No board"; }
 
@@ -499,17 +760,10 @@ export class PADataStore {
   }
 
   loadWorkouts(): Workout[] {
-    return this.listMarkdown("Fitness/Workouts").map((f) => {
-      const m = this.frontmatter(f);
-      return {
-        id: str(m.id) || f.basename,
-        date: str(m.date).substring(0, 10),
-        split: str(m.split) || "A",
-        duration: num(m.duration),
-        exercises: coerce<WorkoutExercise[]>(m.exercises, []),
-        path: f.path,
-      };
-    }).filter((w) => w.date);
+    // Data derived solely from frontmatter; filename is presentation only (Req 10.7).
+    return this.listMarkdown("Fitness/Workouts")
+      .map((f) => mapWorkout(this.frontmatter(f), f.basename, f.path))
+      .filter((w) => w.date);
   }
 
   /** Returns false if a rename would overwrite a different existing exercise. */
@@ -552,9 +806,97 @@ export class PADataStore {
     await this.writeFile("Fitness/splits.md", this.buildDoc({ type: "splits-config", splits }, splitsBody(splits)));
   }
 
+  /**
+   * Per-module hub config for Fitness. `syncMonthHub` uses this to (re)generate the
+   * `Fitness/Months/Fitness <YYYY-MM MonthName>.md` hub from the current workouts.
+   * The rich summary (workout count, total minutes, per-split breakdown) lives in
+   * `fitnessHubBody`; `summaryBody` may be async so it can await `loadConfig()` for
+   * split display names.
+   */
+  private fitnessHubConfig(): ModuleHubConfig<Workout> {
+    return {
+      folder: "Fitness/Workouts",
+      hubFolder: "Fitness/Months",
+      module: "Fitness",
+      loadItems: () => this.loadWorkouts(),
+      summaryBody: (items, monthKey) => this.fitnessHubBody(items, monthKey),
+      // Fitness needs a date (Req 5.8); resolve the split display name for the title
+      // exactly as `logWorkout` does (config split names, else the split id).
+      desiredTitle: async (fm) => {
+        const date = str(fm.date).slice(0, 10);
+        if (!date) return null;
+        const cfg = await this.loadConfig();
+        const splitName = this.resolveSplitName(str(fm.split) || "A", cfg);
+        return workoutTitle({ splitName, minutes: num(fm.duration), date });
+      },
+    };
+  }
+
+  /**
+   * Fitness hub body for a month's workouts (Req 10.5): the number of workouts, the
+   * total minutes, a per-split breakdown (count + minutes per split, using the resolved
+   * split display name), and a date-then-basename sorted, linked list of that month's
+   * sessions. Session links use each note's basename (derived from its path) so they
+   * resolve regardless of the readable filename. Split display names come from
+   * `resolveSplitName` + `loadConfig()`, falling back to the split id. Given a fixed set
+   * of items the output is fully deterministic (stable ordering).
+   */
+  private async fitnessHubBody(items: Workout[], monthKey: string): Promise<string> {
+    const cfg = await this.loadConfig();
+    const basename = (w: Workout) => (w.path.split("/").pop() || "").replace(/\.md$/, "");
+    const sorted = [...items].sort((a, b) =>
+      a.date.localeCompare(b.date) || basename(a).localeCompare(basename(b)));
+
+    const workoutCount = sorted.length;
+    const totalMinutes = sorted.reduce((s, w) => s + (Number(w.duration) || 0), 0);
+
+    // Per-split breakdown: group by split id, count sessions and sum minutes, then
+    // resolve each split's display name. Sort by display name (then split id) so the
+    // ordering is stable and independent of the workouts' arrival order.
+    const bySplit = new Map<string, { count: number; minutes: number }>();
+    for (const w of sorted) {
+      const acc = bySplit.get(w.split) || { count: 0, minutes: 0 };
+      acc.count += 1;
+      acc.minutes += Number(w.duration) || 0;
+      bySplit.set(w.split, acc);
+    }
+    const splitRows = [...bySplit.entries()]
+      .map(([splitId, agg]) => ({ name: this.resolveSplitName(splitId, cfg), splitId, ...agg }))
+      .sort((a, b) => a.name.localeCompare(b.name) || a.splitId.localeCompare(b.splitId));
+
+    const int = (n: number) => Math.round(n).toString();
+
+    const year = monthKey.slice(0, 4);
+    let body = `# Fitness — ${monthName(monthKey)} ${year}\n\n`;
+    body += `**Workouts:** ${workoutCount}\n`;
+    body += `**Total minutes:** ${int(totalMinutes)} min\n\n`;
+    body += `## By split\n\n`;
+    for (const r of splitRows) {
+      body += `- ${r.name}: ${r.count} workout${r.count === 1 ? "" : "s"}, ${int(r.minutes)} min\n`;
+    }
+    body += `\n## Sessions\n\n`;
+    for (const w of sorted) body += `- [[${basename(w)}]]\n`;
+    return body;
+  }
+
+  /**
+   * Resolve a split's display name (Req 10.2): configured `split_names` map first,
+   * then a `custom_splits` entry by id, then the `Fitness/splits.md` list, and finally
+   * fall back to the split id itself so a name is always produced.
+   */
+  private resolveSplitName(splitId: string, cfg: PAConfig): string {
+    const configured = (cfg.splitNames?.[splitId] || "").trim();
+    if (configured) return configured;
+    const custom = (cfg.customSplits || []).find((s) => s.id === splitId);
+    if (custom && (custom.name || "").trim()) return custom.name.trim();
+    const listed = this.loadSplits().find((s) => s.id === splitId);
+    if (listed && (listed.name || "").trim()) return listed.name.trim();
+    return splitId;
+  }
+
   async logWorkout(splitId: string, duration: number, exercises: WorkoutExercise[], date: string = todayLocal()): Promise<void> {
-    const now = new Date();
-    const time = String(now.getHours()).padStart(2, "0") + String(now.getMinutes()).padStart(2, "0");
+    const cfg = await this.loadConfig();
+    const splitName = this.resolveSplitName(splitId, cfg);
     const meta: FM = {
       id: Date.now(),
       type: "workout-log",
@@ -564,11 +906,18 @@ export class PADataStore {
       exercises,
       logged: new Date().toISOString(),
     };
-    let body = `# Treino ${splitId} - ${date}\n\n`;
+    const monthKey = monthKeyOf(date);
+    const hubLink = `[[${monthHubTitle("Fitness", monthKey)}]]`;
+    let baseBody = `# ${splitName} - ${date}\n\n`;
     exercises.forEach((e) => {
-      body += `- ${e.exercise}: ${e.weight}kg x ${e.sets}${e.feel ? ` (${e.feel})` : ""}\n`;
+      baseBody += `- ${e.exercise}: ${e.weight}kg x ${e.sets}${e.feel ? ` (${e.feel})` : ""}\n`;
     });
-    await this.writeFile(`Fitness/Workouts/${date}-${splitId}-${time}-${Math.random().toString(36).slice(2, 7)}.md`, this.buildDoc(meta, body));
+    // mergeBody adds the hub wikilink at most once (Req 10.3), preserving user lines.
+    const body = mergeBody(baseBody, hubLink);
+    const title = workoutTitle({ splitName, minutes: duration, date });
+    const rel = this.uniquePath("Fitness/Workouts", title);
+    await this.writeFile(rel, this.buildDoc(meta, body));
+    await this.syncMonthHub(this.fitnessHubConfig(), monthKey);
   }
 
   async updateWorkoutExercises(workout: Workout, exercises: WorkoutExercise[]): Promise<void> {
@@ -580,6 +929,9 @@ export class PADataStore {
   async deleteWorkout(workout: Workout): Promise<void> {
     const f = this.app.vault.getAbstractFileByPath(workout.path);
     if (f instanceof TFile) await this.removeFile(f);
+    // Regenerate the affected month's Fitness hub; removes it when this was the
+    // last workout of the month (keeps the Graph View clean).
+    await this.syncMonthHub(this.fitnessHubConfig(), monthKeyOf(workout.date));
   }
 
   // ============================================================
@@ -702,19 +1054,10 @@ export class PADataStore {
   }
 
   loadMealLogs(): MealLog[] {
-    return this.listMarkdown("Nutrition/Logs").map((f) => {
-      const m = this.frontmatter(f);
-      return {
-        id: str(m.id) || f.basename,
-        date: str(m.date).substring(0, 10),
-        mealId: str(m.meal),
-        totalCal: num(m.calories),
-        totalProtein: num(m.protein),
-        totalCarbs: num(m.carbs),
-        items: coerce<MealItem[]>(m.items, []),
-        path: f.path,
-      };
-    }).filter((l) => l.date);
+    // Data derived solely from frontmatter; filename is presentation only (Req 9.8).
+    return this.listMarkdown("Nutrition/Logs")
+      .map((f) => mapMealLog(this.frontmatter(f), f.basename, f.path))
+      .filter((l) => l.date);
   }
 
   async saveMeal(meal: Partial<Meal> & { name: string; items: MealItem[] }): Promise<void> {
@@ -738,31 +1081,120 @@ export class PADataStore {
     if (f instanceof TFile) await this.removeFile(f);
   }
 
+  /**
+   * Per-module hub config for Nutrition. `syncMonthHub` uses this to (re)generate the
+   * `Nutrition/Months/Nutrition <YYYY-MM MonthName>.md` hub from the current meal logs.
+   * The rich summary (total calories, avg/day, days logged, protein/carbs) lives in
+   * `nutritionHubBody` (task 5.2).
+   */
+  private nutritionHubConfig(): ModuleHubConfig<MealLog> {
+    return {
+      folder: "Nutrition/Logs",
+      hubFolder: "Nutrition/Months",
+      module: "Nutrition",
+      loadItems: () => this.loadMealLogs(),
+      summaryBody: (items, monthKey) => this.nutritionHubBody(items, monthKey),
+      // Nutrition needs a date (Req 5.8); resolve the meal display name for the title
+      // as `logMeal` does (meal_name frontmatter, else meals lookup by id, else id).
+      desiredTitle: (fm) => {
+        const date = str(fm.date).slice(0, 10);
+        if (!date) return null;
+        return mealLogTitle({ mealName: this.resolveMealName(fm), kcal: num(fm.calories), date });
+      },
+    };
+  }
+
+  /**
+   * Resolve a meal log's display name for the readable filename (Req 9.2 order,
+   * frontmatter-only): the persisted `meal_name`, else a `Nutrition/Plan` lookup by
+   * the `meal` id, else the raw `meal` id so a name is always produced.
+   */
+  private resolveMealName(fm: Record<string, unknown>): string {
+    const persisted = str(fm.meal_name).trim();
+    if (persisted) return persisted;
+    const mealId = str(fm.meal);
+    const meal = this.loadMeals().find((m) => m.id === mealId);
+    if (meal && (meal.name || "").trim()) return meal.name.trim();
+    return mealId;
+  }
+
+  /**
+   * Deterministic Nutrition hub body for a month's meal logs (Req 9.6):
+   *   # Nutrition — <MonthName> <Year>
+   *   **Total calories / Avg per day / Days logged / Total protein / Total carbs**
+   *   ## Logs — date-then-basename sorted, linked list of that month's logs.
+   * Calories are rounded to integers; protein/carbs to one decimal. The average is
+   * total calories divided by the number of DISTINCT days logged (never by 0). Log
+   * links use each note's basename (derived from its path) so they resolve regardless
+   * of the readable filename. Given a fixed set of items the output is fully
+   * deterministic (stable ordering).
+   */
+  private nutritionHubBody(items: MealLog[], monthKey: string): string {
+    const basename = (l: MealLog) => (l.path.split("/").pop() || "").replace(/\.md$/, "");
+    const sorted = [...items].sort((a, b) =>
+      a.date.localeCompare(b.date) || basename(a).localeCompare(basename(b)));
+
+    const totalCal = sorted.reduce((s, l) => s + (Number(l.totalCal) || 0), 0);
+    const totalProtein = sorted.reduce((s, l) => s + (Number(l.totalProtein) || 0), 0);
+    const totalCarbs = sorted.reduce((s, l) => s + (Number(l.totalCarbs) || 0), 0);
+    const daysLogged = new Set(sorted.map((l) => l.date)).size;
+    const avgPerDay = daysLogged ? totalCal / daysLogged : 0;
+
+    const int = (n: number) => Math.round(n).toString();
+    const grams = (n: number) => `${(Math.round(n * 10) / 10).toFixed(1)}g`;
+
+    const year = monthKey.slice(0, 4);
+    let body = `# Nutrition — ${monthName(monthKey)} ${year}\n\n`;
+    body += `**Total calories:** ${int(totalCal)} cal\n`;
+    body += `**Avg per day:** ${int(avgPerDay)} cal\n`;
+    body += `**Days logged:** ${daysLogged}\n`;
+    body += `**Total protein:** ${grams(totalProtein)}\n`;
+    body += `**Total carbs:** ${grams(totalCarbs)}\n\n`;
+    body += `## Logs\n\n`;
+    for (const l of sorted) body += `- [[${basename(l)}]]\n`;
+    return body;
+  }
+
   async logMeal(meal: Meal, items: MealItem[], date: string = todayLocal()): Promise<void> {
-    const now = new Date();
-    const time = String(now.getHours()).padStart(2, "0") + String(now.getMinutes()).padStart(2, "0");
     const totalCal = items.reduce((s, it) => s + (Number(it.cal) || 0), 0);
     const totalProtein = items.reduce((s, it) => s + (Number(it.protein) || 0), 0);
     const totalCarbs = items.reduce((s, it) => s + (Number(it.carbs) || 0), 0);
+    // Resolve the meal display name (Req 9.2 order: meal_name → meals lookup → body
+    // heading → meal id). At log time we hold the Meal object, so prefer its name and
+    // fall back to the id. Persisting it as `meal_name` (Req 9.3) keeps future naming
+    // stable even if the meal plan is renamed or deleted.
+    const mealName = (meal.name || "").trim() || meal.id;
     const meta: FM = {
       id: Date.now(),
+      type: "meal-log",
       date,
       meal: meal.id,
+      meal_name: mealName,
       calories: totalCal,
       protein: totalProtein,
       carbs: totalCarbs,
       items,
       logged: new Date().toISOString(),
     };
-    let body = `# ${meal.name} - ${date}\n\n`;
-    items.forEach((it) => { body += `- ${it.name}: ${it.qty}${it.unit} (${it.cal} cal)\n`; });
-    body += `\nTotal: ${totalCal} cal\n`;
-    await this.writeFile(`Nutrition/Logs/${date}-${meal.id}-${time}.md`, this.buildDoc(meta, body));
+    const monthKey = monthKeyOf(date);
+    const hubLink = `[[${monthHubTitle("Nutrition", monthKey)}]]`;
+    let baseBody = `# ${mealName} - ${date}\n\n`;
+    items.forEach((it) => { baseBody += `- ${it.name}: ${it.qty}${it.unit} (${it.cal} cal)\n`; });
+    baseBody += `\nTotal: ${totalCal} cal\n`;
+    // mergeBody adds the hub wikilink at most once (Req 9.4), preserving user lines.
+    const body = mergeBody(baseBody, hubLink);
+    const title = mealLogTitle({ mealName, kcal: totalCal, date });
+    const rel = this.uniquePath("Nutrition/Logs", title);
+    await this.writeFile(rel, this.buildDoc(meta, body));
+    await this.syncMonthHub(this.nutritionHubConfig(), monthKey);
   }
 
   async deleteMealLog(log: MealLog): Promise<void> {
     const f = this.app.vault.getAbstractFileByPath(log.path);
     if (f instanceof TFile) await this.removeFile(f);
+    // Regenerate the affected month's Nutrition hub; removes it when this was the
+    // last meal log of the month (keeps the Graph View clean).
+    await this.syncMonthHub(this.nutritionHubConfig(), monthKeyOf(log.date));
   }
 
   // ---- Water (stored in Nutrition/water.md as a {date: liters} map) ----
@@ -792,42 +1224,105 @@ export class PADataStore {
   // FINANCE (Finance/Transactions/*.md)
   // ============================================================
   loadTransactions(): Transaction[] {
-    return this.listMarkdown("Finance/Transactions").map((f) => {
-      const m = this.frontmatter(f);
-      return {
-        id: str(m.id) || f.basename,
-        date: str(m.date).substring(0, 10),
-        type: str(m.tx_type) || "expense",
-        amount: num(m.amount),
-        category: str(m.category) || "Other",
-        note: str(m.note),
-        path: f.path,
-      };
-    }).filter((t) => t.date);
+    // Data derived solely from frontmatter; filename is presentation only (Req 6.1/6.2).
+    // The pure mapper (src/loaders.ts) is the single source of truth for field extraction
+    // and is what test/loadinvariance.test.ts exercises for Correctness Property 7.
+    return this.listMarkdown("Finance/Transactions")
+      .map((f) => mapTransaction(this.frontmatter(f), f.basename, f.path))
+      .filter((t) => t.date);
+  }
+
+  /**
+   * Per-module hub config for Finance. `syncMonthHub` uses this to (re)generate the
+   * `Finance/Months/Finance <YYYY-MM MonthName>.md` hub from the current transactions.
+   * The full Income/Expenses/Balance + linked list summary lives in `financeHubBody`
+   * (task 4.2); this method just wires the pieces together.
+   */
+  private financeHubConfig(): ModuleHubConfig<Transaction> {
+    return {
+      folder: "Finance/Transactions",
+      hubFolder: "Finance/Months",
+      module: "Finance",
+      loadItems: () => this.loadTransactions(),
+      summaryBody: (items, monthKey) => this.financeHubBody(items, monthKey),
+      // Finance needs a date AND an amount (Req 5.8); the readable title is built by
+      // `financeTxTitle` exactly as `addTransaction` does.
+      desiredTitle: (fm) => {
+        const date = str(fm.date).slice(0, 10);
+        if (!date || fm.amount == null) return null;
+        return financeTxTitle({
+          category: str(fm.category) || "Other",
+          note: str(fm.note),
+          amount: num(fm.amount),
+          date,
+        });
+      },
+    };
+  }
+
+  /**
+   * Deterministic hub body for a month's transactions:
+   *   # <MonthName> <Year>
+   *   **Income / Expenses / Balance** in the configured currency
+   *   ## Transactions — date-then-title sorted, linked, each with its signed amount.
+   * Money is formatted with the configured `currency` (loadConfig()) using the same
+   * grouping + 2-decimal style as the UI `fmt` helper. Given a fixed set of items and
+   * currency the output is fully deterministic (stable ordering).
+   */
+  private async financeHubBody(items: Transaction[], monthKey: string): Promise<string> {
+    const cur = (await this.loadConfig()).currency || "$";
+    const money = (n: number) =>
+      `${cur}${(Math.round(n * 100) / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+    const sorted = [...items].sort((a, b) =>
+      a.date.localeCompare(b.date) || financeTxTitle(a).localeCompare(financeTxTitle(b)));
+
+    const income = sorted.filter((t) => t.type === "income").reduce((s, t) => s + t.amount, 0);
+    const expense = sorted.filter((t) => t.type === "expense").reduce((s, t) => s + t.amount, 0);
+
+    const year = monthKey.slice(0, 4);
+    let body = `# ${monthName(monthKey)} ${year}\n\n`;
+    body += `**Income:** ${money(income)}\n`;
+    body += `**Expenses:** ${money(expense)}\n`;
+    body += `**Balance:** ${money(income - expense)}\n\n`;
+    body += `## Transactions\n\n`;
+    for (const t of sorted) {
+      const sign = t.type === "income" ? "+" : "-";
+      body += `- [[${financeTxTitle(t)}]] — ${sign}${money(t.amount)}\n`;
+    }
+    return body;
   }
 
   async addTransaction(t: { type: string; amount: number; category: string; note?: string }, date: string = todayLocal()): Promise<void> {
-    const now = new Date();
-    const time = String(now.getHours()).padStart(2, "0") + String(now.getMinutes()).padStart(2, "0") + String(now.getSeconds()).padStart(2, "0");
+    const tx_type = t.type === "income" ? "income" : "expense";
+    const category = t.category || "Other";
     const meta: FM = {
       id: Date.now(),
       type: "transaction",
-      tx_type: t.type === "income" ? "income" : "expense",
+      tx_type,
       date,
       amount: t.amount,
-      category: t.category || "Other",
+      category,
       note: t.note || "",
       logged: new Date().toISOString(),
     };
-    const sign = t.type === "income" ? "+" : "-";
-    const body = `# ${t.category} ${sign}${t.amount}\n\n${t.note || ""}\n`;
-    const rand = Math.random().toString(36).slice(2, 7);
-    await this.writeFile(`Finance/Transactions/${date}-${meta.tx_type as string}-${time}-${rand}.md`, this.buildDoc(meta, body));
+    const monthKey = monthKeyOf(date);
+    const sign = tx_type === "income" ? "+" : "-";
+    const hubLink = `[[${monthHubTitle("Finance", monthKey)}]]`;
+    const baseBody = `# ${category} ${sign}${formatAmount(t.amount)}\n\n${t.note || ""}\n`;
+    const body = mergeBody(baseBody, hubLink);
+    const title = financeTxTitle({ category, note: t.note, amount: t.amount, date });
+    const rel = this.uniquePath("Finance/Transactions", title);
+    await this.writeFile(rel, this.buildDoc(meta, body));
+    await this.syncMonthHub(this.financeHubConfig(), monthKey);
   }
 
   async deleteTransaction(t: Transaction): Promise<void> {
     const f = this.app.vault.getAbstractFileByPath(t.path);
     if (f instanceof TFile) await this.removeFile(f);
+    // Regenerate the affected month's hub; removes it when this was the last
+    // transaction of the month (keeps the Graph View clean).
+    await this.syncMonthHub(this.financeHubConfig(), monthKeyOf(t.date));
   }
 
   loadRecurring(): RecurringItem[] {

@@ -70,8 +70,76 @@ neither feature, the plugin makes no network requests.
 ## Data location
 Set the **Data root folder** in plugin settings (default: `Momentum Life`).
 Expected subfolders: `Tasks/`, `Tasks/Lists/`, `Notes/`, `Fitness/Exercises`,
-`Fitness/Workouts`, `Nutrition/Plan`, `Nutrition/Logs`, `Studies/`, `Habits/`,
-`Finance/Transactions/`, `Config/settings.md`.
+`Fitness/Workouts`, `Fitness/Months`, `Nutrition/Plan`, `Nutrition/Logs`,
+`Nutrition/Months`, `Studies/`, `Habits/`, `Finance/Transactions/`,
+`Finance/Months`, `Config/settings.md`.
+
+## Readable notes & monthly hubs
+Finance transactions, Nutrition logs and Fitness workouts are saved with
+human-readable filenames, and each month gets a hub note so the file list and
+Graph View stay legible. Frontmatter is still the source of truth — filenames
+and hub notes are derived, regenerable views, so renaming or regenerating them
+never changes your data or totals.
+
+**Readable per-item names.** Each item is one Markdown file named from its own
+fields (invalid filename characters are sanitized, accents preserved):
+
+| Item | Filename pattern | Example |
+| --- | --- | --- |
+| 💰 Transaction | `<category>-<note>-<amount>-<YYYY-MM-DD>` | `Groceries-Market-84.20-2026-06-30` |
+| 🥗 Meal log | `<Meal>-<kcal>cal-<YYYY-MM-DD>` | `Lunch-620cal-2026-06-30` |
+| 🏋️ Workout | `<Split>-<duration>min-<YYYY-MM-DD>` | `PushDay-45min-2026-06-30` |
+
+The transaction `note` segment is dropped when empty, amounts always use two
+decimals with a `.` separator (no income/expense marker in the name), and if two
+items would share a name the plugin appends the smallest ` 2`, ` 3`, … suffix —
+never a random string.
+
+**Module-prefixed monthly hubs.** Each module keeps one hub per month under its
+own `Months` subfolder, named `<Module> <YYYY-MM MonthName>` so basenames never
+collide across modules:
+
+- `Finance/Months/Finance 2026-06 June` — Income, Expenses and Balance in your
+  configured currency, plus a linked, date-sorted list of that month's transactions.
+- `Nutrition/Months/Nutrition 2026-06 June` — total calories, average per day,
+  days logged, total protein/carbs, and the month's logs.
+- `Fitness/Months/Fitness 2026-06 June` — workout count, total minutes, a
+  per-split breakdown, and the month's sessions.
+
+Every item body gets a wikilink to its hub (for example `[[Finance 2026-06 June]]`),
+and hubs are regenerated whenever you add or delete an item. A month with no
+items has its hub removed automatically. There is no global cross-module hub.
+
+**Graph View tip.** Because each item links to its `<Module> <YYYY-MM MonthName>`
+hub, the Graph View naturally clusters your notes into one group per module per
+month. Open the Graph View and the hubs become the center of each monthly
+cluster — a quick visual timeline of your finances, nutrition and training.
+
+### Migrating an existing vault
+If you already have legacy-named notes, run the command palette command
+**"Momentum: migrate notes to readable names"**. It renames Finance, Nutrition
+and Fitness notes to the readable scheme, adds each hub wikilink at most once,
+and regenerates the month hubs — for all three modules in one pass. The rename is
+backlink-aware (existing wikilinks keep resolving) and body-preserving (manual
+lines you added, such as `Hub: [[Hub - Personal]]`, are kept). It is idempotent
+and guarded, so running it again does nothing and reports zero renames. A
+one-time guarded auto-run also fires the first time you open a vault on a new
+schema version; the explicit command is always available to re-run it.
+
+**Backup, dry-run & rollback.** Before migrating a large vault:
+
+- **Back up first** — commit your vault to git or copy the data folder. This is
+  the simplest full rollback.
+- **Dry-run preview** — the migration supports a dry-run mode that computes the
+  full report (renames, skips, hubs, warnings) without writing anything, so you
+  can preview the impact before committing to it.
+- **Trash recovery** — hub notes removed for empty months (and any file the
+  migration replaces) go to Obsidian's trash, so you can restore them from
+  Settings → Files & Links → recover deleted files.
+
+Migration only touches filenames and hub notes; your transaction, meal and
+workout data lives in frontmatter and is never modified, so totals stay identical
+across renames.
 
 ## Markdown schema
 Each module reads and writes plain Markdown notes with YAML frontmatter. Examples:

@@ -1,4 +1,4 @@
-import { Plugin, WorkspaceLeaf, PluginSettingTab, App, Setting, TFolder, TFile, Platform } from "obsidian";
+import { Plugin, WorkspaceLeaf, PluginSettingTab, App, Setting, TFolder, TFile, Platform, Notice } from "obsidian";
 import { PADataStore, setDataRoot } from "./data";
 import { todayLocal } from "./util";
 import { PAView, VIEW_TYPE_PA, PAHost } from "./view";
@@ -7,9 +7,11 @@ import { MomentumAIView, VIEW_TYPE_MOMENTUM_AI, AIHost } from "./aiview";
 import { AIConfig, DEFAULT_MODELS } from "./ai";
 import { WhatsNewModal, CHANGELOG, cmpVersion } from "./whatsnew";
 
-interface PASettings { dataRoot: string; aiProvider: string; aiApiKey: string; aiModel: string; aiBaseUrl: string; notifyTasks: boolean; lastSeenVersion: string; }
-const DEFAULT_SETTINGS: PASettings = { dataRoot: "Momentum Life", aiProvider: "gemini", aiApiKey: "", aiModel: "gemini-3.5-flash", aiBaseUrl: "", notifyTasks: false, lastSeenVersion: "" };
+interface PASettings { dataRoot: string; aiProvider: string; aiApiKey: string; aiModel: string; aiBaseUrl: string; notifyTasks: boolean; lastSeenVersion: string; readableNotesSchema?: number; }
+const DEFAULT_SETTINGS: PASettings = { dataRoot: "Momentum Life", aiProvider: "gemini", aiApiKey: "", aiModel: "gemini-3.5-flash", aiBaseUrl: "", notifyTasks: false, lastSeenVersion: "", readableNotesSchema: 0 };
 const LEGACY_DATA_ROOT = "Personal Assistant";
+/** Bump when the readable-notes migration changes so the guarded auto-run re-triggers. */
+const READABLE_NOTES_SCHEMA = 1;
 
 export default class MomentumPlugin extends Plugin implements PAHost, AIHost {
   settings: PASettings;
@@ -47,6 +49,12 @@ export default class MomentumPlugin extends Plugin implements PAHost, AIHost {
       callback: () => this.activateAIView(),
     });
 
+    this.addCommand({
+      id: "migrate-readable-notes",
+      name: "Momentum: migrate notes to readable names",
+      callback: () => void this.runReadableNotesMigration(),
+    });
+
     this.addRibbonIcon("bot", "Momentum AI", () => this.activateAIView());
 
     this.addSettingTab(new PASettingTab(this.app, this));
@@ -63,6 +71,17 @@ export default class MomentumPlugin extends Plugin implements PAHost, AIHost {
       void this.store.syncTaskLists();
       this.maybeShowWhatsNew();
       void this.runTaskAutomations();
+      // One-time, best-effort migration of module notes to readable filenames. Guarded by a
+      // schema version so it runs once; on failure the guard stays unset so the command retries.
+      if ((this.settings.readableNotesSchema ?? 0) < READABLE_NOTES_SCHEMA) {
+        void (async () => {
+          try {
+            await this.store.migrateAllReadableNotes();
+            this.settings.readableNotesSchema = READABLE_NOTES_SCHEMA;
+            await this.saveSettings();
+          } catch { /* leave the guard unset so "migrate notes to readable names" can retry */ }
+        })();
+      }
     });
 
     // Re-check recurring tasks and due reminders every 30 minutes while Obsidian is open.
@@ -145,6 +164,29 @@ export default class MomentumPlugin extends Plugin implements PAHost, AIHost {
     this.settings.lastSeenVersion = current;
     void this.saveSettings();
     if (entries.length) new WhatsNewModal(this.app, this.manifest.name, entries).open();
+  }
+
+  /**
+   * Run the readable-notes migration across every module, persist the schema guard, and
+   * report an aggregate summary. Invoked by the command and reused as the retry path when
+   * the guarded auto-run failed on a previous launch.
+   */
+  private async runReadableNotesMigration(): Promise<void> {
+    try {
+      const report = await this.store.migrateAllReadableNotes();
+      this.settings.readableNotesSchema = READABLE_NOTES_SCHEMA;
+      await this.saveSettings();
+      const parts = [
+        `${report.renamed} renamed`,
+        `${report.skipped} already named`,
+        `${report.hubsWritten} hubs updated`,
+        `${report.hubsRemoved} hubs removed`,
+      ];
+      if (report.warnings.length) parts.push(`${report.warnings.length} warning${report.warnings.length === 1 ? "" : "s"}`);
+      new Notice(`Readable notes migration: ${parts.join(", ")}.`);
+    } catch (e) {
+      new Notice(`Readable notes migration failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
 
   private lastDueNotified = "";

@@ -6,6 +6,19 @@ export interface ChangeEntry { version: string; sections: ChangeSection[]; }
 /** Release notes shown in the "What's new" dialog, newest first. */
 export const CHANGELOG: ChangeEntry[] = [
   {
+    version: "0.3.0",
+    sections: [
+      {
+        title: "New — readable notes & monthly hubs",
+        items: [
+          "Finance transactions, Nutrition logs and Fitness workouts now save with human-readable filenames (for example Groceries-Market-84.20-2026-06-30, Lunch-620cal-2026-06-30, PushDay-45min-2026-06-30) so your file list and Graph View stay legible.",
+          "Each module gets a monthly hub note (Finance / Nutrition / Fitness 2026-06 June) summarizing the month and linking that month's items, so the Graph View clusters your notes by module and month.",
+          "New command \"Momentum: migrate notes to readable names\" renames your existing notes to the new scheme in one pass. It's backlink-aware, keeps any lines you added by hand, and is safe to run more than once. Tip: back up or commit your vault first; removed hub notes go to Obsidian's trash so you can recover them.",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.2.10",
     sections: [
       {

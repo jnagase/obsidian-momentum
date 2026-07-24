@@ -11,7 +11,7 @@ stored as plain Markdown under a single folder, so your data stays yours.
 - Frontmatter parsing handled by Obsidian's metadata cache.
 - Cross-device sync handled by Obsidian Sync / iCloud / git.
 - Renders with Obsidian's DOM API and theme variables (no remote code, no CDN).
-- Optional network use only: the Nutrition food search and the AI assistant (see [Network use & privacy](#network-use--privacy)).
+- Optional network use only: the Nutrition food search (see [Network use & privacy](#network-use--privacy)).
 
 ## Modules
 | Module | What it does |
@@ -22,7 +22,6 @@ stored as plain Markdown under a single folder, so your data stays yours.
 | 🥗 Nutrition | Fixed meal plans, food logging, calorie calendar & trends, water, Open Food Facts search |
 | 📚 Studies | Kanban by topic (drag & drop, subtopics, URLs) + list view |
 | 💰 Finances | Income/expense ledger, monthly summaries, category breakdown, recurring templates (monthly & weekly) |
-| 🤖 AI assistant | Optional chat panel that answers about your data — bring your own API key or local tool |
 
 All visualizations use inline SVG (no external libraries / CDN).
 
@@ -35,37 +34,17 @@ All visualizations use inline SVG (no external libraries / CDN).
 4. In Obsidian: Settings → Community plugins → enable "Momentum Life".
 5. Open via the command palette → "Momentum Life: Open" (panel in the left sidebar).
 
-## AI assistant
-Momentum Life ships an optional chat panel (open it from the ribbon 🤖 or the
-command "Open AI assistant") that answers questions about your dashboard data.
-You bring your own key — nothing is bundled.
-
-**Cloud providers (desktop + mobile).** Pick a provider and paste your own API
-key in Settings → Momentum Life → AI assistant. Supported: Gemini (Google),
-Claude (Anthropic), Grok (xAI), and any OpenAI-compatible endpoint (custom base
-URL — e.g. OpenRouter, a gateway, or a local server). Requests go over HTTPS
-using Obsidian's `requestUrl`.
-
-The plugin sends your message plus a short summary of your Momentum data (open
-tasks, today's calories, this month's balance, etc.) only when you send a chat
-message. No telemetry is collected. The plugin never runs local programs; it only
-talks to the cloud provider you configure, over HTTPS.
-
 ## Network use & privacy
-Momentum works offline by default. It only reaches the network in two optional
-cases, and only when you actively use them:
+Momentum works offline by default. It only reaches the network in one optional
+case, and only when you actively use it:
 
 - **Nutrition food search** — queries the
   [Open Food Facts](https://world.openfoodfacts.org) public API
   (`world.openfoodfacts.org`) over HTTPS, sending only the search term you typed.
   No API key or account required.
-- **AI assistant (cloud mode)** — when you send a chat message, it contacts the
-  provider you configured with your own API key, sending your message and a short
-  summary of your dashboard data. The local-command mode runs a CLI on your machine
-  instead and makes no direct network request from the plugin.
 
-No personal data, vault content, or telemetry is transmitted otherwise. If you use
-neither feature, the plugin makes no network requests.
+No personal data, vault content, or telemetry is transmitted otherwise. If you do
+not use this feature, the plugin makes no network requests.
 
 ## Data location
 Set the **Data root folder** in plugin settings (default: `Momentum Life`).

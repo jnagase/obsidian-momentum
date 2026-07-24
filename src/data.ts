@@ -600,14 +600,35 @@ export class PADataStore {
     }
   }
 
-  /** Apply checkbox toggles from a list mirror file back to the board tasks. Returns true if anything changed. */
+  /**
+   * Reconcile external checkbox edits in the mirror files back into the board tasks.
+   * Runs `applyTaskListFile` on every mirror. It ONLY toggles existing tasks; it never
+   * creates tasks from mirror lines — doing so proved unsafe with whole-file sync
+   * (a regenerated mirror + sync echo could loop and spawn runaway tasks). Capturing
+   * brand-new items added externally is the job of the dedicated inbox instead.
+   */
+  async reconcileTaskLists(): Promise<void> {
+    const listsPrefix = this.full("Tasks/Lists") + "/";
+    const files = this.app.vault.getMarkdownFiles()
+      .filter((f) => f.path.startsWith(listsPrefix) && f.name === "tasks.md");
+    for (const f of files) {
+      try { await this.applyTaskListFile(f); } catch { /* skip a bad mirror file, keep going */ }
+    }
+  }
+
+  /**
+   * Apply checkbox toggles from a list mirror file back to the board tasks. Only flips
+   * done/undone on tasks that ALREADY exist; unknown lines are IGNORED (never created
+   * here), so a regenerated mirror can never spawn tasks or feed a loop. Returns true
+   * if anything changed.
+   */
   async applyTaskListFile(file: TFile): Promise<boolean> {
     const cfg = await this.loadConfig();
     const cols = cfg.taskColumns;
     const colSet = new Set(cols);
     const doneCol = cols.includes("done") ? "done" : cols[cols.length - 1];
     const firstCol = cols[0];
-    const boardName = file.parent?.name ?? "";
+    const folderName = file.parent?.name ?? "";
     const content = await this.app.vault.read(file);
     const tasks = this.loadTasks();
     const eff = (t: Task) => (colSet.has(t.status) ? t.status : cols[0]);
@@ -617,8 +638,9 @@ export class PADataStore {
       if (!m) continue;
       const checked = m[1].toLowerCase() === "x";
       const title = m[2].trim();
-      const t = tasks.find((x) => safeName(this.taskGroup(x)) === boardName && x.title === title);
-      if (!t) continue;
+      if (!title) continue;
+      const t = tasks.find((x) => safeName(this.taskGroup(x)) === folderName && x.title === title);
+      if (!t) continue; // unknown line: ignore (never create from a mirror — avoids loops)
       const isDone = eff(t) === doneCol;
       if (checked && !isDone) { await this.updateTask(t, { status: doneCol }); changed = true; }
       else if (!checked && isDone) { await this.updateTask(t, { status: firstCol }); changed = true; }

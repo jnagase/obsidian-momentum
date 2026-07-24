@@ -19,16 +19,22 @@ export const PAGES = [
   { id: "finances", label: "💰 Finances" },
 ];
 
+/** Where a page can be opened in the workspace. */
+export type PALocation = "center" | "left" | "right" | "bottom";
+
 /** Implemented by the plugin so the nav + content views stay in sync. */
 export interface PAHost {
   currentPage: string;
   openPage(id: string): void | Promise<void>;
+  openPageIn(id: string, location: PALocation): void | Promise<void>;
 }
 
 export class PAView extends ItemView {
   private ctx: PAContext;
   private host: PAHost;
   private mainEl: HTMLElement | null = null;
+  /** This view's own page, persisted per-leaf via get/setState. */
+  private page = "habit-tracker";
 
   private habitTrackerModule: HabitTrackerModule;
   private tasksModule: TasksModule;
@@ -52,10 +58,23 @@ export class PAView extends ItemView {
 
   getViewType(): string { return VIEW_TYPE_PA; }
   getDisplayText(): string {
-    const p = PAGES.find((x) => x.id === this.host.currentPage);
+    const p = PAGES.find((x) => x.id === this.page);
     return p ? p.label.replace(/^\S+\s/, "") : "Personal Assistant";
   }
   getIcon(): string { return "target"; }
+
+  /** Persist this view's page so Obsidian restores it across restarts. */
+  getState(): Record<string, unknown> {
+    return { ...super.getState(), page: this.page };
+  }
+
+  async setState(state: unknown, result: unknown): Promise<void> {
+    const s = (state ?? {}) as { page?: string };
+    this.page = s.page ?? this.page ?? "habit-tracker";
+    await super.setState(state, result as never);
+    this.renderPage();
+    (this.leaf as unknown as { updateHeader?: () => void }).updateHeader?.();
+  }
 
   async onOpen(): Promise<void> {
     await this.ctx.reloadConfig();
@@ -83,8 +102,14 @@ export class PAView extends ItemView {
     this.fitnessModule.destroy();
   }
 
-  /** Switch the active page (called by the nav view via the plugin). */
+  /** Re-render this view's own page (e.g. after data changed elsewhere). */
+  rerender(): void {
+    if (this.mainEl) this.renderPage();
+  }
+
+  /** Switch this view's page (called by the nav view via the plugin). */
   setPage(id: string): void {
+    this.page = id;
     if (this.mainEl) this.renderPage();
     // Refresh the tab title to reflect the current page.
     (this.leaf as unknown as { updateHeader?: () => void }).updateHeader?.();
@@ -96,7 +121,7 @@ export class PAView extends ItemView {
     this.fitnessModule.destroy();
     main.empty();
 
-    switch (this.host.currentPage) {
+    switch (this.page) {
       case "habit-tracker": this.habitTrackerModule.render(main); break;
       case "tasks": this.tasksModule.render(main); break;
       case "fitness": this.fitnessModule.render(main); break;

@@ -81,7 +81,7 @@ graph TD
   - Add `readableNotesSchema` to plugin settings; add command "Momentum: migrate notes to readable names" that runs all three modules and shows an aggregate Notice; add a one-time guarded auto-run on `onLayoutReady` (set the guard only on success; leave unset on failure so the command can retry).
   - _Requirements: 5.10, 5.11, 5.12, 5.14, 11.2, 11.4_
 
-- [-] 9. Docs, build, and release
+- [x] 9. Docs, build, and release
   - Update README (readable notes + monthly hubs + migration command + graph tip); add a "What's new" changelog entry; lint + build (community) and `build:local`; verify `child_process` absent from the community `main.js`; deploy to the vault; bump version; commit/push/tag; update the `local` branch; verify release attestation.
   - _Requirements: 7.1, 7.2, 7.3_
 

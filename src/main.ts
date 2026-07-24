@@ -1,28 +1,27 @@
 import { Plugin, WorkspaceLeaf, PluginSettingTab, App, Setting, TFolder, TFile, Platform, Notice } from "obsidian";
 import { PADataStore, setDataRoot } from "./data";
 import { todayLocal } from "./util";
-import { PAView, VIEW_TYPE_PA, PAHost } from "./view";
+import { PAView, VIEW_TYPE_PA, PAHost, PALocation } from "./view";
 import { PANavView, VIEW_TYPE_PA_NAV } from "./nav";
-import { MomentumAIView, VIEW_TYPE_MOMENTUM_AI, AIHost } from "./aiview";
-import { AIConfig, DEFAULT_MODELS } from "./ai";
 import { WhatsNewModal, CHANGELOG, cmpVersion } from "./whatsnew";
 
-interface PASettings { dataRoot: string; aiProvider: string; aiApiKey: string; aiModel: string; aiBaseUrl: string; notifyTasks: boolean; lastSeenVersion: string; readableNotesSchema?: number; }
-const DEFAULT_SETTINGS: PASettings = { dataRoot: "Momentum Life", aiProvider: "gemini", aiApiKey: "", aiModel: "gemini-3.5-flash", aiBaseUrl: "", notifyTasks: false, lastSeenVersion: "", readableNotesSchema: 0 };
+interface PASettings { dataRoot: string; notifyTasks: boolean; lastSeenVersion: string; readableNotesSchema?: number; }
+const DEFAULT_SETTINGS: PASettings = { dataRoot: "Momentum Life", notifyTasks: false, lastSeenVersion: "", readableNotesSchema: 0 };
 const LEGACY_DATA_ROOT = "Personal Assistant";
 /** Bump when the readable-notes migration changes so the guarded auto-run re-triggers. */
 const READABLE_NOTES_SCHEMA = 1;
 
-export default class MomentumPlugin extends Plugin implements PAHost, AIHost {
+export default class MomentumPlugin extends Plugin implements PAHost {
   settings: PASettings;
   store: PADataStore;
   currentPage = "habit-tracker";
+  /** True while the plugin itself is (re)writing the task-list mirrors, so the vault
+   *  "modify" listener ignores our own writes and never re-enters (prevents runaway loops). */
+  private mirrorSyncing = false;
 
   async onload(): Promise<void> {
-    const data = (await this.loadData()) as (Partial<PASettings> & { geminiApiKey?: string }) | null;
+    const data = (await this.loadData()) as Partial<PASettings> | null;
     this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
-    // Migrate the earlier Gemini-only key field to the generic AI key.
-    if (data?.geminiApiKey && !this.settings.aiApiKey) this.settings.aiApiKey = data.geminiApiKey;
     // Legacy safety: if the user never chose a folder and the new default doesn't
     // exist yet but a legacy "Personal Assistant" folder does, keep using it.
     if (!data || !data.dataRoot) {
@@ -35,7 +34,6 @@ export default class MomentumPlugin extends Plugin implements PAHost, AIHost {
 
     this.registerView(VIEW_TYPE_PA, (leaf) => new PAView(leaf, this.store, this));
     this.registerView(VIEW_TYPE_PA_NAV, (leaf) => new PANavView(leaf, this, this.manifest.name));
-    this.registerView(VIEW_TYPE_MOMENTUM_AI, (leaf) => new MomentumAIView(leaf, this));
 
     this.addCommand({
       id: "open",
@@ -44,18 +42,34 @@ export default class MomentumPlugin extends Plugin implements PAHost, AIHost {
     });
 
     this.addCommand({
-      id: "open-ai",
-      name: "Open AI assistant",
-      callback: () => this.activateAIView(),
-    });
-
-    this.addCommand({
       id: "migrate-readable-notes",
       name: "Momentum: migrate notes to readable names",
       callback: () => void this.runReadableNotesMigration(),
     });
 
-    this.addRibbonIcon("bot", "Momentum AI", () => this.activateAIView());
+    this.addCommand({
+      id: "momentum-open-left",
+      name: "Momentum: open current page in left sidebar",
+      callback: () => void this.openPageIn(this.currentPage, "left"),
+    });
+
+    this.addCommand({
+      id: "momentum-open-right",
+      name: "Momentum: open current page in right sidebar",
+      callback: () => void this.openPageIn(this.currentPage, "right"),
+    });
+
+    this.addCommand({
+      id: "momentum-open-bottom",
+      name: "Momentum: open current page in bottom split",
+      callback: () => void this.openPageIn(this.currentPage, "bottom"),
+    });
+
+    this.addCommand({
+      id: "momentum-open-center",
+      name: "Momentum: open current page in center",
+      callback: () => void this.openPageIn(this.currentPage, "center"),
+    });
 
     this.addSettingTab(new PASettingTab(this.app, this));
 
@@ -63,12 +77,22 @@ export default class MomentumPlugin extends Plugin implements PAHost, AIHost {
     this.app.workspace.onLayoutReady(() => {
       // Remove any duplicate panels that piled up (e.g. from workspace sync between devices).
       this.dedupeLeaves(VIEW_TYPE_PA_NAV);
-      this.dedupeLeaves(VIEW_TYPE_MOMENTUM_AI);
       if (this.app.workspace.getLeavesOfType(VIEW_TYPE_PA_NAV).length === 0) {
         const leaf = this.app.workspace.getLeftLeaf(false);
         void leaf?.setViewState({ type: VIEW_TYPE_PA_NAV });
       }
-      void this.store.syncTaskLists();
+      // Promote any items added externally (e.g. a mobile widget) while the app was
+      // closed BEFORE regenerating the mirrors, so those additions are not wiped.
+      // Guarded so the mirror rewrites below don't re-trigger the modify listener.
+      void (async () => {
+        this.mirrorSyncing = true;
+        try {
+          await this.store.reconcileTaskLists();
+          await this.store.syncTaskLists();
+        } finally {
+          window.setTimeout(() => { this.mirrorSyncing = false; }, 1000);
+        }
+      })();
       this.maybeShowWhatsNew();
       void this.runTaskAutomations();
       // One-time, best-effort migration of module notes to readable filenames. Guarded by a
@@ -91,34 +115,16 @@ export default class MomentumPlugin extends Plugin implements PAHost, AIHost {
     // plugin), reflect the done/undone change back into the board tasks.
     this.registerEvent(this.app.vault.on("modify", (file) => {
       if (!(file instanceof TFile)) return;
+      // Ignore the mirror writes the plugin itself makes, otherwise applyTaskListFile
+      // would re-run on our own output and could loop (runaway task creation).
+      if (this.mirrorSyncing) return;
       const listsPrefix = this.store.full("Tasks/Lists") + "/";
       if (!file.path.startsWith(listsPrefix)) return;
       void (async () => {
         const changed = await this.store.applyTaskListFile(file);
-        if (changed) await this.store.syncTaskLists();
+        if (changed) await this.syncMirrors();
       })();
     }));
-  }
-
-  // ---- AIHost ----
-  getAIConfig(): AIConfig {
-    return {
-      provider: this.settings.aiProvider || "gemini",
-      apiKey: this.settings.aiApiKey || "",
-      model: this.settings.aiModel || "",
-      baseUrl: this.settings.aiBaseUrl || "",
-    };
-  }
-
-  /** Open the AI chat panel in the right sidebar. */
-  async activateAIView(): Promise<void> {
-    const { workspace } = this.app;
-    let leaf: WorkspaceLeaf | null = workspace.getLeavesOfType(VIEW_TYPE_MOMENTUM_AI)[0] ?? null;
-    if (!leaf) {
-      leaf = workspace.getRightLeaf(false);
-      await leaf?.setViewState({ type: VIEW_TYPE_MOMENTUM_AI, active: true });
-    }
-    if (leaf) void workspace.revealLeaf(leaf);
   }
 
   /** Open the nav panel in the left sidebar and the content in the main area. */
@@ -133,20 +139,75 @@ export default class MomentumPlugin extends Plugin implements PAHost, AIHost {
     await this.openPage(this.currentPage);
   }
 
-  /** Set the active page and ensure the content view shows it. */
+  /** Set the active page and ensure a CENTER content view shows it (reusing one if present). */
   async openPage(id: string): Promise<void> {
     this.currentPage = id;
     const { workspace } = this.app;
-    let leaf: WorkspaceLeaf | null = workspace.getLeavesOfType(VIEW_TYPE_PA)[0] ?? null;
+    let leaf = this.findCenterPAView();
     if (!leaf) {
       leaf = workspace.getLeaf("tab");
-      await leaf.setViewState({ type: VIEW_TYPE_PA, active: true });
     }
-    if (leaf.view instanceof PAView) leaf.view.setPage(id);
+    await leaf.setViewState({ type: VIEW_TYPE_PA, active: true, state: { page: id } });
     void workspace.revealLeaf(leaf);
-    workspace.getLeavesOfType(VIEW_TYPE_PA_NAV).forEach((l) => {
+    this.refreshNav();
+  }
+
+  /** Open a page in a chosen workspace location as an independent view. */
+  async openPageIn(id: string, location: PALocation): Promise<void> {
+    this.currentPage = id;
+    const { workspace } = this.app;
+    let leaf: WorkspaceLeaf | null;
+    switch (location) {
+      case "left":
+        leaf = workspace.getLeftLeaf(false);
+        break;
+      case "right":
+        leaf = workspace.getRightLeaf(false);
+        break;
+      case "bottom":
+        // Obsidian has no dedicated "bottom" leaf API; a horizontal split of the
+        // active center leaf places the new leaf below it.
+        leaf = workspace.getLeaf("split", "horizontal");
+        break;
+      case "center":
+      default:
+        leaf = this.findCenterPAView() ?? workspace.getLeaf("tab");
+        break;
+    }
+    if (!leaf) return;
+    await leaf.setViewState({ type: VIEW_TYPE_PA, active: true, state: { page: id } });
+    void workspace.revealLeaf(leaf);
+    this.refreshNav();
+  }
+
+  /** Find an existing PAView docked in the main/center area (not a sidebar). */
+  private findCenterPAView(): WorkspaceLeaf | null {
+    const { workspace } = this.app;
+    const rootSplit = workspace.rootSplit;
+    return (
+      workspace.getLeavesOfType(VIEW_TYPE_PA).find((l) => l.getRoot() === rootSplit) ?? null
+    );
+  }
+
+  /** Re-render nav panels so the active-page highlight stays current. */
+  private refreshNav(): void {
+    this.app.workspace.getLeavesOfType(VIEW_TYPE_PA_NAV).forEach((l) => {
       if (l.view instanceof PANavView) l.view.render();
     });
+  }
+
+  /**
+   * Regenerate the task-list mirrors with the anti-echo guard set, so the vault
+   * "modify" events our own writes produce are ignored by the listener (no re-entrancy,
+   * no runaway loop). The guard is cleared shortly after to cover async modify echoes.
+   */
+  private async syncMirrors(): Promise<void> {
+    this.mirrorSyncing = true;
+    try {
+      await this.store.syncTaskLists();
+    } finally {
+      window.setTimeout(() => { this.mirrorSyncing = false; }, 1000);
+    }
   }
 
   /** Keep at most one leaf of a given view type; detach the extras. */
@@ -197,7 +258,7 @@ export default class MomentumPlugin extends Plugin implements PAHost, AIHost {
       const created = await this.store.generateDueRecurringTasks();
       if (created.length) {
         await this.notify("Momentum Life", created.length === 1 ? `New recurring task: ${created[0]}` : `${created.length} recurring tasks added`);
-        this.app.workspace.getLeavesOfType(VIEW_TYPE_PA).forEach((l) => { if (l.view instanceof PAView) l.view.setPage(this.currentPage); });
+        this.app.workspace.getLeavesOfType(VIEW_TYPE_PA).forEach((l) => { if (l.view instanceof PAView) l.view.rerender(); });
       }
       await this.maybeNotifyDue();
     } catch { /* automations are best-effort */ }
@@ -285,60 +346,6 @@ class PASettingTab extends PluginSettingTab {
           await this.plugin.store.saveConfig(c);
         });
       });
-
-    new Setting(containerEl).setName("AI assistant").setHeading();
-
-    const providerSetting = new Setting(containerEl)
-      .setName("Provider")
-      .setDesc("Which AI service to use. Bring your own API key. The chat only contacts the selected provider when you send a message, with a short summary of your dashboard data. No telemetry is collected.");
-
-    const providerFields = containerEl.createDiv();
-
-    const renderProviderFields = () => {
-      providerFields.empty();
-      const p = this.plugin.settings.aiProvider;
-
-      new Setting(providerFields)
-        .setName("API key")
-        .setDesc("Your own API key for the selected provider.")
-        .addText((t) => {
-          t.inputEl.type = "password";
-          t.setPlaceholder("Paste your key here")
-            .setValue(this.plugin.settings.aiApiKey)
-            .onChange(async (v) => { this.plugin.settings.aiApiKey = v.trim(); await this.plugin.saveSettings(); });
-        });
-
-      new Setting(providerFields)
-        .setName("Model")
-        .setDesc("Model ID for the selected provider. Change it if the default is not available to you.")
-        .addText((t) =>
-          t.setValue(this.plugin.settings.aiModel).onChange(async (v) => { this.plugin.settings.aiModel = v.trim(); await this.plugin.saveSettings(); })
-        );
-
-      if (p === "openai") {
-        new Setting(providerFields)
-          .setName("Base URL")
-          .setDesc("Endpoint for the OpenAI-compatible option. Leave empty to use the default.")
-          .addText((t) =>
-            t.setValue(this.plugin.settings.aiBaseUrl).onChange(async (v) => { this.plugin.settings.aiBaseUrl = v.trim(); await this.plugin.saveSettings(); })
-          );
-      }
-    };
-
-    providerSetting.addDropdown((d) => {
-      d.addOption("gemini", "Gemini (Google)");
-      d.addOption("anthropic", "Claude (Anthropic)");
-      d.addOption("xai", "Grok");
-      d.addOption("openai", "OpenAI-compatible (custom)");
-      d.setValue(this.plugin.settings.aiProvider).onChange(async (v) => {
-        this.plugin.settings.aiProvider = v;
-        this.plugin.settings.aiModel = DEFAULT_MODELS[v] || this.plugin.settings.aiModel;
-        await this.plugin.saveSettings();
-        renderProviderFields();
-      });
-    });
-
-    renderProviderFields();
 
     new Setting(containerEl)
       .setName("Support")

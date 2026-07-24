@@ -1,4 +1,4 @@
-import { ItemView, WorkspaceLeaf } from "obsidian";
+import { ItemView, Menu, WorkspaceLeaf } from "obsidian";
 import { PAGES, PAHost } from "./view";
 
 export const VIEW_TYPE_PA_NAV = "personal-assistant-nav";
@@ -32,6 +32,19 @@ export class PANavView extends ItemView {
         cls: "pa-nav" + (p.id === this.host.currentPage ? " active" : ""),
       });
       btn.onclick = () => this.host.openPage(p.id);
+      btn.oncontextmenu = (evt) => {
+        evt.preventDefault();
+        const menu = new Menu();
+        menu.addItem((i) => i.setTitle("Open in center").setIcon("layout")
+          .onClick(() => void this.host.openPageIn(p.id, "center")));
+        menu.addItem((i) => i.setTitle("Open in left sidebar").setIcon("sidebar-left")
+          .onClick(() => void this.host.openPageIn(p.id, "left")));
+        menu.addItem((i) => i.setTitle("Open in right sidebar").setIcon("sidebar-right")
+          .onClick(() => void this.host.openPageIn(p.id, "right")));
+        menu.addItem((i) => i.setTitle("Open in bottom split").setIcon("layout-panel-top")
+          .onClick(() => void this.host.openPageIn(p.id, "bottom")));
+        menu.showAtMouseEvent(evt);
+      };
     });
   }
 }

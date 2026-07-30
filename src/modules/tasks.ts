@@ -2,6 +2,7 @@ import { PAContext } from "../context";
 import { Board, Task, RecurringTask } from "../types";
 import { ConfirmModal, FieldSpec, FormModal, showActionMenu, toast } from "../ui";
 import { drawRing, drawScatter, ScatterPoint } from "../charts";
+import { VIEW_TYPE_PA_SIDE } from "../side";
 
 const PRIORITIES = [
   { value: "low", label: "Low" },
@@ -29,12 +30,18 @@ const EISENHOWER_OPTS = [
 const RING_COLORS = ["#d97706", "#7c3aed", "#16a34a"];
 const COLUMN_COLORS = ["#7c3aed", "#3b82f6", "#16a34a", "#f59e0b", "#ef4444", "#10b981"];
 
+/** How many cards a Kanban column shows before the "load more" button. */
+const PAGE_SIZE = 7;
+
 /** Renders the "Tasks & Notes" page: a Kanban / List board over Tasks/*.md. */
 export class TasksModule {
   private ctx: PAContext;
   private currentBoard = "all";
   private view: "kanban" | "list" | "matrix" = "kanban";
-  private showRecurring = false;
+  /** The recurring-tasks panel is shown by default; the user can toggle it off. */
+  private showRecurring = true;
+  /** Per-column "load more" limits, keyed by `board|column`. Defaults to PAGE_SIZE. */
+  private colLimits: Record<string, number> = {};
 
   constructor(ctx: PAContext) { this.ctx = ctx; }
 
@@ -76,12 +83,26 @@ export class TasksModule {
     }
   }
 
+  /** Open (or reveal) the compact Tasks panel in the right sidebar. */
+  private async openSidePanel(): Promise<void> {
+    const { workspace } = this.ctx.app;
+    const leaf = workspace.getLeavesOfType(VIEW_TYPE_PA_SIDE)[0] ?? workspace.getRightLeaf(false);
+    if (!leaf) return;
+    await leaf.setViewState({ type: VIEW_TYPE_PA_SIDE, active: true });
+    void workspace.revealLeaf(leaf);
+  }
+
   // ---- Header: title + subtitle + status rings ----
-  private renderHeader(root: HTMLElement, filtered: Task[]): void {
+  private renderHeader(root: HTMLElement, filtered: Task[], compact = false): void {
     const head = root.createDiv({ cls: "pa-ht-header" });
     const left = head.createDiv();
     left.createDiv({ text: "✅ Tasks & Lists", cls: "pa-h1" });
-    left.createDiv({ text: "Kanban and list", cls: "pa-muted" });
+    left.createDiv({ text: compact ? "Summary" : "Kanban and list", cls: "pa-muted" });
+    // On the full page, offer a button to pop this summary into the right sidebar.
+    if (!compact) {
+      const sideBtn = left.createEl("button", { text: "⇥ open in sidebar", cls: "pa-mini-btn pa-side-open" });
+      sideBtn.onclick = () => void this.openSidePanel();
+    }
 
     const cols = this.ctx.config.taskColumns;
     const names = this.ctx.config.taskColumnNames;
@@ -263,13 +284,16 @@ export class TasksModule {
       const ord = (t: Task) => (t.order ?? 1e9);
       colTasks.sort((a, b) => ord(a) - ord(b) || (a.created || "").localeCompare(b.created || ""));
 
-      colTasks.slice(0, isDone && colTasks.length > 7 ? 7 : colTasks.length)
-        .forEach((t) => this.renderCard(list, t, isDone));
+      // Show at most `limit` cards (7 by default); "load more" reveals 7 more each click.
+      const key = this.currentBoard + "|" + col;
+      const limit = this.colLimits[key] ?? PAGE_SIZE;
+      colTasks.slice(0, limit).forEach((t) => this.renderCard(list, t, isDone));
 
-      if (isDone && colTasks.length > 7) {
-        const det = list.createEl("details", { cls: "pa-completed pa-kanban-more" });
-        det.createEl("summary", { text: `Show ${colTasks.length - 7} more` });
-        colTasks.slice(7).forEach((t) => this.renderCard(det, t, isDone));
+      if (colTasks.length > limit) {
+        const remaining = colTasks.length - limit;
+        const next = Math.min(PAGE_SIZE, remaining);
+        const more = list.createEl("button", { cls: "pa-load-more", text: `▾ Load ${next} more (${remaining} left)` });
+        more.onclick = (e) => { e.stopPropagation(); this.colLimits[key] = limit + PAGE_SIZE; this.ctx.refresh(); };
       }
 
       const addBtn = colEl.createEl("button", { text: "+ add card", cls: "pa-add-card" });
@@ -299,7 +323,7 @@ export class TasksModule {
 
     const topRow = card.createDiv({ cls: "pa-card-top" });
     const badgeText = (t.group || t.cat || t.kanbanName || "").toUpperCase();
-    topRow.createDiv({ text: badgeText, cls: "pa-card-cat" });
+    if (badgeText) topRow.createDiv({ text: badgeText, cls: "pa-card-cat" });
     const acts = topRow.createDiv({ cls: "pa-card-top-actions" });
     const menuBtn = acts.createEl("button", { text: "⋮", cls: "pa-icon-btn pa-card-menu" });
     menuBtn.onclick = (e) => {
@@ -312,15 +336,71 @@ export class TasksModule {
     };
 
     card.createDiv({ text: t.title, cls: "pa-card-title" });
-    const dateStr = (t.created || "").substring(0, 10);
-    card.createDiv({ cls: "pa-muted pa-card-meta", text: [t.priority, dateStr].filter(Boolean).join(" · ") });
+    this.renderCardChips(card, t);
+  }
 
-    const preview = card.createDiv({ cls: "pa-card-preview" });
-    void this.ctx.store.readBody(t.path).then((body) => {
-      const lines = body.split("\n").map((l) => l.trim()).filter(Boolean).slice(0, 3);
-      if (lines.length) preview.setText(lines.join("\n"));
-      else preview.remove();
-    });
+  /** Render the priority + date chips row shown at the bottom of a task card. */
+  private renderCardChips(card: HTMLElement, t: Task): void {
+    const chips = card.createDiv({ cls: "pa-card-chips" });
+
+    // Priority chip (always shown), colored by priority.
+    const prio = t.priority || "medium";
+    const prioLabel = prio.charAt(0).toUpperCase() + prio.slice(1);
+    chips.createSpan({ cls: `pa-chip pa-chip-prio prio-${prio}`, text: prioLabel });
+
+    // Date chip: prefer the due date (more meaningful), else the created date.
+    const hasDue = !!t.due;
+    const dateStr = this.formatDateNice(t.due || t.created || "");
+    if (dateStr) {
+      const cls = ["pa-chip", "pa-chip-date"];
+      if (hasDue) {
+        const urg = this.dateUrgency(t.due || "");
+        if (urg) cls.push(urg);
+      }
+      const chip = chips.createSpan({ cls: cls.join(" ") });
+      chip.createSpan({ cls: "pa-chip-ico", text: "📅" });
+      chip.createSpan({ text: dateStr });
+    }
+  }
+
+  /** Urgency class for a due date: overdue (past) or soon (within 2 days). */
+  private dateUrgency(due: string): string {
+    const d = new Date(due + "T00:00:00");
+    if (isNaN(d.getTime())) return "";
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const diff = Math.floor((d.getTime() - today.getTime()) / 86400000);
+    if (diff < 0) return "pa-chip-overdue";
+    if (diff <= 2) return "pa-chip-soon";
+    return "";
+  }
+
+  /** Format a date string (YYYY-MM-DD) into a nice human-readable format */
+  private formatDateNice(dateStr: string): string {
+    if (!dateStr) return "";
+    const date = new Date(dateStr + "T00:00:00");
+    if (isNaN(date.getTime())) return "";
+    
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const diff = Math.floor((date.getTime() - today.getTime()) / 86400000);
+    
+    if (diff === 0) return "Today";
+    if (diff === 1) return "Tomorrow";
+    if (diff === -1) return "Yesterday";
+    if (diff > 1 && diff <= 7) return `In ${diff} days`;
+    if (diff < -1 && diff >= -7) return `${Math.abs(diff)} days ago`;
+    
+    // Format as "Jan 15" or "Jan 15, 2026" if different year
+    const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const monthName = months[date.getMonth()];
+    const day = date.getDate();
+    const year = date.getFullYear();
+    
+    if (year === today.getFullYear()) {
+      return `${monthName} ${day}`;
+    }
+    return `${monthName} ${day}, ${year}`;
   }
 
   // ---- Recurring tasks ----
@@ -554,7 +634,7 @@ export class TasksModule {
 
     const topRow = card.createDiv({ cls: "pa-card-top" });
     const badgeText = (t.group || t.cat || t.kanbanName || "").toUpperCase();
-    topRow.createDiv({ text: badgeText, cls: "pa-card-cat" });
+    if (badgeText) topRow.createDiv({ text: badgeText, cls: "pa-card-cat" });
     const acts = topRow.createDiv({ cls: "pa-card-top-actions" });
     const doneBtn = acts.createEl("button", { text: "✓", cls: "pa-icon-btn pa-card-done" });
     doneBtn.setAttr("aria-label", "Mark done");
@@ -574,8 +654,7 @@ export class TasksModule {
     };
 
     card.createDiv({ text: t.title, cls: "pa-card-title" });
-    const meta = [t.kanbanName, t.due ? "due " + t.due : ""].filter(Boolean).join(" · ");
-    if (meta) card.createDiv({ cls: "pa-muted pa-card-meta", text: meta });
+    this.renderCardChips(card, t);
   }
 
   // ---- List view (single list per board, with collapsed Completed) ----

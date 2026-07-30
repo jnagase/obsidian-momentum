@@ -7,6 +7,8 @@ import { FitnessModule } from "./modules/fitness";
 import { NutritionModule } from "./modules/nutrition";
 import { StudiesModule } from "./modules/studies";
 import { FinancesModule } from "./modules/finances";
+import { CustomModule } from "./modules/custom";
+import { CustomPage } from "./types";
 
 export const VIEW_TYPE_PA = "personal-assistant-view";
 
@@ -27,6 +29,16 @@ export interface PAHost {
   currentPage: string;
   openPage(id: string): void | Promise<void>;
   openPageIn(id: string, location: PALocation): void | Promise<void>;
+  /** User-defined nav sections (persisted in config). */
+  customPages: CustomPage[];
+  /** Activate a custom section (run its command or open its legacy folder page). */
+  activateCustomPage(id: string): void;
+  /** Open the "new section" dialog. */
+  addCustomPage(): void;
+  /** Edit an existing custom section by id. */
+  editCustomPage(id: string): void;
+  /** Delete a custom section by id. */
+  removeCustomPage(id: string): void | Promise<void>;
 }
 
 export class PAView extends ItemView {
@@ -42,6 +54,7 @@ export class PAView extends ItemView {
   private nutritionModule: NutritionModule;
   private studiesModule: StudiesModule;
   private financesModule: FinancesModule;
+  private customModule: CustomModule;
 
   constructor(leaf: WorkspaceLeaf, store: PADataStore, host: PAHost) {
     super(leaf);
@@ -54,12 +67,15 @@ export class PAView extends ItemView {
     this.nutritionModule = new NutritionModule(this.ctx);
     this.studiesModule = new StudiesModule(this.ctx);
     this.financesModule = new FinancesModule(this.ctx);
+    this.customModule = new CustomModule(this.ctx);
   }
 
   getViewType(): string { return VIEW_TYPE_PA; }
   getDisplayText(): string {
     const p = PAGES.find((x) => x.id === this.page);
-    return p ? p.label.replace(/^\S+\s/, "") : "Personal Assistant";
+    if (p) return p.label.replace(/^\S+\s/, "");
+    const c = this.host.customPages.find((x) => x.id === this.page);
+    return c ? c.label : "Personal Assistant";
   }
   getIcon(): string { return "target"; }
 
@@ -128,7 +144,11 @@ export class PAView extends ItemView {
       case "nutrition": this.nutritionModule.render(main); break;
       case "studies": this.studiesModule.render(main); break;
       case "finances": this.financesModule.render(main); break;
-      default: this.habitTrackerModule.render(main);
+      default: {
+        const custom = this.host.customPages.find((p) => p.id === this.page);
+        if (custom) this.customModule.render(main, custom);
+        else this.habitTrackerModule.render(main);
+      }
     }
   }
 }

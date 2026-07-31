@@ -492,3 +492,6 @@
 .pa-ctx-quick{display:grid;grid-template-columns:1fr;gap:6px}
 .pa-ctx-quickbtn{display:block;width:100%;text-align:left;background:var(--background-secondary);border:1px solid var(--background-modifier-border);border-radius:8px;padding:7px 10px;cursor:pointer;font-size:.85rem;color:var(--text-normal);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .pa-ctx-quickbtn:hover{border-color:var(--interactive-accent);background:var(--background-modifier-hover)}
+
+/* ===== Global top bar (every page) ===== */
+.pa-topbar{display:flex;justify-content:flex-end;padding:4px 8px 0;gap:8px}

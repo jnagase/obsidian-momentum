@@ -83,9 +83,6 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       callback: () => void this.openSidePanel(),
     });
 
-    // Ribbon icon (left bar) to open the context panel — the most discoverable entry point.
-    this.addRibbonIcon("target", "Open context panel", () => void this.openSidePanel());
-
     this.addSettingTab(new PASettingTab(this.app, this));
 
     // Ensure the nav panel exists in the left sidebar so its access icon is always available.

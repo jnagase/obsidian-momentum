@@ -9,6 +9,7 @@ import { StudiesModule } from "./modules/studies";
 import { FinancesModule } from "./modules/finances";
 import { CustomModule } from "./modules/custom";
 import { CustomPage } from "./types";
+import { VIEW_TYPE_PA_SIDE, PASideView } from "./side";
 
 export const VIEW_TYPE_PA = "personal-assistant-view";
 
@@ -61,6 +62,15 @@ export class PAView extends ItemView {
     this.host = host;
     this.ctx = new PAContext(this.app, store);
     this.ctx.refresh = () => this.renderPage();
+    this.ctx.openSidePanel = () => {
+      const { workspace } = this.app;
+      const leaf = workspace.getLeavesOfType(VIEW_TYPE_PA_SIDE)[0] ?? workspace.getRightLeaf(false);
+      if (!leaf) return;
+      void leaf.setViewState({ type: VIEW_TYPE_PA_SIDE, active: true })
+        .then(() => { workspace.getLeavesOfType(VIEW_TYPE_PA_SIDE).forEach((l) => {
+          if (l.view instanceof PASideView) l.view.showPage(this.page);
+        }); void workspace.revealLeaf(leaf); });
+    };
     this.habitTrackerModule = new HabitTrackerModule(this.ctx);
     this.tasksModule = new TasksModule(this.ctx);
     this.fitnessModule = new FitnessModule(this.ctx);

@@ -1,6 +1,6 @@
 import { PAContext } from "../context";
 import { Exercise, Split, Workout, WorkoutExercise, DEFAULT_SPLITS } from "../types";
-import { ConfirmModal, FieldSpec, FormModal, toast } from "../ui";
+import { ConfirmModal, FieldSpec, FormModal, toast, appendSidebarBtn } from "../ui";
 import { todayLocal, ymd } from "../util";
 import { drawRing, drawLineChart, LineSeries } from "../charts";
 
@@ -66,6 +66,7 @@ export class FitnessModule {
     const left = head.createDiv();
     left.createDiv({ text: "🏋️ Fitness", cls: "pa-h1" });
     left.createDiv({ text: "Workouts & progress", cls: "pa-muted" });
+    appendSidebarBtn(left, this.ctx.openSidePanel);
 
     const rings = head.createDiv({ cls: "pa-ht-rings" });
     const now = new Date();

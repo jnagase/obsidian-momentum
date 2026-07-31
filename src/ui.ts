@@ -11,6 +11,12 @@ export interface MenuAction {
   onClick: () => void;
 }
 
+/** Append a "⇥ open in sidebar" button to a `.pa-ht-header .left` div if openSidePanel is set. */
+export function appendSidebarBtn(parent: HTMLElement, openSidePanel: () => void): void {
+  const btn = parent.createEl("button", { text: "⇥ open in sidebar", cls: "pa-mini-btn pa-side-open" });
+  btn.onclick = openSidePanel;
+}
+
 /** Show a kebab/context menu with the given actions at the click position. */
 export function showActionMenu(evt: MouseEvent, actions: MenuAction[]): void {
   const menu = new Menu();

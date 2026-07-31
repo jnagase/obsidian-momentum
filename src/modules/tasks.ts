@@ -1,8 +1,8 @@
 import { PAContext } from "../context";
 import { Board, Task, RecurringTask } from "../types";
-import { ConfirmModal, FieldSpec, FormModal, showActionMenu, toast } from "../ui";
+import { ConfirmModal, FieldSpec, FormModal, showActionMenu, toast, appendSidebarBtn } from "../ui";
 import { drawRing, drawScatter, ScatterPoint } from "../charts";
-import { VIEW_TYPE_PA_SIDE } from "../side";
+import { renderCardChips } from "../cardchips";
 
 const PRIORITIES = [
   { value: "low", label: "Low" },
@@ -83,26 +83,13 @@ export class TasksModule {
     }
   }
 
-  /** Open (or reveal) the compact Tasks panel in the right sidebar. */
-  private async openSidePanel(): Promise<void> {
-    const { workspace } = this.ctx.app;
-    const leaf = workspace.getLeavesOfType(VIEW_TYPE_PA_SIDE)[0] ?? workspace.getRightLeaf(false);
-    if (!leaf) return;
-    await leaf.setViewState({ type: VIEW_TYPE_PA_SIDE, active: true });
-    void workspace.revealLeaf(leaf);
-  }
-
   // ---- Header: title + subtitle + status rings ----
   private renderHeader(root: HTMLElement, filtered: Task[], compact = false): void {
     const head = root.createDiv({ cls: "pa-ht-header" });
     const left = head.createDiv();
     left.createDiv({ text: "✅ Tasks & Lists", cls: "pa-h1" });
     left.createDiv({ text: compact ? "Summary" : "Kanban and list", cls: "pa-muted" });
-    // On the full page, offer a button to pop this summary into the right sidebar.
-    if (!compact) {
-      const sideBtn = left.createEl("button", { text: "⇥ open in sidebar", cls: "pa-mini-btn pa-side-open" });
-      sideBtn.onclick = () => void this.openSidePanel();
-    }
+    if (!compact && this.ctx.openSidePanel) appendSidebarBtn(left, this.ctx.openSidePanel);
 
     const cols = this.ctx.config.taskColumns;
     const names = this.ctx.config.taskColumnNames;
@@ -336,71 +323,7 @@ export class TasksModule {
     };
 
     card.createDiv({ text: t.title, cls: "pa-card-title" });
-    this.renderCardChips(card, t);
-  }
-
-  /** Render the priority + date chips row shown at the bottom of a task card. */
-  private renderCardChips(card: HTMLElement, t: Task): void {
-    const chips = card.createDiv({ cls: "pa-card-chips" });
-
-    // Priority chip (always shown), colored by priority.
-    const prio = t.priority || "medium";
-    const prioLabel = prio.charAt(0).toUpperCase() + prio.slice(1);
-    chips.createSpan({ cls: `pa-chip pa-chip-prio prio-${prio}`, text: prioLabel });
-
-    // Date chip: prefer the due date (more meaningful), else the created date.
-    const hasDue = !!t.due;
-    const dateStr = this.formatDateNice(t.due || t.created || "");
-    if (dateStr) {
-      const cls = ["pa-chip", "pa-chip-date"];
-      if (hasDue) {
-        const urg = this.dateUrgency(t.due || "");
-        if (urg) cls.push(urg);
-      }
-      const chip = chips.createSpan({ cls: cls.join(" ") });
-      chip.createSpan({ cls: "pa-chip-ico", text: "📅" });
-      chip.createSpan({ text: dateStr });
-    }
-  }
-
-  /** Urgency class for a due date: overdue (past) or soon (within 2 days). */
-  private dateUrgency(due: string): string {
-    const d = new Date(due + "T00:00:00");
-    if (isNaN(d.getTime())) return "";
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const diff = Math.floor((d.getTime() - today.getTime()) / 86400000);
-    if (diff < 0) return "pa-chip-overdue";
-    if (diff <= 2) return "pa-chip-soon";
-    return "";
-  }
-
-  /** Format a date string (YYYY-MM-DD) into a nice human-readable format */
-  private formatDateNice(dateStr: string): string {
-    if (!dateStr) return "";
-    const date = new Date(dateStr + "T00:00:00");
-    if (isNaN(date.getTime())) return "";
-    
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const diff = Math.floor((date.getTime() - today.getTime()) / 86400000);
-    
-    if (diff === 0) return "Today";
-    if (diff === 1) return "Tomorrow";
-    if (diff === -1) return "Yesterday";
-    if (diff > 1 && diff <= 7) return `In ${diff} days`;
-    if (diff < -1 && diff >= -7) return `${Math.abs(diff)} days ago`;
-    
-    // Format as "Jan 15" or "Jan 15, 2026" if different year
-    const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-    const monthName = months[date.getMonth()];
-    const day = date.getDate();
-    const year = date.getFullYear();
-    
-    if (year === today.getFullYear()) {
-      return `${monthName} ${day}`;
-    }
-    return `${monthName} ${day}, ${year}`;
+    renderCardChips(card, { priority: t.priority, due: t.due, created: t.created });
   }
 
   // ---- Recurring tasks ----
@@ -654,7 +577,7 @@ export class TasksModule {
     };
 
     card.createDiv({ text: t.title, cls: "pa-card-title" });
-    this.renderCardChips(card, t);
+    renderCardChips(card, { priority: t.priority, due: t.due, created: t.created });
   }
 
   // ---- List view (single list per board, with collapsed Completed) ----

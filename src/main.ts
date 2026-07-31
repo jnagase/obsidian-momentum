@@ -3,7 +3,10 @@ import { PADataStore, setDataRoot } from "./data";
 import { todayLocal } from "./util";
 import { PAView, VIEW_TYPE_PA, PAHost, PALocation } from "./view";
 import { PANavView, VIEW_TYPE_PA_NAV } from "./nav";
+import { PASideView, VIEW_TYPE_PA_SIDE, momentumNoteType } from "./side";
 import { WhatsNewModal, CHANGELOG, cmpVersion } from "./whatsnew";
+import { CustomPage } from "./types";
+import { FormModal, ConfirmModal, FieldSpec } from "./ui";
 
 interface PASettings { dataRoot: string; notifyTasks: boolean; lastSeenVersion: string; readableNotesSchema?: number; }
 const DEFAULT_SETTINGS: PASettings = { dataRoot: "Momentum Life", notifyTasks: false, lastSeenVersion: "", readableNotesSchema: 0 };
@@ -18,6 +21,8 @@ export default class MomentumPlugin extends Plugin implements PAHost {
   /** True while the plugin itself is (re)writing the task-list mirrors, so the vault
    *  "modify" listener ignores our own writes and never re-enters (prevents runaway loops). */
   private mirrorSyncing = false;
+  /** User-defined nav sections, loaded from config (source of truth for the nav + views). */
+  customPages: CustomPage[] = [];
 
   async onload(): Promise<void> {
     const data = (await this.loadData()) as Partial<PASettings> | null;
@@ -34,6 +39,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
 
     this.registerView(VIEW_TYPE_PA, (leaf) => new PAView(leaf, this.store, this));
     this.registerView(VIEW_TYPE_PA_NAV, (leaf) => new PANavView(leaf, this, this.manifest.name));
+    this.registerView(VIEW_TYPE_PA_SIDE, (leaf) => new PASideView(leaf, this.store));
 
     this.addCommand({
       id: "open",
@@ -71,10 +77,18 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       callback: () => void this.openPageIn(this.currentPage, "center"),
     });
 
+    this.addCommand({
+      id: "momentum-open-tasks-summary",
+      name: "Momentum: open context panel in sidebar",
+      callback: () => void this.openSidePanel(),
+    });
+
     this.addSettingTab(new PASettingTab(this.app, this));
 
     // Ensure the nav panel exists in the left sidebar so its access icon is always available.
     this.app.workspace.onLayoutReady(() => {
+      // Load user-defined nav sections so the nav can render them.
+      void this.reloadCustomPages();
       // Remove any duplicate panels that piled up (e.g. from workspace sync between devices).
       this.dedupeLeaves(VIEW_TYPE_PA_NAV);
       if (this.app.workspace.getLeavesOfType(VIEW_TYPE_PA_NAV).length === 0) {
@@ -111,6 +125,19 @@ export default class MomentumPlugin extends Plugin implements PAHost {
     // Re-check recurring tasks and due reminders every 30 minutes while Obsidian is open.
     this.registerInterval(window.setInterval(() => void this.runTaskAutomations(), 30 * 60 * 1000));
 
+    // The context side panel follows the note you open. Opening a Momentum note
+    // surfaces the panel on the right automatically (like Team Manager), then it
+    // keeps following. Non-Momentum notes never force the panel to appear.
+    this.registerEvent(this.app.workspace.on("file-open", (file) => {
+      if (!(file instanceof TFile) || !momentumNoteType(this.app, file)) return;
+      void (async () => {
+        await this.ensureSidePanel();
+        this.app.workspace.getLeavesOfType(VIEW_TYPE_PA_SIDE).forEach((l) => {
+          if (l.view instanceof PASideView) l.view.showFile(file);
+        });
+      })();
+    }));
+
     // When a task-list mirror file is edited (e.g. a checkbox toggled from another
     // plugin), reflect the done/undone change back into the board tasks.
     this.registerEvent(this.app.vault.on("modify", (file) => {
@@ -125,6 +152,28 @@ export default class MomentumPlugin extends Plugin implements PAHost {
         if (changed) await this.syncMirrors();
       })();
     }));
+  }
+
+  /** Open (and reveal) the context panel in the right sidebar. */
+  async openSidePanel(): Promise<void> {
+    const { workspace } = this.app;
+    const leaf = workspace.getLeavesOfType(VIEW_TYPE_PA_SIDE)[0] ?? workspace.getRightLeaf(false);
+    if (!leaf) return;
+    await leaf.setViewState({ type: VIEW_TYPE_PA_SIDE, active: true });
+    void workspace.revealLeaf(leaf);
+    // Reflect the page you're currently on when opened from the ribbon/command.
+    this.updateSidePage(this.currentPage);
+  }
+
+  /** Ensure a context panel exists in the right sidebar. Reveals it the first time
+   *  it is created so it doesn't stay hidden behind another sidebar tab. */
+  private async ensureSidePanel(): Promise<void> {
+    const { workspace } = this.app;
+    if (workspace.getLeavesOfType(VIEW_TYPE_PA_SIDE).length) return;
+    const leaf = workspace.getRightLeaf(false);
+    if (!leaf) return;
+    await leaf.setViewState({ type: VIEW_TYPE_PA_SIDE, active: true });
+    void workspace.revealLeaf(leaf);
   }
 
   /** Open the nav panel in the left sidebar and the content in the main area. */
@@ -150,6 +199,14 @@ export default class MomentumPlugin extends Plugin implements PAHost {
     await leaf.setViewState({ type: VIEW_TYPE_PA, active: true, state: { page: id } });
     void workspace.revealLeaf(leaf);
     this.refreshNav();
+    this.updateSidePage(id);
+  }
+
+  /** Tell any open context panel to mirror the given Momentum page (nav-driven). */
+  private updateSidePage(id: string): void {
+    this.app.workspace.getLeavesOfType(VIEW_TYPE_PA_SIDE).forEach((l) => {
+      if (l.view instanceof PASideView) l.view.showPage(id);
+    });
   }
 
   /** Open a page in a chosen workspace location as an independent view. */
@@ -194,6 +251,139 @@ export default class MomentumPlugin extends Plugin implements PAHost {
     this.app.workspace.getLeavesOfType(VIEW_TYPE_PA_NAV).forEach((l) => {
       if (l.view instanceof PANavView) l.view.render();
     });
+  }
+
+  /** Re-render every content view (so custom-page changes show immediately). */
+  private rerenderViews(): void {
+    this.app.workspace.getLeavesOfType(VIEW_TYPE_PA).forEach((l) => {
+      if (l.view instanceof PAView) l.view.rerender();
+    });
+  }
+
+  /** Reload the custom nav sections from config and refresh the UI. */
+  private async reloadCustomPages(): Promise<void> {
+    this.customPages = (await this.store.loadConfig()).customPages || [];
+    this.refreshNav();
+    this.rerenderViews();
+  }
+
+  /** Build a stable, unique custom-page id from a label. */
+  private customPageId(label: string, taken: Set<string>): string {
+    const base = "custom-" + (label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "section");
+    let id = base;
+    let n = 2;
+    while (taken.has(id)) { id = `${base}-${n}`; n++; }
+    return id;
+  }
+
+  /** Access Obsidian's (untyped) command registry. */
+  private commandsApi(): { listCommands?: () => Array<{ id: string; name: string }>; executeCommandById?: (id: string) => boolean } {
+    return (this.app as unknown as { commands?: { listCommands?: () => Array<{ id: string; name: string }>; executeCommandById?: (id: string) => boolean } }).commands || {};
+  }
+
+  /** Run a command (legacy sections). Warns if it's unavailable. */
+  private execCommand(id: string): void {
+    const ok = this.commandsApi().executeCommandById?.(id);
+    if (!ok) new Notice("Couldn't open that — its plugin may be disabled or the command was removed.");
+  }
+
+  /**
+   * The left-sidebar ribbon icons — one per plugin view (Team, Library, Dogear, …).
+   * This is exactly "what opens each plugin", with the plugin's own friendly title.
+   * The API is untyped/internal, so we read it defensively.
+   */
+  private ribbonItems(): Array<{ id: string; title: string; hidden?: boolean; callback?: (e: MouseEvent) => unknown }> {
+    const rib = (this.app as unknown as {
+      workspace: { leftRibbon?: { items?: Array<{ id: string; title: string; hidden?: boolean; callback?: (e: MouseEvent) => unknown }> } };
+    }).workspace.leftRibbon;
+    return rib?.items ?? [];
+  }
+
+  /** Trigger a ribbon item by id (same as clicking its left-bar icon). */
+  private runRibbon(id: string): void {
+    const item = this.ribbonItems().find((i) => i.id === id);
+    if (item?.callback) { item.callback(new MouseEvent("click")); return; }
+    new Notice("Couldn't open that — the plugin's ribbon icon may be gone.");
+  }
+
+  /** Ribbon items as dropdown options (value = ribbon id, label = plugin title). */
+  private ribbonOptions(current?: string): Array<{ value: string; label: string }> {
+    const items = this.ribbonItems();
+    const opts = items.map((i) => ({ value: i.id, label: i.title }));
+    // Keep the currently-saved item selectable even if its plugin is off / icon hidden.
+    if (current && !opts.some((o) => o.value === current)) {
+      const cur = items.find((i) => i.id === current);
+      opts.push({ value: current, label: cur?.title || current });
+    }
+    opts.sort((a, b) => a.label.localeCompare(b.label));
+    return opts;
+  }
+
+  private customPageFields(page?: CustomPage): FieldSpec[] {
+    const options = this.ribbonOptions(page?.ribbon);
+    return [
+      { key: "label", label: "Shortcut name", type: "text", value: page?.label || "", placeholder: "e.g. Library" },
+      { key: "emoji", label: "Emoji", type: "emoji", value: page?.emoji || "" },
+      // Default to the saved ribbon item, or the first available one, so a value is
+      // always submitted even if the user never touches the dropdown.
+      { key: "ribbon", label: "Plugin to open", type: "dropdown", value: page?.ribbon || options[0]?.value || "", options },
+    ];
+  }
+
+  /** Activate a custom section: trigger its ribbon icon / command, or open a legacy folder page. */
+  activateCustomPage(id: string): void {
+    const page = this.customPages.find((p) => p.id === id);
+    if (!page) return;
+    if (page.ribbon) { this.runRibbon(page.ribbon); return; }
+    if (page.command) { this.execCommand(page.command); return; }
+    void this.openPage(id);
+  }
+
+  /** Open the "add plugin" dialog and persist it. */
+  addCustomPage(): void {
+    if (!this.ribbonItems().length) { new Notice("No plugin icons found in the ribbon to open."); return; }
+    new FormModal(this.app, "Add plugin", this.customPageFields(), async (v) => {
+      const label = (v.label || "").trim();
+      const ribbon = (v.ribbon || "").trim();
+      if (!label || !ribbon) { new Notice("A shortcut needs a name and a plugin to open."); return; }
+      const cfg = await this.store.loadConfig();
+      const taken = new Set(cfg.customPages.map((p) => p.id));
+      const id = this.customPageId(label, taken);
+      cfg.customPages.push({ id, label, emoji: (v.emoji || "").trim(), ribbon });
+      await this.store.saveConfig(cfg);
+      await this.reloadCustomPages();
+      this.runRibbon(ribbon);
+    }, "Create").open();
+  }
+
+  /** Edit an existing plugin shortcut. */
+  editCustomPage(id: string): void {
+    const page = this.customPages.find((p) => p.id === id);
+    if (!page) return;
+    new FormModal(this.app, "Edit plugin", this.customPageFields(page), async (v) => {
+      const label = (v.label || "").trim();
+      const ribbon = (v.ribbon || "").trim();
+      if (!label || !ribbon) { new Notice("A shortcut needs a name and a plugin to open."); return; }
+      const cfg = await this.store.loadConfig();
+      const idx = cfg.customPages.findIndex((p) => p.id === id);
+      if (idx < 0) return;
+      cfg.customPages[idx] = { id: cfg.customPages[idx].id, label, emoji: (v.emoji || "").trim(), ribbon };
+      await this.store.saveConfig(cfg);
+      await this.reloadCustomPages();
+    }, "Save").open();
+  }
+
+  /** Delete a custom section (keeps the underlying notes; only removes the nav tab). */
+  async removeCustomPage(id: string): Promise<void> {
+    const page = this.customPages.find((p) => p.id === id);
+    if (!page) return;
+    new ConfirmModal(this.app, `Remove the "${page.label}" plugin shortcut? (only the tab is removed)`, async () => {
+      const cfg = await this.store.loadConfig();
+      cfg.customPages = cfg.customPages.filter((p) => p.id !== id);
+      await this.store.saveConfig(cfg);
+      await this.reloadCustomPages();
+      if (this.currentPage === id) await this.openPage("habit-tracker");
+    }).open();
   }
 
   /**

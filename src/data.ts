@@ -206,7 +206,17 @@ export class PADataStore {
     if (m.monthly_budget != null) cfg.monthlyBudget = num(m.monthly_budget);
     if (m.expense_categories) cfg.expenseCategories = coerce(m.expense_categories, cfg.expenseCategories);
     if (m.income_categories) cfg.incomeCategories = coerce(m.income_categories, cfg.incomeCategories);
+    if (m.custom_pages) cfg.customPages = coerce(m.custom_pages, cfg.customPages);
     return cfg;
+  }
+
+  /** List markdown notes under a vault-relative folder (used by custom pages). */
+  loadFolderNotes(folder: string): Array<{ title: string; path: string }> {
+    const prefix = folder.replace(/\/+$/, "") + "/";
+    return this.app.vault.getMarkdownFiles()
+      .filter((f) => f.path.startsWith(prefix))
+      .sort((a, b) => a.path.localeCompare(b.path))
+      .map((f) => ({ title: f.basename, path: f.path }));
   }
 
   async saveConfig(cfg: PAConfig): Promise<void> {
@@ -227,6 +237,7 @@ export class PADataStore {
       monthly_budget: cfg.monthlyBudget,
       expense_categories: cfg.expenseCategories,
       income_categories: cfg.incomeCategories,
+      custom_pages: cfg.customPages,
       modified: new Date().toISOString(),
     };
     await this.writeFile("Config/settings.md", this.buildDoc(meta, "# Personal Assistant Config\n"));

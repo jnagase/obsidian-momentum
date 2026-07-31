@@ -13,6 +13,8 @@ export class PAContext {
   config: PAConfig = defaultConfig();
   /** Re-render the currently active page. Set by the view. */
   refresh: () => void = () => {};
+  /** Open the context side panel in the right sidebar. Set by the view. */
+  openSidePanel: () => void = () => {};
 
   constructor(app: App, store: PADataStore) {
     this.app = app;

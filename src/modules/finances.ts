@@ -1,6 +1,6 @@
 import { PAContext } from "../context";
 import { RecurringItem, Transaction } from "../types";
-import { ConfirmModal, FieldSpec, FormModal, toast } from "../ui";
+import { ConfirmModal, FieldSpec, FormModal, toast, appendSidebarBtn } from "../ui";
 import { todayLocal } from "../util";
 import { drawRing, drawDonut, drawLineChart } from "../charts";
 
@@ -289,6 +289,7 @@ export class FinancesModule {
     const left = head.createDiv();
     left.createDiv({ text: "💰 Finances", cls: "pa-h1" });
     left.createDiv({ text: "Income, expenses and budget", cls: "pa-muted" });
+    appendSidebarBtn(left, this.ctx.openSidePanel);
 
     const rings = head.createDiv({ cls: "pa-ht-rings" });
     const now = new Date();

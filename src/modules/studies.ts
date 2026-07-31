@@ -1,7 +1,8 @@
 import { PAContext } from "../context";
 import { Board, StudyCard } from "../types";
-import { ConfirmModal, FieldSpec, FormModal, MenuAction, openExternal, showActionMenu, toast } from "../ui";
+import { ConfirmModal, FieldSpec, FormModal, MenuAction, openExternal, showActionMenu, toast, appendSidebarBtn } from "../ui";
 import { drawRing } from "../charts";
+import { renderCardChips } from "../cardchips";
 
 const RING_COLORS = ["#d97706", "#7c3aed", "#16a34a"];
 const COLUMN_COLORS = ["#7c3aed", "#3b82f6", "#16a34a", "#f59e0b", "#ef4444", "#10b981"];
@@ -58,6 +59,7 @@ export class StudiesModule {
     const left = head.createDiv();
     left.createDiv({ text: "📚 Studies", cls: "pa-h1" });
     left.createDiv({ text: "Kanban and list", cls: "pa-muted" });
+    appendSidebarBtn(left, this.ctx.openSidePanel);
 
     const cols = this.ctx.config.studyColumns;
     const names = this.ctx.config.studyColumnNames;
@@ -250,7 +252,7 @@ export class StudiesModule {
   }
 
   private renderCard(list: HTMLElement, c: StudyCard, isDoneCol: boolean, topics: Board[]): void {
-    const card = list.createDiv({ cls: "pa-card pa-study" + (isDoneCol ? " done" : "") });
+    const card = list.createDiv({ cls: "pa-card pa-task" + (isDoneCol ? " done" : "") });
     card.dataset.path = c.path;
     card.setAttr("draggable", "true");
     card.addEventListener("dragstart", (e) => { e.dataTransfer?.setData("text/plain", c.path); card.addClass("pa-dragging"); });
@@ -259,7 +261,7 @@ export class StudiesModule {
 
     const topRow = card.createDiv({ cls: "pa-card-top" });
     const badge = (c.subtopic || c.topic || "").toUpperCase();
-    topRow.createDiv({ text: badge, cls: "pa-card-cat" });
+    if (badge) topRow.createDiv({ text: badge, cls: "pa-card-cat" });
     const acts = topRow.createDiv({ cls: "pa-card-top-actions" });
     const menuBtn = acts.createEl("button", { text: "⋮", cls: "pa-icon-btn pa-card-menu" });
     menuBtn.onclick = (e) => {
@@ -274,14 +276,9 @@ export class StudiesModule {
     };
 
     card.createDiv({ text: c.title, cls: "pa-card-title" });
-    if (c.date) card.createDiv({ cls: "pa-muted pa-card-meta", text: c.date });
-
-    const preview = card.createDiv({ cls: "pa-card-preview" });
-    void this.ctx.store.readBody(c.path).then((body) => {
-      const lines = body.split("\n").map((l) => l.trim()).filter(Boolean).slice(0, 3);
-      if (lines.length) preview.setText(lines.join("\n"));
-      else preview.remove();
-    });
+    // Same chips engine as Tasks: status chip (using "medium" as default since study cards
+    // have no priority field) + date chip.
+    renderCardChips(card, { priority: "medium", due: c.date, created: c.date });
   }
 
   // ---- List view ----

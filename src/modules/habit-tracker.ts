@@ -1,6 +1,6 @@
 import { PAContext } from "../context";
 import { Board, Habit, StudyCard, Task, Workout } from "../types";
-import { ConfirmModal, FieldSpec, FormModal, toast } from "../ui";
+import { ConfirmModal, FieldSpec, FormModal, toast, appendSidebarBtn } from "../ui";
 import { daysBetween, todayLocal, ymd } from "../util";
 import { drawDonut, drawRing } from "../charts";
 
@@ -77,6 +77,7 @@ export class HabitTrackerModule {
     const greeting = hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
     const dateStr = new Date().toLocaleDateString("default", { weekday: "long", day: "numeric", month: "short" });
     left.createDiv({ text: `${greeting}, Jaime · ${dateStr}`, cls: "pa-muted" });
+    appendSidebarBtn(left, this.ctx.openSidePanel);
 
     const rings = head.createDiv({ cls: "pa-ht-rings" });
     const dayN = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];

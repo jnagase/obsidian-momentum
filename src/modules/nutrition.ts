@@ -1,6 +1,6 @@
 import { PAContext } from "../context";
 import { Meal, MealItem, MealLog } from "../types";
-import { ConfirmModal, toast } from "../ui";
+import { ConfirmModal, toast, appendSidebarBtn } from "../ui";
 import { todayLocal, ymd } from "../util";
 import { drawRing, drawLineChart } from "../charts";
 import { searchFoods, FoodResult } from "../foodapi";
@@ -72,6 +72,7 @@ export class NutritionModule {
     const left = head.createDiv();
     left.createDiv({ text: "🥗 Nutrition", cls: "pa-h1" });
     left.createDiv({ text: "Daily food tracking", cls: "pa-muted" });
+    appendSidebarBtn(left, this.ctx.openSidePanel);
 
     const target = this.ctx.config.calorieTarget || 2000;
     const rings = head.createDiv({ cls: "pa-ht-rings" });

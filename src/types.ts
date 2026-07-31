@@ -8,6 +8,20 @@ export interface Board {
   emoji?: string;
 }
 
+/**
+ * A user-defined nav section. Two flavors:
+ *  - command: clicking it runs an Obsidian command (opens another plugin/view in a tab).
+ *  - folder (legacy): lists the notes under a vault folder inside the Momentum view.
+ */
+export interface CustomPage {
+  id: string;       // stable slug used as the page id
+  label: string;    // shown in the nav
+  emoji?: string;
+  ribbon?: string;  // ribbon item id to trigger (opens a plugin exactly like its left-bar icon). Preferred.
+  command?: string; // legacy: command id to execute (opens a plugin/view).
+  folder?: string;  // legacy: vault-relative folder whose notes are listed (e.g. "Books")
+}
+
 export interface Task {
   id: string; // task_id (uuid) or filename fallback
   title: string;
@@ -179,6 +193,7 @@ export interface PAConfig {
   monthlyBudget: number;
   expenseCategories: string[];
   incomeCategories: string[];
+  customPages: CustomPage[];
 }
 
 export const DEFAULT_EXPENSE_CATEGORIES = ["Housing", "Food", "Transport", "Health", "Leisure", "Bills", "Shopping", "Other"];
@@ -231,5 +246,6 @@ export function defaultConfig(): PAConfig {
     monthlyBudget: 0,
     expenseCategories: DEFAULT_EXPENSE_CATEGORIES.slice(),
     incomeCategories: DEFAULT_INCOME_CATEGORIES.slice(),
+    customPages: [],
   };
 }

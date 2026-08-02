@@ -152,6 +152,50 @@ export default class MomentumPlugin extends Plugin implements PAHost {
         if (changed) await this.syncMirrors();
       })();
     }));
+
+    // Inbox: normalise any .md file created in Tasks/ (but NOT in Tasks/Lists/) that
+    // doesn't yet have a valid Momentum frontmatter. This lets other plugins, widgets,
+    // or manual edits drop files there and have the plugin adopt them automatically.
+    this.registerEvent(this.app.vault.on("create", (file) => {
+      if (!(file instanceof TFile)) return;
+      if (!file.path.endsWith(".md")) return;
+      const tasksPrefix = this.store.full("Tasks") + "/";
+      const listsPrefix = this.store.full("Tasks/Lists") + "/";
+      if (!file.path.startsWith(tasksPrefix)) return;
+      if (file.path.startsWith(listsPrefix)) return;       // mirrors are not tasks
+      if (file.name === "boards.md" || file.name === "recurring.md") return;
+      // Wait a moment for the metadata cache to index the new file, then check
+      // whether it already has a valid task frontmatter. If not, adopt it.
+      window.setTimeout(() => void this.adoptTaskFile(file), 800);
+    }));
+  }
+
+  /**
+   * Adopt a manually-created (or externally-dropped) file in Tasks/ by injecting
+   * a minimal Momentum frontmatter if it doesn't already have one.
+   * Preserves whatever body text was written by the external author.
+   */
+  private async adoptTaskFile(file: TFile): Promise<void> {
+    try {
+      const cache = this.app.metadataCache.getFileCache(file);
+      const fmType: unknown = cache?.frontmatter?.["type"];
+      const fmId: unknown = cache?.frontmatter?.["task_id"];
+      // Already a Momentum task — nothing to do.
+      if (fmType === "task" && fmId) return;
+      // Patch in the minimum required fields, preserving any existing frontmatter
+      // fields and all body content.
+      await this.app.fileManager.processFrontMatter(file, (matter: Record<string, unknown>) => {
+        if (!matter.type) matter.type = "task";
+        if (!matter.task_id) matter.task_id = crypto.randomUUID ? crypto.randomUUID() : ("t" + Date.now());
+        if (!matter.title) matter.title = file.basename;
+        if (!matter.status) matter.status = "backlog";
+        if (!matter.priority) matter.priority = "medium";
+        if (!matter.created) matter.created = new Date().toISOString();
+        matter.modified = new Date().toISOString();
+      });
+      // Re-sync mirrors so the new task appears in task lists.
+      await this.syncMirrors();
+    } catch { /* best-effort: if adoption fails the file is left as-is */ }
   }
 
   /** Open (and reveal) the context panel in the right sidebar. */

@@ -1,4 +1,4 @@
-import { Plugin, WorkspaceLeaf, PluginSettingTab, App, Setting, TFolder, TFile, Platform, Notice } from "obsidian";
+import { Plugin, WorkspaceLeaf, PluginSettingTab, App, Setting, TFolder, TFile, Notice } from "obsidian";
 import { PADataStore, setDataRoot } from "./data";
 import { PAView, VIEW_TYPE_PA, PAHost, PALocation } from "./view";
 import { PANavView, VIEW_TYPE_PA_NAV } from "./nav";
@@ -6,7 +6,7 @@ import { PASideView, VIEW_TYPE_PA_SIDE, momentumNoteType } from "./side";
 import { WhatsNewModal, CHANGELOG, cmpVersion } from "./whatsnew";
 import { CustomPage } from "./types";
 import { FormModal, ConfirmModal, FieldSpec } from "./ui";
-import { GoogleToken, authorizeGoogle } from "./googletasks";
+import { GoogleToken, authorizeGoogle, completeGoogleAuth, GOOGLE_PROTOCOL_ACTION } from "./googletasks";
 import { GTSyncService } from "./gtSync";
 interface PASettings {
   dataRoot: string;
@@ -69,6 +69,12 @@ export default class MomentumPlugin extends Plugin implements PAHost {
     this.registerView(VIEW_TYPE_PA, (leaf) => new PAView(leaf, this.store, this, this.manifest.name));
     this.registerView(VIEW_TYPE_PA_NAV, (leaf) => new PANavView(leaf, this, this.manifest.name));
     this.registerView(VIEW_TYPE_PA_SIDE, (leaf) => new PASideView(leaf, this.store));
+
+    // Google OAuth returns here: the Cloudflare Worker deep-links obsidian://momentum-google
+    // with the auth code, which completes the pending authorization (desktop and mobile).
+    this.registerObsidianProtocolHandler(GOOGLE_PROTOCOL_ACTION, (params) => {
+      void completeGoogleAuth(params);
+    });
 
     this.addCommand({
       id: "open",
@@ -722,7 +728,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       log("Calling authorizeGoogle…");
       await flushLog();
       new Notice("Opening Google authorisation in your browser…");
-      const token = await authorizeGoogle(Platform.isMobileApp, (url) => { log(`Opening URL: ${url.slice(0, 80)}…`); window.open(url, "_blank"); }, log);
+      const token = await authorizeGoogle((url) => { log(`Opening URL: ${url.slice(0, 80)}…`); window.open(url, "_blank"); }, log);
       log(`Token received — email: ${token.email}, hasAccess: ${!!token.access_token}, hasRefresh: ${!!token.refresh_token}`);
       this.settings.googleToken = token;
       this.settings.googleTasksEnabled = true;
@@ -738,10 +744,6 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       const msg = e instanceof Error ? e.message : String(e);
       log(`ERROR: ${msg}`);
       await flushLog();
-      if (msg.includes("MOBILE_PENDING")) {
-        new Notice("Please complete authorisation in the browser. Run 'connect' again after approving.");
-        return;
-      }
       new Notice(`Google tasks connection failed: ${msg}`);
     }
   }
@@ -885,7 +887,8 @@ class PASettingTab extends PluginSettingTab {
       );
 
     // ── Google Tasks ──────────────────────────────────────────────────────
-    new Setting(containerEl).setName("Google tasks").setHeading();
+    const gtHeading = new Setting(containerEl).setName("Google tasks").setHeading();
+    gtHeading.nameEl.createSpan({ text: " (beta)", cls: "pa-beta-tag" });
 
     const token = this.plugin.settings.googleToken;
     const connected = !!token?.access_token;

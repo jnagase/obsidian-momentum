@@ -1,0 +1,7 @@
+name = "momentum-google"
+main = "src/index.js"
+compatibility_date = "2024-11-01"
+
+# Secrets (set with wrangler, NOT here):
+#   npx wrangler secret put GOOGLE_CLIENT_ID
+#   npx wrangler secret put GOOGLE_CLIENT_SECRET

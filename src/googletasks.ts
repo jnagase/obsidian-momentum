@@ -1,13 +1,12 @@
 import { requestUrl } from "obsidian";
 
-const CLIENT_ID     = "524212077991-8btbj3o6upv5oq2o31vbfvkpghginph5.apps.googleusercontent.com";
-const CLIENT_SECRET = "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";
-const CALLBACK_PORT = 42813;
-const REDIRECT_URI_DESKTOP = `http://127.0.0.1:${CALLBACK_PORT}/callback`;
-const REDIRECT_URI_MOBILE  = "obsidian://google-tasks-callback";
-const SCOPES = ["https://www.googleapis.com/auth/tasks"];
-const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
-const AUTH_ENDPOINT  = "https://accounts.google.com/o/oauth2/v2/auth";
+// OAuth is brokered by a Cloudflare Worker that holds the Google client_id/secret
+// server-side — NO secret ships in the plugin. The plugin only talks to the Worker:
+//   /auth (build consent URL) · /callback (deep-links back) · /exchange · /refresh.
+// Set this to your deployed Worker URL (no trailing slash). See worker/README.md.
+const WORKER_BASE = "https://momentum-google.jaime-nagase.workers.dev";
+/** Obsidian protocol action the Worker deep-links back to: obsidian://momentum-google */
+export const GOOGLE_PROTOCOL_ACTION = "momentum-google";
 
 export interface GoogleToken {
   access_token: string;
@@ -36,7 +35,15 @@ export interface GTTaskList {
   updated?: string;
 }
 
-let _oauthServer: import("http").Server | null = null;
+interface PendingAuth {
+  verifier: string;
+  state: string;
+  timer: number;
+  resolve: (t: GoogleToken) => void;
+  reject: (e: Error) => void;
+}
+/** In-flight authorization, resolved when the Worker deep-links back into Obsidian. */
+let pendingAuth: PendingAuth | null = null;
 
 function base64URLEncode(buffer: ArrayBuffer): string {
   const bytes = new Uint8Array(buffer);
@@ -63,92 +70,61 @@ function generateState(): string {
   return base64URLEncode(arr.buffer);
 }
 
+/**
+ * Start authorization. Opens the Worker's /auth URL (which redirects to Google's consent)
+ * and resolves once the Worker deep-links back into Obsidian and `completeGoogleAuth` runs.
+ * Same path on desktop and mobile — no local HTTP server, no secret.
+ */
 export async function authorizeGoogle(
-  isMobile: boolean,
   onOpenUrl: (url: string) => void,
   onLog?: (msg: string) => void,
 ): Promise<GoogleToken> {
   const verifier = await generateCodeVerifier();
   const challenge = await generateCodeChallenge(verifier);
   const state = generateState();
-  const redirectUri = isMobile ? REDIRECT_URI_MOBILE : REDIRECT_URI_DESKTOP;
+  const authUrl = `${WORKER_BASE}/auth?code_challenge=${encodeURIComponent(challenge)}&state=${encodeURIComponent(state)}`;
 
-  const params = new URLSearchParams({
-    client_id: CLIENT_ID,
-    redirect_uri: redirectUri,
-    response_type: "code",
-    scope: SCOPES.join(" "),
-    code_challenge: challenge,
-    code_challenge_method: "S256",
-    state,
-    access_type: "offline",
-    prompt: "consent",
-  });
-
-  const authUrl = `${AUTH_ENDPOINT}?${params.toString()}`;
-
-  if (isMobile) {
+  return new Promise<GoogleToken>((resolve, reject) => {
+    if (pendingAuth) { window.clearTimeout(pendingAuth.timer); pendingAuth.reject(new Error("Superseded by a new authorization.")); }
+    const timer = window.setTimeout(() => {
+      if (pendingAuth) { pendingAuth = null; reject(new Error("OAuth timeout — no response within 5 minutes.")); }
+    }, 5 * 60 * 1000);
+    pendingAuth = { verifier, state, timer, resolve, reject };
+    onLog?.(`Opening Worker auth URL: ${authUrl.slice(0, 80)}…`);
     onOpenUrl(authUrl);
-    throw new Error("MOBILE_PENDING");
-  }
-
-  if (_oauthServer) { try { _oauthServer.close(); } catch { /* ignore */ } _oauthServer = null; }
-  return new Promise((resolve, reject) => {
-    const http = window.require("http") as typeof import("http");
-    const server = http.createServer((req, res) => {
-      void (async () => {
-        try {
-          if (!req.url?.startsWith("/callback")) {
-            res.writeHead(204); res.end(); return;
-          }
-          onLog?.(`Callback: ${req.url?.slice(0, 120)}`);
-          const url = new URL(req.url ?? "/", "http://127.0.0.1");
-          const code = url.searchParams.get("code");
-          if (!code) {
-            onLog?.("ERROR: no code in callback");
-            res.writeHead(400); res.end("Missing code.");
-            server.close(); _oauthServer = null;
-            reject(new Error("OAuth callback missing code.")); return;
-          }
-          onLog?.(`Code OK (${code.length} chars). Exchanging…`);
-          res.writeHead(200, { "Content-Type": "text/html" });
-          res.end("<html><body><h2>Authorised! You can close this tab.</h2></body></html>");
-          server.close(); _oauthServer = null;
-          const token = await exchangeCode(code, verifier, redirectUri, onLog);
-          resolve(token);
-        } catch (e) {
-          onLog?.(`ERROR in callback: ${e instanceof Error ? e.message : String(e)}`);
-          server.close(); _oauthServer = null;
-          reject(e instanceof Error ? e : new Error(String(e)));
-        }
-      })();
-    });
-    _oauthServer = server;
-    server.on("error", (err: Error) => { onLog?.(`Server error: ${err.message}`); _oauthServer = null; reject(err); });
-    server.listen(CALLBACK_PORT, "127.0.0.1", () => { onLog?.(`Listening on :${CALLBACK_PORT}`); onOpenUrl(authUrl); });
-    window.setTimeout(() => { server.close(); _oauthServer = null; reject(new Error("OAuth timeout.")); }, 5 * 60 * 1000);
   });
 }
 
-async function exchangeCode(code: string, verifier: string, redirectUri: string, onLog?: (msg: string) => void): Promise<GoogleToken> {
-  const body = new URLSearchParams({
-    code, client_id: CLIENT_ID, client_secret: CLIENT_SECRET,
-    redirect_uri: redirectUri,
-    grant_type: "authorization_code", code_verifier: verifier,
-  });
-  onLog?.(`Calling token endpoint…`);
-  const r = await requestUrl({ url: TOKEN_ENDPOINT, method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: body.toString(),
-  });
-  onLog?.(`Token endpoint status: ${r.status}`);
-  if (r.status >= 400) throw new Error(`Token exchange failed: ${r.status} ${r.text}`);
-  const j = r.json as { access_token: string; refresh_token: string; expires_in: number };
-  onLog?.(`Token OK, fetching email…`);
-  const email = await fetchEmail(j.access_token);
-  onLog?.(`Email: ${email}`);
-  return { access_token: j.access_token, refresh_token: j.refresh_token,
-    expires_at: Date.now() + (j.expires_in - 60) * 1000, email };
+/**
+ * Called by the plugin's obsidian://momentum-google protocol handler with the params the
+ * Worker deep-linked back. Validates state, exchanges the code via the Worker, and resolves
+ * the pending `authorizeGoogle` promise. No-op if there is no authorization in flight.
+ */
+export async function completeGoogleAuth(params: Record<string, string>, onLog?: (msg: string) => void): Promise<void> {
+  if (!pendingAuth) { onLog?.("Protocol callback with no pending auth — ignored."); return; }
+  const { verifier, state, timer, resolve, reject } = pendingAuth;
+  pendingAuth = null;
+  window.clearTimeout(timer);
+  try {
+    if (params.error) throw new Error(`Google returned: ${params.error}`);
+    if (params.state && params.state !== state) throw new Error("State mismatch — ignoring callback.");
+    const code = params.code;
+    if (!code) throw new Error("Callback missing code.");
+    onLog?.(`Code received (${code.length} chars). Exchanging via Worker…`);
+    const r = await requestUrl({
+      url: `${WORKER_BASE}/exchange`, method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code, code_verifier: verifier }),
+    });
+    if (r.status >= 400) throw new Error(`Token exchange failed: ${r.status} ${r.text}`);
+    const j = r.json as { access_token: string; refresh_token: string; expires_in: number };
+    const email = await fetchEmail(j.access_token);
+    onLog?.(`Token OK — email: ${email}`);
+    resolve({ access_token: j.access_token, refresh_token: j.refresh_token, expires_at: Date.now() + (j.expires_in - 60) * 1000, email });
+  } catch (e) {
+    onLog?.(`ERROR completing auth: ${e instanceof Error ? e.message : String(e)}`);
+    reject(e instanceof Error ? e : new Error(String(e)));
+  }
 }
 
 async function fetchEmail(accessToken: string): Promise<string> {
@@ -162,9 +138,9 @@ async function fetchEmail(accessToken: string): Promise<string> {
 }
 
 export async function refreshToken(token: GoogleToken): Promise<GoogleToken> {
-  const body = new URLSearchParams({ client_id: CLIENT_ID, client_secret: CLIENT_SECRET, grant_type: "refresh_token", refresh_token: token.refresh_token });
-  const r = await requestUrl({ url: TOKEN_ENDPOINT, method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: body.toString() });
+  const r = await requestUrl({ url: `${WORKER_BASE}/refresh`, method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ refresh_token: token.refresh_token }) });
   if (r.status >= 400) throw new Error(`Token refresh failed: ${r.status}`);
   const j = r.json as { access_token: string; expires_in: number };
   return { ...token, access_token: j.access_token, expires_at: Date.now() + (j.expires_in - 60) * 1000 };

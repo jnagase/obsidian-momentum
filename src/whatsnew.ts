@@ -6,6 +6,26 @@ export interface ChangeEntry { version: string; sections: ChangeSection[]; }
 /** Release notes shown in the "What's new" dialog, newest first. */
 export const CHANGELOG: ChangeEntry[] = [
   {
+    version: "0.5.1",
+    sections: [
+      {
+        title: "New — Google Tasks sync (BETA)",
+        items: [
+          "Two-way sync between your boards and Google Tasks. ⚠️ This feature is BETA — expect rough edges and please keep a backup of your vault. Enable it under Settings → Google tasks (beta).",
+          "Sign-in works the same on desktop and mobile and no credentials are shipped in the plugin (auth goes through a hosted broker).",
+          "Destructive changes are guarded: if an unusual number of tasks vanish at once, the sync asks you before deleting anything on either side.",
+        ],
+      },
+      {
+        title: "Changed — boards are folders",
+        items: [
+          "Each board is now a folder under Tasks/, so you can create a task by hand just by dropping a note into Tasks/<Board>/. The default board is \"My Tasks\" (paired with Google's default list). Your existing tasks are migrated automatically, backlink-safe.",
+          "Marking a task done sends it to the top of the Done column; in the Done column the button reopens the task.",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.3.0",
     sections: [
       {

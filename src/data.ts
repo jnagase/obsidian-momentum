@@ -489,7 +489,8 @@ export class PADataStore {
     return `Tasks/${safeName(this.boardOrDefault(board))}`;
   }
 
-  async createTask(t: Partial<Task>): Promise<void> {
+  /** Create a task note. Returns its vault path so callers can wait for the metadata cache. */
+  async createTask(t: Partial<Task>): Promise<string> {
     const title = t.title || "Untitled";
     const board = this.boardOrDefault(t.kanbanName);
     const meta: FM = {
@@ -507,7 +508,22 @@ export class PADataStore {
     if (t.eisenhower) meta.eisenhower = t.eisenhower;
     if (t.googleId) meta.google_id = t.googleId;
     if (t.googleList) meta.google_list = t.googleList;
-    await this.writeFile(this.uniquePath(this.taskBoardFolder(board), title), this.buildDoc(meta, `# ${title}\n`));
+    const rel = this.uniquePath(this.taskBoardFolder(board), title);
+    await this.writeFile(rel, this.buildDoc(meta, `# ${title}\n`));
+    return this.full(rel);
+  }
+
+  /**
+   * Resolve once the metadata cache has indexed a freshly written file's frontmatter (or a
+   * short timeout). Prevents the "new card flashes in backlog then jumps" flicker: right
+   * after create the cache is stale, so status reads as the default until it catches up.
+   */
+  async awaitFrontmatter(path: string, timeoutMs = 1000): Promise<void> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (this.app.metadataCache.getCache(path)?.frontmatter) return;
+      await new Promise((r) => window.setTimeout(r, 40));
+    }
   }
 
   /** Persist the Google Tasks link (item id + list id) onto a task note's frontmatter. */

@@ -238,11 +238,12 @@ export class PASideView extends ItemView {
     new FormModal(this.app, "New task", fields, async (v) => {
       const title = (v.title || "").trim();
       if (!title) return;
-      await this.ctx.store.createTask({
+      const path = await this.ctx.store.createTask({
         title, status,
         kanbanName: this.taskBoard === "all" ? "" : this.taskBoard,
         due: (v.due || "").trim() || undefined,
       });
+      await this.ctx.store.awaitFrontmatter(path);
       this.render();
     }, "Create").open();
   }

@@ -497,3 +497,6 @@
 
 /* ===== Global top bar (every page) ===== */
 .pa-topbar{display:flex;justify-content:flex-end;padding:4px 8px 0;gap:8px}
+
+/* ===== Beta tag (e.g. Google tasks settings heading) ===== */
+.pa-beta-tag{color:var(--text-error);font-weight:600;font-size:.82em;text-transform:uppercase;letter-spacing:.02em}

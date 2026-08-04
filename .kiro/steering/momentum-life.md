@@ -36,6 +36,25 @@ nossas conversas. Vale para toda interação neste repositório.
 - **Depois do deploy, avise o usuário para recarregar o plugin** (Community plugins →
   desliga e liga o Momentum Life; ou fecha/reabre o Obsidian).
 
+## Release / promover pra prod (só quando o usuário mandar)
+- Repo: `github.com/jnagase/obsidian-momentum`, branch `main`. `main.js` é **gitignored**
+  (a CI builda). Releases saem via `.github/workflows/release.yml`, disparado por **push de
+  tag** (qualquer tag) → builda e cria o GitHub Release com `main.js`/`manifest.json`/`styles.css`.
+- Passos: bump de versão em **`manifest.json` + `package.json` + `versions.json`** (mesma
+  SemVer; tag SEM `v`, ex.: `0.5.0`) → commit → `git push origin main` → `git tag X.Y.Z` →
+  `git push origin X.Y.Z`.
+- Staging do commit: adicionar explicitamente (`manifest.json package.json versions.json
+  styles.css eslint.config.mjs src mcp .kiro/steering`). **Não commitar** `.kiro/settings/`
+  nem `.vscode/` (config de máquina). `node_modules`, `main.js`, `*.log` já são ignorados.
+- **Secret / push protection:** `src/googletasks.ts` tem `CLIENT_ID`/`CLIENT_SECRET` do
+  Google hardcoded. O GitHub **bloqueia o push** (secret scanning); em 0.5.0 foi **liberado
+  manualmente** pelos links de unblock. O secret já está público nos `main.js` de releases
+  antigos. **DÍVIDA TÉCNICA (prioridade):** migrar o OAuth pra um **proxy (Cloudflare
+  Worker)** com o secret **server-side** — tira o secret do repo/`main.js`, resolve o
+  cross-platform desktop+mobile (redirect hospedado + deep-link `obsidian://`) e habilita o
+  gate de monetização. ("Desktop app" sozinho não cobre mobile; "Web app" exige secret
+  confidencial que um plugin distribuído não esconde.)
+
 ## Ambiente (importante)
 - **Vault de teste:** `/Users/jnagase/Documents/obsidian_1/` (NÃO é `Obsidian_jnagase`).
   Data root dentro do vault: `Momentum Life`. Plugin em

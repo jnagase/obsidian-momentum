@@ -567,8 +567,14 @@ export class TasksModule {
     new FormModal(this.ctx.app, task ? "Edit task" : "New task", fields, async (v) => {
       if (!(v.title || "").trim()) return;
       const data = { title: v.title.trim(), status: v.status, priority: v.priority, kanbanName: v.kanbanName, group: v.group, due: v.due, eisenhower: v.eisenhower };
-      if (task) await this.ctx.store.updateTask(task, data);
-      else await this.ctx.store.createTask(data);
+      if (task) {
+        await this.ctx.store.updateTask(task, data);
+      } else {
+        // Wait for the metadata cache to index the new note before re-rendering, so the
+        // card appears directly in its column instead of flashing in backlog first.
+        const path = await this.ctx.store.createTask(data);
+        await this.ctx.store.awaitFrontmatter(path);
+      }
       this.ctx.refresh();
     }, task ? "Save" : "Create").open();
   }

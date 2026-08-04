@@ -25,6 +25,18 @@ stored as plain Markdown under a single folder, so your data stays yours.
 
 All visualizations use inline SVG (no external libraries / CDN).
 
+## Google Tasks sync (beta)
+> ⚠️ **Beta.** Two-way sync between your Tasks boards and Google Tasks. It works, but may
+> still have rough edges — keep a backup of your vault. Enable under **Settings → Google
+> tasks (beta)**; it's off by default.
+
+- Each board maps to a Google Tasks list; the default **My Tasks** board pairs with your
+  Google default list. Tasks are matched by a stable id, so renames don't create duplicates.
+- Sign-in uses OAuth (PKCE) through a small hosted broker, so **no credentials ship in the
+  plugin** and the same flow works on desktop and mobile.
+- Deletion is guarded: if an unusually large number of tasks disappear at once, the sync
+  asks you to confirm before removing anything on either side.
+
 ## Install (dev)
 1. `npm install`
 2. `npm run dev` (watch) or `npm run build` (production, one-off).
@@ -35,16 +47,20 @@ All visualizations use inline SVG (no external libraries / CDN).
 5. Open via the command palette → "Momentum Life: Open" (panel in the left sidebar).
 
 ## Network use & privacy
-Momentum works offline by default. It only reaches the network in one optional
-case, and only when you actively use it:
+Momentum works offline by default. It only reaches the network in two optional
+cases, and only when you actively use them:
 
 - **Nutrition food search** — queries the
   [Open Food Facts](https://world.openfoodfacts.org) public API
   (`world.openfoodfacts.org`) over HTTPS, sending only the search term you typed.
   No API key or account required.
+- **Google Tasks sync (beta, opt-in)** — when you connect and enable it, the plugin talks
+  to Google's Tasks API and to a small OAuth broker (a Cloudflare Worker) that holds the
+  app credentials server-side. Only your task titles, status and due dates plus your Google
+  auth tokens are sent, and only for the tasks you sync. Disabled by default.
 
 No personal data, vault content, or telemetry is transmitted otherwise. If you do
-not use this feature, the plugin makes no network requests.
+not use these features, the plugin makes no network requests.
 
 ## Data location
 Set the **Data root folder** in plugin settings (default: `Momentum Life`).

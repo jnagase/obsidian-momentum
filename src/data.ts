@@ -1,7 +1,7 @@
 import { App, TFile, TFolder, normalizePath } from "obsidian";
 import {
   Board, Task, Note, Habit, Exercise, Workout, WorkoutExercise, Split,
-  StudyCard, Meal, MealItem, MealLog, Transaction, RecurringItem, RecurringTask, PAConfig, defaultConfig,
+  StudyCard, Meal, MealItem, MealLog, Transaction, RecurringItem, PAConfig, defaultConfig,
 } from "./types";
 import { todayLocal } from "./util";
 import { monthHubTitle, monthKeyOf, monthName, financeTxTitle, mealLogTitle, workoutTitle, formatAmount, mergeBody } from "./readablenotes";
@@ -254,11 +254,174 @@ export class PADataStore {
       .filter((b) => b.id || b.name);
   }
 
-  loadBoards(): Board[] { return this.boardsFrom(this.fileAt("Tasks/boards.md")); }
+  /**
+   * Task boards ARE the folders under Tasks/ (folder = 100% source of truth): whatever
+   * anyone creates there — another plugin, a device sync, or a hand-made folder — shows
+   * up as a board automatically, with no boards.md config to keep in step. "General Tasks"
+   * is always present and pinned first; the rest are alphabetical. Custom emoji/order are
+   * intentionally not persisted in this model.
+   */
+  loadBoards(): Board[] {
+    const root = this.app.vault.getAbstractFileByPath(this.full("Tasks"));
+    const names = new Set<string>(["My Tasks"]);
+    if (root instanceof TFolder) {
+      for (const c of root.children) {
+        if (c instanceof TFolder && c.name !== "Lists" && c.name !== "_orphaned") names.add(c.name);
+      }
+    }
+    const sorted = [...names].sort((a, b) =>
+      a === "My Tasks" ? -1 : b === "My Tasks" ? 1 : a.localeCompare(b));
+    return sorted.map((name) => ({ id: safeName(name), name, emoji: "" }));
+  }
   loadStudyBoards(): Board[] { return this.boardsFrom(this.fileAt("Studies/boards.md")); }
 
-  async saveBoards(boards: Board[]): Promise<void> {
-    await this.writeFile("Tasks/boards.md", this.buildDoc({ type: "boards-config", boards }, boardsBody("Task boards", boards)));
+  // ── Ignored boards (tombstones) ──────────────────────────────────────────
+  // Names of boards the user removed (or that were renamed away). Google-list discovery
+  // skips these, so a deleted board is never resurrected from a leftover Google list.
+  private ignoreFile = "Config/deleted-boards.md";
+  loadIgnoredBoards(): string[] {
+    const f = this.fileAt(this.ignoreFile);
+    return f ? coerce<string[]>(this.frontmatter(f).boards, []) : [];
+  }
+  private async writeIgnoredBoards(names: string[]): Promise<void> {
+    await this.writeFile(this.ignoreFile, this.buildDoc(
+      { type: "deleted-boards", boards: names },
+      "# Deleted boards\n\nBoards removed here are not re-created from Google Tasks lists.\n",
+    ));
+  }
+  async addIgnoredBoard(name: string): Promise<void> {
+    const set = new Set(this.loadIgnoredBoards());
+    if (set.has(name)) return;
+    set.add(name);
+    await this.writeIgnoredBoards([...set]);
+  }
+  async removeIgnoredBoard(name: string): Promise<void> {
+    const set = new Set(this.loadIgnoredBoards());
+    if (!set.delete(name)) return;
+    await this.writeIgnoredBoards([...set]);
+  }
+
+  /** Ensure a board's folder exists so an empty board still shows in the explorer/tabs. */
+  async ensureBoardFolder(name: string): Promise<void> {
+    const full = this.full(this.taskBoardFolder(name));
+    if (!(this.app.vault.getAbstractFileByPath(full) instanceof TFolder)) {
+      await this.app.vault.createFolder(full).catch(() => {});
+    }
+  }
+
+  /** Create a board = create its folder. Returns false for an invalid/reserved name. */
+  async createBoard(name: string): Promise<boolean> {
+    const clean = safeName(name);
+    if (!clean || clean === "Lists" || clean === "untitled") return false;
+    await this.removeIgnoredBoard(clean); // re-creating clears any tombstone.
+    await this.ensureBoardFolder(clean);
+    return true;
+  }
+
+  /**
+   * Rename a board = rename its folder (a plain move, no link prompt). Every note inside
+   * travels with it, so all tasks re-home to the new board in one step. The kanban_name
+   * hint in each note is refreshed afterwards so external readers stay consistent.
+   */
+  async renameBoard(oldName: string, newName: string): Promise<void> {
+    const from = this.full(this.taskBoardFolder(oldName));
+    const to = this.full(this.taskBoardFolder(newName));
+    const folder = this.app.vault.getAbstractFileByPath(from);
+    if (folder instanceof TFolder && from !== to) {
+      await this.app.vault.rename(folder, to).catch(() => {});
+    }
+    for (const t of this.loadTasks().filter((t) => t.kanbanName === newName)) {
+      const f = this.app.vault.getAbstractFileByPath(t.path);
+      if (f instanceof TFile) await this.patchFrontmatter(f, (fm) => { fm.kanban_name = newName; });
+    }
+  }
+
+  /**
+   * Delete a board: move its notes into General Tasks (tasks are kept, as the UI promises)
+   * then trash the now-empty folder. General Tasks itself can't be deleted.
+   */
+  async deleteBoard(name: string): Promise<void> {
+    if (name === "My Tasks") return;
+    await this.addIgnoredBoard(name); // tombstone so discovery won't resurrect it from Google.
+    const folderPath = this.full(this.taskBoardFolder(name));
+    const folder = this.app.vault.getAbstractFileByPath(folderPath);
+    if (!(folder instanceof TFolder)) return;
+    const notes = folder.children.filter((c): c is TFile => c instanceof TFile && c.extension === "md");
+    for (const f of notes) {
+      await this.patchFrontmatter(f, (fm) => { fm.kanban_name = "My Tasks"; });
+      await this.moveTaskToBoardFolder(f, "My Tasks");
+    }
+    const still = this.app.vault.getAbstractFileByPath(folderPath);
+    if (still instanceof TFolder && still.children.length === 0) {
+      await this.app.fileManager.trashFile(still).catch(() => {});
+    }
+  }
+
+  /**
+   * Remove the obsolete Tasks/boards.md — boards are now folders, so the config file is
+   * dead weight. Called once from the guarded upgrade migration. No-op when absent.
+   */
+  async removeLegacyBoardsConfig(): Promise<void> {
+    const f = this.fileAt("Tasks/boards.md");
+    if (f) await this.app.fileManager.trashFile(f).catch(() => {});
+  }
+
+  /**
+   * Repair malformed YAML frontmatter in one task note at the raw-text level. Notes dropped
+   * by external tools (mobile widgets, old exports) often have an UNQUOTED title that opens
+   * a flow collection, e.g. `title: [gbm] spec-req ...`. That is invalid YAML, so Obsidian
+   * fails to parse the whole block: the task loses its status/board and — critically —
+   * `processFrontMatter` (used by every update, incl. the done button) silently fails on it.
+   * We can't fix it through the parser (it can't read it), so we quote the offending value
+   * in the raw text. Returns true if the file was changed.
+   */
+  private async repairFrontmatterText(f: TFile): Promise<boolean> {
+    const raw = await this.app.vault.read(f);
+    if (!raw.startsWith("---")) return false;
+    const fmStart = raw.indexOf("\n") + 1;
+    if (fmStart <= 0) return false;
+    const closeIdx = raw.indexOf("\n---", fmStart);
+    if (closeIdx === -1) return false;
+    const block = raw.slice(fmStart, closeIdx);
+    let changed = false;
+    const fixedLines = block.split("\n").map((line) => {
+      const m = line.match(/^([A-Za-z0-9_-]+):[ \t]+(.*)$/);
+      if (!m) return line;
+      const [, key, val] = m;
+      // A value that opens a flow collection ([ or {) but isn't a clean, closed [..]/{..}
+      // is invalid YAML → wrap it as a quoted string so the block parses again.
+      const opensFlow = val.startsWith("[") || val.startsWith("{");
+      const isClosedFlow = /^\[.*\]$/.test(val.trim()) || /^\{.*\}$/.test(val.trim());
+      if (opensFlow && !isClosedFlow) {
+        changed = true;
+        return `${key}: "${val.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+      }
+      return line;
+    });
+    if (!changed) return false;
+    await this.app.vault.modify(f, raw.slice(0, fmStart) + fixedLines.join("\n") + raw.slice(closeIdx));
+    return true;
+  }
+
+  /** Public single-file repair (used by adoption before it writes frontmatter). */
+  async repairTaskFile(f: TFile): Promise<boolean> {
+    try { return await this.repairFrontmatterText(f); } catch { return false; }
+  }
+
+  /**
+   * Scan every task note and repair malformed frontmatter (see repairFrontmatterText).
+   * Idempotent — files that are already valid are left untouched. Returns the count fixed.
+   */
+  async repairTaskFrontmatter(): Promise<number> {
+    const listsPrefix = this.full("Tasks/Lists") + "/";
+    const tasksPrefix = this.full("Tasks") + "/";
+    const files = this.app.vault.getMarkdownFiles().filter((f) =>
+      f.path.startsWith(tasksPrefix) && !f.path.startsWith(listsPrefix) && f.name !== "boards.md");
+    let fixed = 0;
+    for (const f of files) {
+      try { if (await this.repairFrontmatterText(f)) fixed++; } catch { /* skip a bad file */ }
+    }
+    return fixed;
   }
 
   // ============================================================
@@ -266,10 +429,19 @@ export class PADataStore {
   // ============================================================
   loadTasks(): Task[] {
     const listsPrefix = this.full("Tasks/Lists") + "/";
+    const orphanPrefix = this.full("Tasks/_orphaned") + "/";
+    const tasksRoot = this.full("Tasks");
+    // The board a task belongs to is its parent folder under Tasks/ (folder = 100% source
+    // of truth), so anyone can file a task by hand just by dropping its note into
+    // Tasks/<Board>/. `kanban_name` is only a hint, used as a fallback for notes still
+    // sitting loose at the Tasks/ root (which upkeep files into General Tasks).
     return this.listMarkdown("Tasks")
-      .filter((f) => f.name !== "boards.md" && !f.path.startsWith(listsPrefix))
+      .filter((f) => f.name !== "boards.md" && !f.path.startsWith(listsPrefix) && !f.path.startsWith(orphanPrefix))
       .map((f) => {
         const m = this.frontmatter(f);
+        const parent = f.parent;
+        const inBoardFolder = !!parent && parent.path !== tasksRoot && parent.path.startsWith(tasksRoot + "/");
+        const boardName = inBoardFolder ? parent.name : str(m.kanban_name || m["kanban-name"]);
         return {
           id: str(m.task_id) || f.basename,
           title: str(m.title) || f.basename,
@@ -278,7 +450,7 @@ export class PADataStore {
           cat: str(m.category) || "work",
           group: str(m.group),
           kanbanId: str(m["kanban-id"]),
-          kanbanName: str(m.kanban_name || m["kanban-name"]),
+          kanbanName: boardName,
           due: str(m.due),
           scheduled: str(m.scheduled),
           duration: num(m.duration),
@@ -287,6 +459,8 @@ export class PADataStore {
           modified: str(m.modified),
           order: (m.order !== undefined && m.order !== null) ? Number(m.order) : undefined,
           eisenhower: str(m.eisenhower),
+          googleId: str(m.google_id),
+          googleList: str(m.google_list),
           path: f.path,
         };
       });
@@ -305,8 +479,19 @@ export class PADataStore {
     return body.replace(/^#.*$/m, "").trim();
   }
 
+  /** The board a task should be filed under, defaulting unassigned tasks to My Tasks. */
+  private boardOrDefault(board?: string): string {
+    return board && board !== "No board" ? board : "My Tasks";
+  }
+
+  /** Vault-relative folder that holds a board's task notes: Tasks/<safe board name>. */
+  taskBoardFolder(board?: string): string {
+    return `Tasks/${safeName(this.boardOrDefault(board))}`;
+  }
+
   async createTask(t: Partial<Task>): Promise<void> {
     const title = t.title || "Untitled";
+    const board = this.boardOrDefault(t.kanbanName);
     const meta: FM = {
       task_id: cryptoId(),
       title,
@@ -315,12 +500,25 @@ export class PADataStore {
       created: new Date().toISOString(),
       modified: new Date().toISOString(),
       type: "task",
-      kanban_name: t.kanbanName || "",
+      kanban_name: board,
       group: t.group || "",
     };
     if (t.due) meta.due = t.due;
     if (t.eisenhower) meta.eisenhower = t.eisenhower;
-    await this.writeFile(this.uniquePath("Tasks", title), this.buildDoc(meta, `# ${title}\n`));
+    if (t.googleId) meta.google_id = t.googleId;
+    if (t.googleList) meta.google_list = t.googleList;
+    await this.writeFile(this.uniquePath(this.taskBoardFolder(board), title), this.buildDoc(meta, `# ${title}\n`));
+  }
+
+  /** Persist the Google Tasks link (item id + list id) onto a task note's frontmatter. */
+  async setTaskGoogleLink(task: Task, googleId: string, googleList: string): Promise<void> {
+    const f = this.app.vault.getAbstractFileByPath(task.path);
+    if (!(f instanceof TFile)) return;
+    await this.patchFrontmatter(f, (fm) => {
+      fm.google_id = googleId;
+      fm.google_list = googleList;
+      fm.modified = new Date().toISOString();
+    });
   }
 
   /** A vault path under `folder` for `title` that does not collide with an existing file. */
@@ -339,13 +537,142 @@ export class PADataStore {
       if (changes.status !== undefined) fm.status = changes.status;
       if (changes.priority !== undefined) fm.priority = changes.priority;
       if (changes.title !== undefined) fm.title = changes.title;
-      if (changes.kanbanName !== undefined) fm.kanban_name = changes.kanbanName;
+      if (changes.kanbanName !== undefined) fm.kanban_name = this.boardOrDefault(changes.kanbanName);
       if (changes.group !== undefined) fm.group = changes.group;
       if (changes.due !== undefined) fm.due = changes.due;
       if (changes.order !== undefined) fm.order = changes.order;
       if (changes.eisenhower !== undefined) fm.eisenhower = changes.eisenhower;
       fm.modified = new Date().toISOString();
     });
+    // Board changed → move the note into the new board's folder (folder = source of
+    // truth). Uses a plain move (see moveTaskToBoardFolder) so no "update links?" prompt.
+    if (changes.kanbanName !== undefined) {
+      await this.moveTaskToBoardFolder(f, this.boardOrDefault(changes.kanbanName));
+    }
+  }
+
+  /**
+   * Move a task note into Tasks/<board>/ if it isn't already there. Uses `vault.rename`
+   * (a plain move) rather than `fileManager.renameFile`, so Obsidian does NOT pop the
+   * "update links?" prompt during bulk filing. Momentum resolves note links by basename,
+   * which is unchanged by a folder move, so `[[links]]` keep resolving.
+   */
+  async moveTaskToBoardFolder(f: TFile, board: string): Promise<void> {
+    const targetFolder = this.full(this.taskBoardFolder(board));
+    if (f.parent && f.parent.path === targetFolder) return; // already filed correctly
+    if (!(this.app.vault.getAbstractFileByPath(targetFolder) instanceof TFolder)) {
+      await this.app.vault.createFolder(targetFolder).catch(() => {});
+    }
+    let dest = `${targetFolder}/${f.name}`;
+    let n = 2;
+    while (this.app.vault.getAbstractFileByPath(dest)) { dest = `${targetFolder}/${f.basename} ${n}.md`; n++; }
+    await this.app.vault.rename(f, dest);
+  }
+
+  /**
+   * One-time migration to the folder-per-board layout: every task note sitting loose at
+   * the Tasks/ root is moved into Tasks/<board>/ (from its kanban_name, defaulting to
+   * General Tasks). Plain move (no link prompt); no note is ever deleted.
+   * Idempotent — notes already inside a board folder are left untouched. Returns the count moved.
+   */
+  async migrateTaskFolders(): Promise<number> {
+    const tasksRoot = this.full("Tasks");
+    const listsPrefix = this.full("Tasks/Lists") + "/";
+    const skip = new Set(["boards.md", "recurring.md"]);
+    const rootFiles = this.app.vault.getMarkdownFiles().filter((f) =>
+      f.parent?.path === tasksRoot &&           // directly at the Tasks/ root
+      !f.path.startsWith(listsPrefix) &&
+      !skip.has(f.name),
+    );
+    let moved = 0;
+    for (const f of rootFiles) {
+      const m = this.frontmatter(f);
+      const type = str(m.type);
+      if (type && type !== "task") continue;    // don't relocate non-task notes
+      const board = this.boardOrDefault(str(m.kanban_name || m["kanban-name"]));
+      await this.moveTaskToBoardFolder(f, board);
+      moved++;
+    }
+    return moved;
+  }
+
+  /**
+   * One-time migration: the default board was renamed "General Tasks" → "My Tasks" (so it
+   * pairs with Google's built-in "My Tasks" list). Rename the folder, merging into an
+   * existing My Tasks/ if present. No note is ever deleted.
+   */
+  async migrateDefaultBoardName(): Promise<void> {
+    const from = this.full("Tasks/General Tasks");
+    const fromF = this.app.vault.getAbstractFileByPath(from);
+    if (!(fromF instanceof TFolder)) return;
+    const to = this.full("Tasks/My Tasks");
+    const toF = this.app.vault.getAbstractFileByPath(to);
+    if (!toF) {
+      await this.app.vault.rename(fromF, to).catch(() => {});
+      return;
+    }
+    if (toF instanceof TFolder) {
+      for (const c of [...fromF.children]) {
+        if (!(c instanceof TFile)) continue;
+        let dest = `${to}/${c.name}`;
+        let n = 2;
+        while (this.app.vault.getAbstractFileByPath(dest)) { dest = `${to}/${c.basename} ${n}.md`; n++; }
+        await this.app.vault.rename(c, dest).catch(() => {});
+      }
+      const still = this.app.vault.getAbstractFileByPath(from);
+      if (still instanceof TFolder && still.children.length === 0) {
+        await this.app.fileManager.trashFile(still).catch(() => {});
+      }
+    }
+    // Renamed away → tombstone so discovery never resurrects a leftover Google "General Tasks".
+    await this.addIgnoredBoard("General Tasks");
+  }
+
+
+
+  /**
+   * Complete a task: move it to the done column AND pin it to the TOP of that column
+   * (smallest order). Marking done by any means always lands the card first; only a manual
+   * drag afterwards changes its position (drag persists explicit per-card orders).
+   */
+  async completeTaskAtTop(task: Task, doneCol: string): Promise<void> {
+    const orders = this.loadTasks()
+      .filter((t) => t.status === doneCol && t.path !== task.path)
+      .map((t) => t.order ?? -1);
+    const newOrder = orders.length ? Math.min(...orders) - 1 : -1;
+    await this.updateTask(task, { status: doneCol, order: newOrder });
+  }
+
+  /** Archive a task note whose Google item is gone into Tasks/_orphaned/ (never deletes). */
+  async orphanTaskNote(task: Task): Promise<void> {
+    const f = this.app.vault.getAbstractFileByPath(task.path);
+    if (!(f instanceof TFile)) return;
+    const folder = this.full("Tasks/_orphaned");
+    if (!(this.app.vault.getAbstractFileByPath(folder) instanceof TFolder)) {
+      await this.app.vault.createFolder(folder).catch(() => {});
+    }
+    let dest = `${folder}/${f.name}`;
+    let n = 2;
+    while (this.app.vault.getAbstractFileByPath(dest)) { dest = `${folder}/${f.basename} ${n}.md`; n++; }
+    await this.app.vault.rename(f, dest);
+  }
+
+  /** Task notes with the same board + title (e.g. widget "name 2" copies). Groups of 2+. */
+  findDuplicateTasks(): Array<{ keep: Task; remove: Task[] }> {
+    const groups = new Map<string, Task[]>();
+    for (const t of this.loadTasks()) {
+      const key = `${(t.kanbanName || "").toLowerCase()}\u0000${t.title.trim().toLowerCase()}`;
+      const arr = groups.get(key); if (arr) arr.push(t); else groups.set(key, [t]);
+    }
+    const out: Array<{ keep: Task; remove: Task[] }> = [];
+    for (const arr of groups.values()) {
+      if (arr.length < 2) continue;
+      // Keep the one already linked to Google (googleId), else the oldest created.
+      arr.sort((a, b) => (b.googleId ? 1 : 0) - (a.googleId ? 1 : 0)
+        || (a.created || "").localeCompare(b.created || ""));
+      out.push({ keep: arr[0], remove: arr.slice(1) });
+    }
+    return out;
   }
 
   async deleteTask(task: Task): Promise<void> {
@@ -590,7 +917,7 @@ export class PADataStore {
     for (const g of groups) {
       const gTasks = tasks.filter((t) => this.taskGroup(t) === g);
       if (g === "No board" && !gTasks.length) continue;
-      const rel = `Tasks/Lists/${safeName(g)}/tasks.md`;
+      const rel = `Tasks/Lists/${safeName(g)}.md`;
       wanted.add(this.full(rel));
       let body = `%% Momentum Life — task list for board "${g}". Toggle a checkbox to mark it done/undone in the board. %%\n`;
       for (const col of cols) {
@@ -620,8 +947,9 @@ export class PADataStore {
    */
   async reconcileTaskLists(): Promise<void> {
     const listsPrefix = this.full("Tasks/Lists") + "/";
+    // Flat mirrors live directly under Tasks/Lists as "<board>.md" (no sub-folder).
     const files = this.app.vault.getMarkdownFiles()
-      .filter((f) => f.path.startsWith(listsPrefix) && f.name === "tasks.md");
+      .filter((f) => f.path.startsWith(listsPrefix) && !f.path.slice(listsPrefix.length).includes("/"));
     for (const f of files) {
       try { await this.applyTaskListFile(f); } catch { /* skip a bad mirror file, keep going */ }
     }
@@ -634,13 +962,23 @@ export class PADataStore {
    * if anything changed.
    */
   async applyTaskListFile(file: TFile): Promise<boolean> {
+    // Flat mirror: the file's basename is the (safe) board key.
+    const content = await this.app.vault.read(file);
+    return this.applyMirrorContent(file.basename, content);
+  }
+
+  /**
+   * Core of the mirror reconciler: given a board key (safeName of the board) and the
+   * mirror's raw content, flip done/undone on tasks that ALREADY exist. Unknown lines
+   * are ignored (never created here) so a regenerated mirror can't spawn tasks or loop.
+   * Shared by `applyTaskListFile` (flat mirrors) and the legacy-folder migration.
+   */
+  private async applyMirrorContent(boardKey: string, content: string): Promise<boolean> {
     const cfg = await this.loadConfig();
     const cols = cfg.taskColumns;
     const colSet = new Set(cols);
     const doneCol = cols.includes("done") ? "done" : cols[cols.length - 1];
     const firstCol = cols[0];
-    const folderName = file.parent?.name ?? "";
-    const content = await this.app.vault.read(file);
     const tasks = this.loadTasks();
     const eff = (t: Task) => (colSet.has(t.status) ? t.status : cols[0]);
     let changed = false;
@@ -650,13 +988,54 @@ export class PADataStore {
       const checked = m[1].toLowerCase() === "x";
       const title = m[2].trim();
       if (!title) continue;
-      const t = tasks.find((x) => safeName(this.taskGroup(x)) === folderName && x.title === title);
+      const t = tasks.find((x) => safeName(this.taskGroup(x)) === boardKey && x.title === title);
       if (!t) continue; // unknown line: ignore (never create from a mirror — avoids loops)
       const isDone = eff(t) === doneCol;
       if (checked && !isDone) { await this.updateTask(t, { status: doneCol }); changed = true; }
       else if (!checked && isDone) { await this.updateTask(t, { status: firstCol }); changed = true; }
     }
     return changed;
+  }
+
+  /**
+   * One-time migration from the legacy mirror layout `Tasks/Lists/<board>/tasks.md`
+   * (a folder per board holding a lone "tasks" file) to the flat, self-descriptive
+   * `Tasks/Lists/<board>.md`. Safe and idempotent:
+   *  1. Reconciles each legacy mirror first so any pending checkbox edit is written
+   *     back into the task notes (nothing is lost).
+   *  2. Trashes the legacy per-board folders — mirrors are derived data, regenerated below.
+   *  3. Regenerates the flat mirrors via `syncTaskLists`.
+   * Returns the number of legacy mirrors migrated.
+   */
+  async migrateTaskListStructure(): Promise<number> {
+    const listsPrefix = this.full("Tasks/Lists") + "/";
+    const legacy = this.app.vault.getMarkdownFiles()
+      .filter((f) => f.path.startsWith(listsPrefix) && f.name === "tasks.md" && (f.parent?.name ?? "") !== "Lists");
+    if (!legacy.length) return 0;
+
+    // 1. Capture pending checkbox edits back into the task notes (board = parent folder name).
+    for (const f of legacy) {
+      try {
+        const content = await this.app.vault.read(f);
+        await this.applyMirrorContent(f.parent?.name ?? "", content);
+      } catch { /* skip a bad legacy mirror, keep migrating the rest */ }
+    }
+
+    // 2. Trash each legacy mirror file, then its now-empty board folder.
+    for (const f of legacy) {
+      const folder = f.parent;
+      try { await this.app.fileManager.trashFile(f); } catch { /* ignore */ }
+      if (folder instanceof TFolder && folder.path !== this.full("Tasks/Lists")) {
+        const still = this.app.vault.getAbstractFileByPath(folder.path);
+        if (still instanceof TFolder && still.children.length === 0) {
+          try { await this.app.fileManager.trashFile(still); } catch { /* ignore */ }
+        }
+      }
+    }
+
+    // 3. Regenerate the flat mirrors.
+    await this.syncTaskLists();
+    return legacy.length;
   }
 
   // ============================================================
@@ -1378,91 +1757,6 @@ export class PADataStore {
     const cur = (await this.loadConfig()).currency || "$";
     await this.writeFile("Finance/recurring.md", this.buildDoc({ type: "recurring-config", items }, recurringCostsBody(items, cur)));
   }
-
-  // ============================================================
-  // RECURRING TASKS
-  // ============================================================
-  loadRecurringTasks(): RecurringTask[] {
-    const f = this.fileAt("Tasks/recurring.md");
-    if (!f) return [];
-    const list = coerce<Array<Record<string, unknown>>>(this.frontmatter(f).items, []);
-    return list.map((r) => ({
-      id: str(r.id) || ("rt" + Math.random().toString(36).slice(2, 8)),
-      title: str(r.title),
-      board: str(r.board),
-      priority: str(r.priority) || "medium",
-      eisenhower: str(r.eisenhower),
-      freq: ["daily", "weekly", "monthly"].includes(str(r.freq)) ? str(r.freq) : "weekly",
-      weekday: r.weekday != null ? num(r.weekday) : undefined,
-      interval: r.interval != null ? num(r.interval) : undefined,
-      anchor: str(r.anchor),
-      day: r.day != null ? num(r.day) : undefined,
-      lastGenerated: str(r.lastGenerated),
-    })).filter((r) => r.title.trim().length > 0);
-  }
-
-  async saveRecurringTasks(items: RecurringTask[]): Promise<void> {
-    await this.writeFile("Tasks/recurring.md", this.buildDoc({ type: "recurring-tasks-config", items }, recurringTasksBody(items)));
-  }
-
-  /** The most recent occurrence date (<= today) for a rule, or null if none is due yet. */
-  private lastOccurrence(rule: RecurringTask, now: Date): Date | null {
-    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    if (rule.freq === "daily") return today;
-    if (rule.freq === "weekly") {
-      const wd = rule.weekday ?? 1;
-      const back = (today.getDay() - wd + 7) % 7;
-      const occ = new Date(today);
-      occ.setDate(today.getDate() - back); // most recent <wd> on/before today
-      const interval = Math.min(Math.max(rule.interval ?? 1, 1), 4);
-      if (interval <= 1) return occ;
-      // Align to the N-week phase defined by the anchor.
-      const anchor = rule.anchor ? new Date(rule.anchor + "T00:00:00") : occ;
-      if (isNaN(anchor.getTime())) return occ;
-      const cur = new Date(occ);
-      while (cur.getTime() >= anchor.getTime()) {
-        const weeks = Math.round((cur.getTime() - anchor.getTime()) / (7 * 86400000));
-        if (weeks % interval === 0) return cur;
-        cur.setDate(cur.getDate() - 7);
-      }
-      return null;
-    }
-    // monthly
-    const day = Math.min(Math.max(rule.day ?? 1, 1), 28);
-    const thisMonth = new Date(today.getFullYear(), today.getMonth(), day);
-    if (thisMonth.getTime() <= today.getTime()) return thisMonth;
-    return new Date(today.getFullYear(), today.getMonth() - 1, day);
-  }
-
-  /**
-   * Create task instances for any recurring rule whose current occurrence hasn't
-   * been generated yet. Returns the titles of tasks that were created.
-   */
-  async generateDueRecurringTasks(): Promise<string[]> {
-    const rules = this.loadRecurringTasks();
-    if (!rules.length) return [];
-    const now = new Date();
-    const created: string[] = [];
-    let changed = false;
-    for (const rule of rules) {
-      const occ = this.lastOccurrence(rule, now);
-      if (!occ) continue;
-      const occStr = ymdLocal(occ);
-      if (rule.lastGenerated && rule.lastGenerated >= occStr) continue;
-      await this.createTask({
-        title: rule.title,
-        priority: rule.priority || "medium",
-        kanbanName: rule.board || "",
-        due: occStr,
-        eisenhower: rule.eisenhower || "",
-      });
-      rule.lastGenerated = occStr;
-      created.push(rule.title);
-      changed = true;
-    }
-    if (changed) await this.saveRecurringTasks(rules);
-    return created;
-  }
 }
 
 function ymdLocal(d: Date): string {
@@ -1470,23 +1764,6 @@ function ymdLocal(d: Date): string {
 }
 
 const WEEKDAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-
-/** Human-readable markdown body for the recurring-tasks file (JSON in frontmatter stays the source of truth). */
-function recurringTasksBody(items: RecurringTask[]): string {
-  const desc = (r: RecurringTask): string => {
-    let when: string;
-    if (r.freq === "daily") when = "every day";
-    else if (r.freq === "weekly") {
-      const wd = WEEKDAY_NAMES[r.weekday ?? 1] || "Monday";
-      const n = Math.min(Math.max(r.interval ?? 1, 1), 4);
-      when = n <= 1 ? `every ${wd}` : `every ${n} weeks on ${wd}`;
-    } else when = `monthly on day ${r.day ?? 1}`;
-    const extras = [r.board, r.priority ? `${r.priority} priority` : ""].filter(Boolean).join(" · ");
-    return `- **${r.title}** — ${when}${extras ? ` · ${extras}` : ""}`;
-  };
-  const lines = items.map(desc);
-  return "# Recurring tasks\n\n" + (lines.length ? lines.join("\n") + "\n" : "_No recurring tasks yet._\n");
-}
 
 /** Human-readable markdown body for the recurring finance file. */
 function recurringCostsBody(items: RecurringItem[], currency: string): string {

@@ -39,6 +39,8 @@ export interface Task {
   modified?: string;
   order?: number;
   eisenhower?: string; // manual Eisenhower quadrant: "q1" | "q2" | "q3" | "q4" (empty = auto)
+  googleId?: string;   // Google Tasks item id — the stable sync key (empty = local-only)
+  googleList?: string; // Google Tasks list id the item currently lives in
   path: string; // vault path of the source file
   body?: string;
 }
@@ -160,21 +162,6 @@ export interface RecurringItem {
   freq: string; // "monthly" | "weekly"
   day?: number; // monthly: day of month (1-28) to date the applied transaction
   weekday?: number; // weekly: 0=Sun .. 6=Sat
-}
-
-/** A recurring task template that auto-creates a task on its schedule. */
-export interface RecurringTask {
-  id: string;
-  title: string;
-  board?: string; // kanban board name
-  priority?: string; // "low" | "medium" | "high"
-  eisenhower?: string; // "q1".."q4" or empty
-  freq: string; // "daily" | "weekly" | "monthly"
-  weekday?: number; // weekly: 0=Sun .. 6=Sat
-  interval?: number; // weekly: repeat every N weeks (1-4)
-  anchor?: string; // weekly: YYYY-MM-DD reference occurrence for the N-week phase
-  day?: number; // monthly: day of month (1-28)
-  lastGenerated?: string; // YYYY-MM-DD of the last occurrence generated
 }
 
 export interface PAConfig {

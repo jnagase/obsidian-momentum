@@ -352,9 +352,9 @@ export class PASideView extends ItemView {
     }
 
     // Collapsible columns with per-task complete/reopen toggles, reorder + quick add.
-    const ord = (t: Task) => (t.order ?? 1e9);
+    const ord = (t: Task) => (t.order ?? -1);
     cols.forEach((col, idx) => {
-      const colTasks = tasks.filter((t) => eff(t) === col).sort((a, b) => ord(a) - ord(b) || a.title.localeCompare(b.title));
+      const colTasks = tasks.filter((t) => eff(t) === col).sort((a, b) => ord(a) - ord(b) || (b.created || "").localeCompare(a.created || ""));
       this.renderColumn(root, {
         title: names[col] || col,
         count: colTasks.length,
@@ -377,7 +377,8 @@ export class PASideView extends ItemView {
     const circle = row.createSpan({ cls: "pa-list-circle" + (isDone ? " on" : ""), text: isDone ? "●" : "○" });
     circle.setAttr("aria-label", isDone ? "Reopen task" : "Mark done");
     circle.onclick = () => void (async () => {
-      await this.ctx.store.updateTask(t, { status: isDone ? firstCol : doneCol });
+      if (isDone) await this.ctx.store.updateTask(t, { status: firstCol });
+      else await this.ctx.store.completeTaskAtTop(t, doneCol);
       this.render();
     })();
     const main = row.createDiv({ cls: "pa-ctx-taskrow-main" });
@@ -575,9 +576,9 @@ export class PASideView extends ItemView {
     }
 
     // Collapsible columns with complete/reopen toggles, reorder + quick add.
-    const ord = (c: StudyCard) => (c.order ?? 1e9);
+    const ord = (c: StudyCard) => (c.order ?? -1);
     cols.forEach((col, idx) => {
-      const colCards = cards.filter((c) => eff(c) === col).sort((a, b) => ord(a) - ord(b) || a.title.localeCompare(b.title));
+      const colCards = cards.filter((c) => eff(c) === col).sort((a, b) => ord(a) - ord(b) || (b.date || "").localeCompare(a.date || ""));
       this.renderColumn(root, {
         title: names[col] || col,
         count: colCards.length,
@@ -711,7 +712,8 @@ export class PASideView extends ItemView {
     const actions = root.createDiv({ cls: "pa-ctx-actions" });
     const toggle = actions.createEl("button", { cls: "pa-mini-btn", text: isDone ? "↩ reopen" : "✓ mark done" });
     toggle.onclick = () => void (async () => {
-      await this.ctx.store.updateTask(task, { status: isDone ? firstCol : doneCol });
+      if (isDone) await this.ctx.store.updateTask(task, { status: firstCol });
+      else await this.ctx.store.completeTaskAtTop(task, doneCol);
       this.render();
     })();
   }

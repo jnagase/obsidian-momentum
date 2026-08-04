@@ -46,6 +46,7 @@ export class PAView extends ItemView {
   private ctx: PAContext;
   private host: PAHost;
   private mainEl: HTMLElement | null = null;
+  private pluginName: string;
   /** This view's own page, persisted per-leaf via get/setState. */
   private page = "habit-tracker";
 
@@ -57,9 +58,10 @@ export class PAView extends ItemView {
   private financesModule: FinancesModule;
   private customModule: CustomModule;
 
-  constructor(leaf: WorkspaceLeaf, store: PADataStore, host: PAHost) {
+  constructor(leaf: WorkspaceLeaf, store: PADataStore, host: PAHost, pluginName = "Momentum Life") {
     super(leaf);
     this.host = host;
+    this.pluginName = pluginName;
     this.ctx = new PAContext(this.app, store);
     this.ctx.refresh = () => this.renderPage();
     this.ctx.openSidePanel = () => {
@@ -81,13 +83,10 @@ export class PAView extends ItemView {
   }
 
   getViewType(): string { return VIEW_TYPE_PA; }
-  getDisplayText(): string {
-    const p = PAGES.find((x) => x.id === this.page);
-    if (p) return p.label.replace(/^\S+\s/, "");
-    const c = this.host.customPages.find((x) => x.id === this.page);
-    return c ? c.label : "Personal Assistant";
-  }
+  getDisplayText(): string { return this.pluginName; }
   getIcon(): string { return "target"; }
+  /** Expose the current page id so the plugin can sync state on restore. */
+  getCurrentPage(): string { return this.page; }
 
   /** Persist this view's page so Obsidian restores it across restarts. */
   getState(): Record<string, unknown> {
@@ -99,7 +98,14 @@ export class PAView extends ItemView {
     this.page = s.page ?? this.page ?? "habit-tracker";
     await super.setState(state, result as never);
     this.renderPage();
-    (this.leaf as unknown as { updateHeader?: () => void }).updateHeader?.();
+    // Update the tab title after a short delay so Obsidian's DOM is ready.
+    const updateTitle = () => {
+      const leaf = this.leaf as unknown as { updateHeader?: () => void; tabHeaderInnerTitleEl?: HTMLElement };
+      leaf.updateHeader?.();
+      if (leaf.tabHeaderInnerTitleEl) leaf.tabHeaderInnerTitleEl.textContent = this.getDisplayText();
+    };
+    updateTitle();
+    window.setTimeout(updateTitle, 50);
   }
 
   async onOpen(): Promise<void> {
@@ -137,8 +143,9 @@ export class PAView extends ItemView {
   setPage(id: string): void {
     this.page = id;
     if (this.mainEl) this.renderPage();
-    // Refresh the tab title to reflect the current page.
-    (this.leaf as unknown as { updateHeader?: () => void }).updateHeader?.();
+    const leaf = this.leaf as unknown as { updateHeader?: () => void; tabHeaderInnerTitleEl?: HTMLElement };
+    leaf.updateHeader?.();
+    if (leaf.tabHeaderInnerTitleEl) leaf.tabHeaderInnerTitleEl.textContent = this.getDisplayText();
   }
 
   private renderPage(): void {

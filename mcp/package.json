@@ -1,0 +1,17 @@
+{
+  "name": "momentum-life-mcp",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "description": "Local MCP server for the Momentum Life Obsidian vault (Tasks, Finance, Nutrition, Fitness, Studies, Habits, Notes).",
+  "bin": {
+    "momentum-mcp": "src/server.mjs"
+  },
+  "scripts": {
+    "start": "node src/server.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "yaml": "^2.5.1"
+  }
+}

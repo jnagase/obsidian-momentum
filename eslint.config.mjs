@@ -12,6 +12,6 @@ export default defineConfig([
     },
   },
   {
-    ignores: ["main.js", "node_modules/**", "reference/**"],
+    ignores: ["main.js", "node_modules/**", "reference/**", "src/**/*.test.ts"],
   },
 ]);

@@ -331,6 +331,8 @@
 
 /* ===== Task card: top actions ===== */
 .pa-card-top-actions{display:flex;gap:2px;flex-shrink:0}
+.pa-card-delete{opacity:.7;transition:opacity .15s}
+.pa-card:hover .pa-card-delete{opacity:1}
 .pa-task{cursor:pointer}
 
 /* ===== Calendar fills the panel height (matches the chart beside it) ===== */

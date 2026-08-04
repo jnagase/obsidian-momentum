@@ -1,8 +1,9 @@
 import { PAContext } from "../context";
-import { Board, Task, RecurringTask } from "../types";
+import { Board, Task } from "../types";
 import { ConfirmModal, FieldSpec, FormModal, showActionMenu, toast, appendSidebarBtn } from "../ui";
 import { drawRing, drawScatter, ScatterPoint } from "../charts";
 import { renderCardChips } from "../cardchips";
+import { renderCardActions } from "../cardrender";
 
 const PRIORITIES = [
   { value: "low", label: "Low" },
@@ -38,9 +39,6 @@ export class TasksModule {
   private ctx: PAContext;
   private currentBoard = "all";
   private view: "kanban" | "list" | "matrix" = "kanban";
-  /** The recurring-tasks panel is shown by default; the user can toggle it off. */
-  private showRecurring = true;
-  /** Per-column "load more" limits, keyed by `board|column`. Defaults to PAGE_SIZE. */
   private colLimits: Record<string, number> = {};
 
   constructor(ctx: PAContext) { this.ctx = ctx; }
@@ -58,9 +56,21 @@ export class TasksModule {
     return cols.includes("done") ? "done" : cols[cols.length - 1];
   }
 
+  /** Where a done card returns to when reopened: the column right before "done" (in progress). */
+  private reopenCol(): string {
+    const cols = this.ctx.config.taskColumns;
+    const i = cols.indexOf(this.doneCol());
+    return cols[Math.max(0, i - 1)];
+  }
+
   render(root: HTMLElement): void {
     root.empty();
-    const boards = this.ctx.store.loadBoards();
+    const rawBoards = this.ctx.store.loadBoards();
+    // My Tasks is always pinned first.
+    const gtIdx = rawBoards.findIndex((b) => b.name === "My Tasks");
+    const boards = gtIdx > 0
+      ? [rawBoards[gtIdx], ...rawBoards.filter((_, i) => i !== gtIdx)]
+      : rawBoards;
     const tasks = this.ctx.store.loadTasks();
     // Keep the standard-Markdown checkbox mirrors (Tasks/Lists/*.md) in sync with the board.
     void this.ctx.store.syncTaskLists();
@@ -69,8 +79,6 @@ export class TasksModule {
     this.renderHeader(root, filtered);
     this.renderViewToggle(root);
     this.renderBoardTabs(root, boards);
-
-    if (this.showRecurring) this.renderRecurringPanel(root, boards);
 
     if (this.view === "kanban") {
       this.renderStats(root, filtered);
@@ -115,8 +123,6 @@ export class TasksModule {
     mk("kanban", "📋 Kanban");
     mk("list", "📃 List");
     mk("matrix", "🎯 Matrix");
-    const rec = bar.createEl("button", { text: "🔁 Recurring", cls: "pa-toggle-btn pa-toggle-recurring" + (this.showRecurring ? " on" : "") });
-    rec.onclick = () => { this.showRecurring = !this.showRecurring; this.ctx.refresh(); };
   }
 
   // ---- Board tabs ----
@@ -172,8 +178,8 @@ export class TasksModule {
       kebab.onclick = (e) => showActionMenu(e, [
         { title: "Rename board", icon: "pencil", onClick: () => this.openRenameBoardModal(board, boards) },
         { title: "Delete board", icon: "trash", warning: true, onClick: () =>
-          new ConfirmModal(this.ctx.app, `Delete board "${board.name}"? (tasks are kept, just untagged from this board view)`, async () => {
-            await this.ctx.store.saveBoards(boards.filter((b) => b.name !== board.name));
+          new ConfirmModal(this.ctx.app, `Delete board "${board.name}"? (its tasks move to My Tasks)`, async () => {
+            await this.ctx.store.deleteBoard(board.name);
             this.currentBoard = "all";
             this.ctx.refresh();
           }).open() },
@@ -184,20 +190,14 @@ export class TasksModule {
   private openRenameBoardModal(board: Board, boards: Board[]): void {
     const fields: FieldSpec[] = [
       { key: "name", label: "Board name", type: "text", value: board.name },
-      { key: "emoji", label: "Emoji", type: "emoji", value: board.emoji || "" },
     ];
     new FormModal(this.ctx.app, "Rename board", fields, async (v) => {
       const name = (v.name || "").trim();
-      if (!name) return;
-      if (name !== board.name && boards.some((b) => b.name === name)) { toast(`A board named "${name}" already exists.`); return; }
-      const updated = boards.map((b) => (b.name === board.name ? { ...b, name, emoji: (v.emoji || "").trim() } : b));
-      await this.ctx.store.saveBoards(updated);
-      if (name !== board.name) {
-        for (const t of this.ctx.store.loadTasks().filter((t) => t.kanbanName === board.name)) {
-          await this.ctx.store.updateTask(t, { kanbanName: name });
-        }
-        if (this.currentBoard === board.name) this.currentBoard = name;
-      }
+      if (!name || name === board.name) return;
+      if (boards.some((b) => b.name === name)) { toast(`A board named "${name}" already exists.`); return; }
+      // Renaming a board = renaming its folder; every task inside re-homes automatically.
+      await this.ctx.store.renameBoard(board.name, name);
+      if (this.currentBoard === board.name) this.currentBoard = name;
       this.ctx.refresh();
       toast("Board updated");
     }, "Save").open();
@@ -268,8 +268,11 @@ export class TasksModule {
       list.addEventListener("dragleave", () => list.removeClass("pa-drop"));
       list.addEventListener("drop", (e) => { void persistDrop(e); });
 
-      const ord = (t: Task) => (t.order ?? 1e9);
-      colTasks.sort((a, b) => ord(a) - ord(b) || (a.created || "").localeCompare(b.created || ""));
+      // New cards (adopted orphans or plugin-created) have no explicit `order`.
+      // Surface them at the TOP of their column, newest created first. Cards that
+      // were manually ordered via drag keep their persisted position below.
+      const ord = (t: Task) => (t.order ?? -1);
+      colTasks.sort((a, b) => ord(a) - ord(b) || (b.created || "").localeCompare(a.created || ""));
 
       // Show at most `limit` cards (7 by default); "load more" reveals 7 more each click.
       const key = this.currentBoard + "|" + col;
@@ -301,6 +304,8 @@ export class TasksModule {
   }
 
   private renderCard(list: HTMLElement, t: Task, isDoneCol: boolean): void {
+    const doneId = this.doneCol();
+
     const card = list.createDiv({ cls: "pa-card pa-task prio-" + (t.priority || "medium") + (isDoneCol ? " done" : "") });
     card.dataset.path = t.path;
     card.setAttr("draggable", "true");
@@ -311,132 +316,29 @@ export class TasksModule {
     const topRow = card.createDiv({ cls: "pa-card-top" });
     const badgeText = (t.group || t.cat || t.kanbanName || "").toUpperCase();
     if (badgeText) topRow.createDiv({ text: badgeText, cls: "pa-card-cat" });
-    const acts = topRow.createDiv({ cls: "pa-card-top-actions" });
-    const menuBtn = acts.createEl("button", { text: "⋮", cls: "pa-icon-btn pa-card-menu" });
-    menuBtn.onclick = (e) => {
-      e.stopPropagation();
-      showActionMenu(e, [
+    renderCardActions(topRow, {
+      app: this.ctx.app,
+      title: t.title,
+      isDone: isDoneCol,
+      onDone: () => {
+        void (async () => {
+          if (isDoneCol) await this.ctx.store.updateTask(t, { status: this.reopenCol() });
+          else await this.ctx.store.completeTaskAtTop(t, doneId);
+          this.ctx.refresh();
+        })();
+      },
+      onDelete: () => {
+        void (async () => { await this.ctx.store.deleteTask(t); this.ctx.refresh(); })();
+      },
+      extraMenuItems: [
         { title: "Open note", icon: "file-text", onClick: () => { void this.ctx.app.workspace.openLinkText(t.path, "", true); } },
         { title: "Edit", icon: "pencil", onClick: () => this.openTaskModal(t, t.status, this.ctx.store.loadBoards()) },
         { title: "Delete", icon: "trash", warning: true, onClick: () => new ConfirmModal(this.ctx.app, `Delete task "${t.title}"?`, async () => { await this.ctx.store.deleteTask(t); this.ctx.refresh(); }).open() },
-      ]);
-    };
+      ],
+    });
 
     card.createDiv({ text: t.title, cls: "pa-card-title" });
     renderCardChips(card, { priority: t.priority, due: t.due, created: t.created });
-  }
-
-  // ---- Recurring tasks ----
-  private freqLabel(r: RecurringTask): string {
-    const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-    if (r.freq === "daily") return "Every day";
-    if (r.freq === "weekly") {
-      const wd = days[r.weekday ?? 1] || "Monday";
-      const n = Math.min(Math.max(r.interval ?? 1, 1), 4);
-      return n <= 1 ? "Every " + wd : `Every ${n} weeks on ${wd}`;
-    }
-    return "Monthly on day " + (r.day ?? 1);
-  }
-
-  /** The most recent date (on/before today) that falls on the given weekday, as YYYY-MM-DD. */
-  private mostRecentWeekday(wd: number): string {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const back = (today.getDay() - wd + 7) % 7;
-    const d = new Date(today);
-    d.setDate(today.getDate() - back);
-    return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
-  }
-
-  private renderRecurringPanel(root: HTMLElement, boards: Board[]): void {
-    const rules = this.ctx.store.loadRecurringTasks();
-    const panel = root.createDiv({ cls: "pa-recurring-panel" });
-
-    const head = panel.createDiv({ cls: "pa-recurring-head" });
-    head.createDiv({ text: "🔁 Recurring tasks", cls: "pa-recurring-title" });
-    const close = head.createEl("button", { text: "✕", cls: "pa-icon-btn" });
-    close.onclick = () => { this.showRecurring = false; this.ctx.refresh(); };
-
-    panel.createDiv({ cls: "pa-muted pa-recurring-hint", text: "New tasks are created automatically on schedule while the app is open." });
-
-    if (!rules.length) {
-      panel.createEl("p", { cls: "pa-muted", text: "No recurring tasks yet." });
-    } else {
-      rules.forEach((r) => {
-        const row = panel.createDiv({ cls: "pa-recurring-item" });
-        const main = row.createDiv({ cls: "pa-recurring-item-main" });
-        main.createDiv({ text: r.title, cls: "pa-recurring-item-title" });
-        main.createDiv({ cls: "pa-muted pa-recurring-item-sub", text: [this.freqLabel(r), r.board].filter(Boolean).join(" · ") });
-        const acts = row.createDiv({ cls: "pa-recurring-item-acts" });
-        const edit = acts.createEl("button", { text: "✎", cls: "pa-icon-btn" });
-        edit.onclick = () => this.openRecurringTaskModal(r, boards);
-        const del = acts.createEl("button", { text: "🗑", cls: "pa-icon-btn" });
-        del.onclick = () => new ConfirmModal(this.ctx.app, `Delete recurring task "${r.title}"?`, async () => {
-          await this.ctx.store.saveRecurringTasks(rules.filter((x) => x.id !== r.id));
-          this.ctx.refresh();
-        }).open();
-      });
-    }
-
-    const add = panel.createEl("button", { text: "+ recurring task", cls: "pa-add-card" });
-    add.onclick = () => this.openRecurringTaskModal(null, boards);
-  }
-
-  private openRecurringTaskModal(rule: RecurringTask | null, boards: Board[]): void {
-    const boardOptions = [{ value: "", label: "— none —" }].concat(boards.map((b) => ({ value: b.name, label: b.name })));
-    const freqOptions = [
-      { value: "daily", label: "Every day" },
-      { value: "weekly", label: "Weekly" },
-      { value: "monthly", label: "Monthly" },
-    ];
-    const weekdayOptions = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"].map((d, i) => ({ value: String(i), label: d }));
-    const intervalOptions = [
-      { value: "1", label: "Every week" },
-      { value: "2", label: "Every 2 weeks" },
-      { value: "3", label: "Every 3 weeks" },
-      { value: "4", label: "Every 4 weeks" },
-    ];
-    const fields: FieldSpec[] = [
-      { key: "title", label: "Title", type: "text", value: rule?.title || "" },
-      { key: "board", label: "Board", type: "dropdown", options: boardOptions, value: rule?.board || (this.currentBoard !== "all" ? this.currentBoard : "") },
-      { key: "priority", label: "Priority", type: "dropdown", options: PRIORITIES, value: rule?.priority || "medium" },
-      { key: "freq", label: "Repeat", type: "dropdown", options: freqOptions, value: rule?.freq || "weekly" },
-      { key: "weekday", label: "Weekday (for weekly)", type: "dropdown", options: weekdayOptions, value: String(rule?.weekday ?? 1) },
-      { key: "interval", label: "Frequency (for weekly)", type: "dropdown", options: intervalOptions, value: String(Math.min(Math.max(rule?.interval ?? 1, 1), 4)) },
-      { key: "day", label: "Day of month (for monthly, 1-28)", type: "number", value: rule?.day ?? 1 },
-    ];
-    new FormModal(this.ctx.app, rule ? "Edit recurring task" : "New recurring task", fields, async (v) => {
-      const title = (v.title || "").trim();
-      if (!title) return;
-      const freq = ["daily", "weekly", "monthly"].includes(v.freq) ? v.freq : "weekly";
-      const weekday = freq === "weekly" ? (parseInt(v.weekday, 10) || 0) : undefined;
-      const interval = freq === "weekly" ? Math.min(Math.max(parseInt(v.interval, 10) || 1, 1), 4) : undefined;
-      // For multi-week intervals, anchor the phase; recompute if new or the weekday changed.
-      let anchor = rule?.anchor;
-      if (freq === "weekly" && interval && interval > 1) {
-        if (!anchor || rule?.weekday !== weekday) anchor = this.mostRecentWeekday(weekday ?? 1);
-      } else {
-        anchor = undefined;
-      }
-      const rules = this.ctx.store.loadRecurringTasks();
-      const item: RecurringTask = {
-        id: rule?.id || "rt" + Date.now() + Math.floor(Math.random() * 1000),
-        title,
-        board: v.board || "",
-        priority: v.priority || "medium",
-        eisenhower: rule?.eisenhower || "",
-        freq,
-        weekday,
-        interval,
-        anchor,
-        day: freq === "monthly" ? Math.min(Math.max(parseInt(v.day, 10) || 1, 1), 28) : undefined,
-        lastGenerated: rule?.lastGenerated,
-      };
-      const next = rule ? rules.map((x) => (x.id === rule.id ? item : x)) : [...rules, item];
-      await this.ctx.store.saveRecurringTasks(next);
-      await this.ctx.store.generateDueRecurringTasks();
-      this.ctx.refresh();
-    }, rule ? "Save" : "Create").open();
   }
 
   // ---- Eisenhower matrix ----
@@ -548,6 +450,8 @@ export class TasksModule {
   }
 
   private renderMatrixCard(body: HTMLElement, t: Task): void {
+    const doneId = this.doneCol();
+
     const card = body.createDiv({ cls: "pa-card pa-task pa-matrix-card prio-" + (t.priority || "medium") });
     card.dataset.path = t.path;
     card.setAttr("draggable", "true");
@@ -558,23 +462,23 @@ export class TasksModule {
     const topRow = card.createDiv({ cls: "pa-card-top" });
     const badgeText = (t.group || t.cat || t.kanbanName || "").toUpperCase();
     if (badgeText) topRow.createDiv({ text: badgeText, cls: "pa-card-cat" });
-    const acts = topRow.createDiv({ cls: "pa-card-top-actions" });
-    const doneBtn = acts.createEl("button", { text: "✓", cls: "pa-icon-btn pa-card-done" });
-    doneBtn.setAttr("aria-label", "Mark done");
-    doneBtn.onclick = (e) => {
-      e.stopPropagation();
-      void (async () => { await this.ctx.store.updateTask(t, { status: this.doneCol() }); this.ctx.refresh(); })();
-    };
-    const menuBtn = acts.createEl("button", { text: "⋮", cls: "pa-icon-btn pa-card-menu" });
-    menuBtn.onclick = (e) => {
-      e.stopPropagation();
-      showActionMenu(e, [
+    renderCardActions(topRow, {
+      app: this.ctx.app,
+      title: t.title,
+      isDone: false,
+      onDone: () => {
+        void (async () => { await this.ctx.store.completeTaskAtTop(t, doneId); this.ctx.refresh(); })();
+      },
+      onDelete: () => {
+        void (async () => { await this.ctx.store.deleteTask(t); this.ctx.refresh(); })();
+      },
+      extraMenuItems: [
         { title: "Open note", icon: "file-text", onClick: () => { void this.ctx.app.workspace.openLinkText(t.path, "", true); } },
         { title: "Edit", icon: "pencil", onClick: () => this.openTaskModal(t, t.status, this.ctx.store.loadBoards()) },
-        { title: "Mark done", icon: "check", onClick: () => { void (async () => { await this.ctx.store.updateTask(t, { status: this.doneCol() }); this.ctx.refresh(); })(); } },
+        { title: "Mark done", icon: "check", onClick: () => { void (async () => { await this.ctx.store.completeTaskAtTop(t, doneId); this.ctx.refresh(); })(); } },
         { title: "Delete", icon: "trash", warning: true, onClick: () => new ConfirmModal(this.ctx.app, `Delete task "${t.title}"?`, async () => { await this.ctx.store.deleteTask(t); this.ctx.refresh(); }).open() },
-      ]);
-    };
+      ],
+    });
 
     card.createDiv({ text: t.title, cls: "pa-card-title" });
     renderCardChips(card, { priority: t.priority, due: t.due, created: t.created });
@@ -618,7 +522,11 @@ export class TasksModule {
   private renderListItem(parent: HTMLElement, t: Task, done: boolean, doneCol: string, firstCol: string): void {
     const row = parent.createDiv({ cls: "pa-list-item" + (done ? " done" : "") });
     const circle = row.createSpan({ cls: "pa-list-circle" + (done ? " on" : ""), text: done ? "●" : "○" });
-    circle.onclick = async () => { await this.ctx.store.updateTask(t, { status: done ? firstCol : doneCol }); this.ctx.refresh(); };
+    circle.onclick = async () => {
+      if (done) await this.ctx.store.updateTask(t, { status: firstCol });
+      else await this.ctx.store.completeTaskAtTop(t, doneCol);
+      this.ctx.refresh();
+    };
     const main = row.createDiv({ cls: "pa-list-item-main" });
     const title = main.createDiv({ text: t.title, cls: "pa-list-item-title" });
     title.onclick = () => this.ctx.app.workspace.openLinkText(t.path, "", true);
@@ -629,14 +537,14 @@ export class TasksModule {
   private openBoardModal(boards: Board[]): void {
     const fields: FieldSpec[] = [
       { key: "name", label: "Board name", type: "text" },
-      { key: "emoji", label: "Emoji", type: "emoji", placeholder: "📋" },
     ];
     new FormModal(this.ctx.app, "New board", fields, async (v) => {
       const name = (v.name || "").trim();
       if (!name) return;
       if (boards.some((b) => b.name === name)) { this.currentBoard = name; this.ctx.refresh(); return; }
-      boards.push({ id: name.toLowerCase().replace(/\s+/g, "-"), name, emoji: (v.emoji || "").trim() });
-      await this.ctx.store.saveBoards(boards);
+      // Creating a board = creating its folder under Tasks/.
+      const ok = await this.ctx.store.createBoard(name);
+      if (!ok) { toast("Invalid board name."); return; }
       this.currentBoard = name;
       this.ctx.refresh();
       toast("Board created");

@@ -3,6 +3,7 @@ import { Board, StudyCard } from "../types";
 import { ConfirmModal, FieldSpec, FormModal, MenuAction, openExternal, showActionMenu, toast, appendSidebarBtn } from "../ui";
 import { drawRing } from "../charts";
 import { renderCardChips } from "../cardchips";
+import { renderCardActions } from "../cardrender";
 
 const RING_COLORS = ["#d97706", "#7c3aed", "#16a34a"];
 const COLUMN_COLORS = ["#7c3aed", "#3b82f6", "#16a34a", "#f59e0b", "#ef4444", "#10b981"];
@@ -223,8 +224,10 @@ export class StudiesModule {
       list.addEventListener("dragleave", () => list.removeClass("pa-drop"));
       list.addEventListener("drop", (e) => { void persistDrop(e); });
 
-      const ord = (c: StudyCard) => (c.order ?? 1e9);
-      colCards.sort((a, b) => ord(a) - ord(b) || (a.date || "").localeCompare(b.date || ""));
+      // New cards without an explicit `order` surface at the TOP, newest first.
+      // Manually ordered cards (via drag) keep their persisted position below.
+      const ord = (c: StudyCard) => (c.order ?? -1);
+      colCards.sort((a, b) => ord(a) - ord(b) || (b.date || "").localeCompare(a.date || ""));
 
       colCards.slice(0, isDone && colCards.length > 7 ? 7 : colCards.length)
         .forEach((c) => this.renderCard(list, c, isDone, topics));
@@ -252,6 +255,10 @@ export class StudiesModule {
   }
 
   private renderCard(list: HTMLElement, c: StudyCard, isDoneCol: boolean, topics: Board[]): void {
+    const cols = this.ctx.config.studyColumns;
+    const firstCol = cols[0];
+    const doneId = this.doneCol();
+
     const card = list.createDiv({ cls: "pa-card pa-task" + (isDoneCol ? " done" : "") });
     card.dataset.path = c.path;
     card.setAttr("draggable", "true");
@@ -262,18 +269,29 @@ export class StudiesModule {
     const topRow = card.createDiv({ cls: "pa-card-top" });
     const badge = (c.subtopic || c.topic || "").toUpperCase();
     if (badge) topRow.createDiv({ text: badge, cls: "pa-card-cat" });
-    const acts = topRow.createDiv({ cls: "pa-card-top-actions" });
-    const menuBtn = acts.createEl("button", { text: "⋮", cls: "pa-icon-btn pa-card-menu" });
-    menuBtn.onclick = (e) => {
-      e.stopPropagation();
-      const items: MenuAction[] = [
-        { title: "Open note", icon: "file-text", onClick: () => { void this.ctx.app.workspace.openLinkText(c.path, "", true); } },
-      ];
-      if (c.url) items.push({ title: "Open URL", icon: "link", onClick: () => openExternal(c.url!) });
-      items.push({ title: "Edit", icon: "pencil", onClick: () => this.openCardModal(c, c.status, topics) });
-      items.push({ title: "Delete", icon: "trash", warning: true, onClick: () => new ConfirmModal(this.ctx.app, `Delete study card "${c.title}"?`, async () => { await this.ctx.store.deleteStudyCard(c); this.ctx.refresh(); }).open() });
-      showActionMenu(e, items);
-    };
+
+    const extraItems: MenuAction[] = [
+      { title: "Open note", icon: "file-text", onClick: () => { void this.ctx.app.workspace.openLinkText(c.path, "", true); } },
+    ];
+    if (c.url) extraItems.push({ title: "Open URL", icon: "link", onClick: () => openExternal(c.url!) });
+    extraItems.push({ title: "Edit", icon: "pencil", onClick: () => this.openCardModal(c, c.status, topics) });
+    extraItems.push({ title: "Delete", icon: "trash", warning: true, onClick: () => new ConfirmModal(this.ctx.app, `Delete study card "${c.title}"?`, async () => { await this.ctx.store.deleteStudyCard(c); this.ctx.refresh(); }).open() });
+
+    renderCardActions(topRow, {
+      app: this.ctx.app,
+      title: c.title,
+      isDone: isDoneCol,
+      onDone: () => {
+        void (async () => {
+          await this.ctx.store.updateStudyCardStatus(c, isDoneCol ? firstCol : doneId);
+          this.ctx.refresh();
+        })();
+      },
+      onDelete: () => {
+        void (async () => { await this.ctx.store.deleteStudyCard(c); this.ctx.refresh(); })();
+      },
+      extraMenuItems: extraItems,
+    });
 
     card.createDiv({ text: c.title, cls: "pa-card-title" });
     // Same chips engine as Tasks: status chip (using "medium" as default since study cards

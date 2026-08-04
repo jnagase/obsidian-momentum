@@ -1,18 +1,46 @@
 import { Plugin, WorkspaceLeaf, PluginSettingTab, App, Setting, TFolder, TFile, Platform, Notice } from "obsidian";
 import { PADataStore, setDataRoot } from "./data";
-import { todayLocal } from "./util";
 import { PAView, VIEW_TYPE_PA, PAHost, PALocation } from "./view";
 import { PANavView, VIEW_TYPE_PA_NAV } from "./nav";
 import { PASideView, VIEW_TYPE_PA_SIDE, momentumNoteType } from "./side";
 import { WhatsNewModal, CHANGELOG, cmpVersion } from "./whatsnew";
 import { CustomPage } from "./types";
 import { FormModal, ConfirmModal, FieldSpec } from "./ui";
-
-interface PASettings { dataRoot: string; notifyTasks: boolean; lastSeenVersion: string; readableNotesSchema?: number; }
-const DEFAULT_SETTINGS: PASettings = { dataRoot: "Momentum Life", notifyTasks: false, lastSeenVersion: "", readableNotesSchema: 0 };
+import { GoogleToken, authorizeGoogle } from "./googletasks";
+import { GTSyncService } from "./gtSync";
+interface PASettings {
+  dataRoot: string;
+  notifyTasks: boolean;
+  lastSeenVersion: string;
+  readableNotesSchema?: number;
+  taskListsSchema?: number;
+  taskFoldersSchema?: number;
+  googleTasksEnabled: boolean;
+  googleTasksSyncOnStartup: boolean;
+  googleSyncInterval: number; // 0=manual, 5, 10, 15 (minutes)
+  googleToken: GoogleToken | null;
+  gtBaselines?: Record<string, { title: string; status: string; due: string }>;
+}
+const DEFAULT_SETTINGS: PASettings = {
+  dataRoot: "Momentum Life",
+  notifyTasks: false,
+  lastSeenVersion: "",
+  readableNotesSchema: 0,
+  taskListsSchema: 0,
+  taskFoldersSchema: 0,
+  googleTasksEnabled: false,
+  googleTasksSyncOnStartup: false,
+  googleSyncInterval: 0,   // manual by default
+  googleToken: null,
+  gtBaselines: {},
+};
 const LEGACY_DATA_ROOT = "Personal Assistant";
 /** Bump when the readable-notes migration changes so the guarded auto-run re-triggers. */
 const READABLE_NOTES_SCHEMA = 1;
+/** Bump when the task-list mirror layout changes so the guarded migration re-runs. */
+const TASK_LISTS_SCHEMA = 1;
+/** Bump when the per-board folder layout changes so the guarded migration re-runs. */
+const TASK_FOLDERS_SCHEMA = 5;
 
 export default class MomentumPlugin extends Plugin implements PAHost {
   settings: PASettings;
@@ -21,6 +49,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
   /** True while the plugin itself is (re)writing the task-list mirrors, so the vault
    *  "modify" listener ignores our own writes and never re-enters (prevents runaway loops). */
   private mirrorSyncing = false;
+  private googleSyncIntervalId: number | null = null;
   /** User-defined nav sections, loaded from config (source of truth for the nav + views). */
   customPages: CustomPage[] = [];
 
@@ -37,7 +66,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
     setDataRoot(this.settings.dataRoot);
     this.store = new PADataStore(this.app);
 
-    this.registerView(VIEW_TYPE_PA, (leaf) => new PAView(leaf, this.store, this));
+    this.registerView(VIEW_TYPE_PA, (leaf) => new PAView(leaf, this.store, this, this.manifest.name));
     this.registerView(VIEW_TYPE_PA_NAV, (leaf) => new PANavView(leaf, this, this.manifest.name));
     this.registerView(VIEW_TYPE_PA_SIDE, (leaf) => new PASideView(leaf, this.store));
 
@@ -83,14 +112,53 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       callback: () => void this.openSidePanel(),
     });
 
+    this.addCommand({
+      id: "momentum-fix-orphan-tasks",
+      name: "Momentum: assign orphan tasks to my tasks board",
+      callback: () => void this.fixOrphanTasks(),
+    });
+
+    this.addCommand({
+      id: "momentum-sync-google-tasks",
+      name: "Momentum: sync with Google tasks",
+      callback: () => void this.syncGoogleTasks(),
+    });
+
+    this.addCommand({
+      id: "momentum-dedupe-tasks",
+      name: "Momentum: remove duplicate tasks",
+      callback: () => void this.dedupeTasks(),
+    });
+
     this.addSettingTab(new PASettingTab(this.app, this));
 
     // Ensure the nav panel exists in the left sidebar so its access icon is always available.
     this.app.workspace.onLayoutReady(() => {
       // Load user-defined nav sections so the nav can render them.
       void this.reloadCustomPages();
+      // Sync currentPage with whatever tab Obsidian restored, so the nav and
+      // side panel reflect the right page from the first render.
+      const restored = this.app.workspace.getActiveViewOfType(PAView);
+      if (restored) {
+        this.currentPage = restored.getCurrentPage() ?? this.currentPage;
+      }
+      // Ensure the "My Tasks" board folder exists — tasks without a board land here.
+      void this.store.ensureBoardFolder("My Tasks");
       // Remove any duplicate panels that piled up (e.g. from workspace sync between devices).
       this.dedupeLeaves(VIEW_TYPE_PA_NAV);
+      // Close stale PAView tabs in the center split — Obsidian restores every tab it
+      // saw last session, producing a "Habit Tracker" ghost alongside the real page.
+      // We keep only the most recently active one and re-open the current page.
+      void (async () => {
+        const { workspace } = this.app;
+        const rootSplit = workspace.rootSplit;
+        const centerLeaves = workspace.getLeavesOfType(VIEW_TYPE_PA)
+          .filter((l) => l.getRoot() === rootSplit);
+        if (centerLeaves.length > 1) {
+          // Close all but the last one (most recently active is usually last).
+          for (const leaf of centerLeaves.slice(0, -1)) leaf.detach();
+        }
+      })();
       if (this.app.workspace.getLeavesOfType(VIEW_TYPE_PA_NAV).length === 0) {
         const leaf = this.app.workspace.getLeftLeaf(false);
         void leaf?.setViewState({ type: VIEW_TYPE_PA_NAV });
@@ -101,6 +169,36 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       void (async () => {
         this.mirrorSyncing = true;
         try {
+          // One-time migration of legacy mirror layout (Tasks/Lists/<board>/tasks.md)
+          // to the flat, intuitive Tasks/Lists/<board>.md. Guarded by a schema version
+          // so it runs once; on failure the guard stays unset so it retries next launch.
+          if ((this.settings.taskListsSchema ?? 0) < TASK_LISTS_SCHEMA) {
+            try {
+              const migrated = await this.store.migrateTaskListStructure();
+              this.settings.taskListsSchema = TASK_LISTS_SCHEMA;
+              await this.saveSettings();
+              if (migrated > 0) new Notice(`Momentum: reorganized ${migrated} task list${migrated === 1 ? "" : "s"} into a cleaner layout.`);
+            } catch { /* leave the guard unset so the migration retries next launch */ }
+          }
+          // One-time migration to the folder-per-board layout: loose task notes at the
+          // Tasks/ root are filed into Tasks/<board>/ so boards are visible as folders and
+          // anyone can create a task by hand. Backlink-safe; guarded to run once.
+          if ((this.settings.taskFoldersSchema ?? 0) < TASK_FOLDERS_SCHEMA) {
+            try {
+              // Rename the default board General Tasks → My Tasks (pairs with Google's list).
+              await this.store.migrateDefaultBoardName();
+              await this.store.ensureBoardFolder("My Tasks");
+              // Repair malformed YAML frontmatter (e.g. unquoted "[gbm] ..." titles from
+              // external widgets) so status/board parse and updates (done button) work.
+              await this.store.repairTaskFrontmatter();
+              const filed = await this.store.migrateTaskFolders();
+              // Boards are folders now — drop the obsolete Tasks/boards.md once, on upgrade.
+              await this.store.removeLegacyBoardsConfig();
+              this.settings.taskFoldersSchema = TASK_FOLDERS_SCHEMA;
+              await this.saveSettings();
+              if (filed > 0) new Notice(`Momentum: filed ${filed} task${filed === 1 ? "" : "s"} into board folders.`);
+            } catch { /* leave the guard unset so the migration retries next launch */ }
+          }
           await this.store.reconcileTaskLists();
           await this.store.syncTaskLists();
         } finally {
@@ -108,7 +206,14 @@ export default class MomentumPlugin extends Plugin implements PAHost {
         }
       })();
       this.maybeShowWhatsNew();
-      void this.runTaskAutomations();
+      // Adopt any tasks that arrived via sync without frontmatter.
+      void this.adoptOrphanTasks();
+      // Always sync with Google Tasks on startup if connected.
+      if (this.settings.googleTasksEnabled && this.settings.googleToken) {
+        window.setTimeout(() => void this.syncGoogleTasks(true), 3000);
+      }
+      // Start the periodic sync interval if a non-manual frequency is configured.
+      this.resetGoogleSyncInterval();
       // One-time, best-effort migration of module notes to readable filenames. Guarded by a
       // schema version so it runs once; on failure the guard stays unset so the command retries.
       if ((this.settings.readableNotesSchema ?? 0) < READABLE_NOTES_SCHEMA) {
@@ -122,8 +227,11 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       }
     });
 
-    // Re-check recurring tasks and due reminders every 30 minutes while Obsidian is open.
-    this.registerInterval(window.setInterval(() => void this.runTaskAutomations(), 30 * 60 * 1000));
+    // Every 5 minutes: register hand-made board folders, file loose root notes into
+    // their board folder, and refresh the mirrors. Silent (no notices).
+    this.registerInterval(window.setInterval(() => {
+      void this.maintainTaskFolders();
+    }, 5 * 60 * 1000));
 
     // The context side panel follows the note you open. Opening a Momentum note
     // surfaces the panel on the right automatically (like Team Manager), then it
@@ -161,13 +269,77 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       if (!file.path.endsWith(".md")) return;
       const tasksPrefix = this.store.full("Tasks") + "/";
       const listsPrefix = this.store.full("Tasks/Lists") + "/";
+      const orphanPrefix = this.store.full("Tasks/_orphaned") + "/";
       if (!file.path.startsWith(tasksPrefix)) return;
-      if (file.path.startsWith(listsPrefix)) return;       // mirrors are not tasks
+      if (file.path.startsWith(listsPrefix) || file.path.startsWith(orphanPrefix)) return; // mirrors/archive are not tasks
       if (file.name === "boards.md" || file.name === "recurring.md") return;
       // Wait a moment for the metadata cache to index the new file, then check
       // whether it already has a valid task frontmatter. If not, adopt it.
       window.setTimeout(() => void this.adoptTaskFile(file), 800);
     }));
+  }
+
+  /**
+   * Command: file any loose task notes at the Tasks/ root into their board folder
+   * (folder = source of truth; unassigned → General Tasks) and register hand-made
+   * board folders as boards. Silent maintenance runs the same on an interval.
+   */
+  private async fixOrphanTasks(): Promise<void> {
+    const moved = await this.store.migrateTaskFolders();
+    await this.syncMirrors();
+    new Notice(moved > 0 ? `Filed ${moved} loose task${moved === 1 ? "" : "s"} into board folders.` : "No loose tasks found.");
+  }
+
+  /** Silent periodic upkeep: file any loose root notes into their board folder. */
+  private async maintainTaskFolders(): Promise<void> {
+    await this.store.migrateTaskFolders();
+    await this.syncMirrors();
+  }
+
+  /**
+   * Command: remove duplicate task notes (same board + title — e.g. a mobile widget's
+   * "name 2" copies). Keeps the Google-linked or oldest note in each group and deletes
+   * the rest, after an explicit confirmation showing the count.
+   */
+  private async dedupeTasks(): Promise<void> {
+    const dupes = this.store.findDuplicateTasks();
+    const removable = dupes.reduce((n, g) => n + g.remove.length, 0);
+    if (!removable) { new Notice("No duplicate tasks found."); return; }
+    new ConfirmModal(
+      this.app,
+      `Remove ${removable} duplicate task${removable === 1 ? "" : "s"} across ${dupes.length} group${dupes.length === 1 ? "" : "s"}? The original of each is kept.`,
+      async () => {
+        let removed = 0;
+        for (const g of dupes) {
+          for (const t of g.remove) { try { await this.store.deleteTask(t); removed++; } catch { /* skip */ } }
+        }
+        await this.syncMirrors();
+        this.app.workspace.getLeavesOfType(VIEW_TYPE_PA).forEach((l) => { if (l.view instanceof PAView) l.view.rerender(); });
+        new Notice(`Removed ${removed} duplicate task${removed === 1 ? "" : "s"}.`);
+      },
+    ).open();
+  }
+
+  /**
+   * Scan Tasks/ for .md files without valid Momentum frontmatter and adopt them.
+   * Runs on startup and covers files that arrived via sync before Obsidian was open.
+   */
+  private async adoptOrphanTasks(): Promise<void> {
+    const tasksPrefix = this.store.full("Tasks") + "/";
+    const listsPrefix = this.store.full("Tasks/Lists") + "/";
+    const orphanPrefix = this.store.full("Tasks/_orphaned") + "/";
+    const skip = new Set(["boards.md", "recurring.md"]);
+    const files = this.app.vault.getMarkdownFiles().filter((f) =>
+      f.path.startsWith(tasksPrefix) &&
+      !f.path.startsWith(listsPrefix) &&
+      !f.path.startsWith(orphanPrefix) &&
+      !skip.has(f.name),
+    );
+    for (const file of files) {
+      await this.adoptTaskFile(file);
+    }
+    // Re-sync mirrors after adoption so new tasks appear in the lists.
+    await this.syncMirrors();
   }
 
   /**
@@ -177,11 +349,24 @@ export default class MomentumPlugin extends Plugin implements PAHost {
    */
   private async adoptTaskFile(file: TFile): Promise<void> {
     try {
+      // Repair malformed YAML first (e.g. an unquoted "[gbm] ..." title) so the cache can
+      // parse it and processFrontMatter below can write to it.
+      if (await this.store.repairTaskFile(file)) {
+        await new Promise((r) => window.setTimeout(r, 50));
+      }
       const cache = this.app.metadataCache.getFileCache(file);
       const fmType: unknown = cache?.frontmatter?.["type"];
       const fmId: unknown = cache?.frontmatter?.["task_id"];
       // Already a Momentum task — nothing to do.
       if (fmType === "task" && fmId) return;
+      // The board comes from the parent folder (folder = source of truth). A note dropped
+      // in Tasks/<Board>/ becomes a task of that board; one dropped loose at the Tasks/
+      // root goes to "My Tasks" and is filed there below.
+      const tasksRoot = this.store.full("Tasks");
+      const parent = file.parent;
+      const inBoardFolder = !!parent && parent.path !== tasksRoot &&
+        parent.path.startsWith(tasksRoot + "/") && parent.name !== "Lists" && parent.name !== "_orphaned";
+      const board = inBoardFolder && parent ? parent.name : "My Tasks";
       // Patch in the minimum required fields, preserving any existing frontmatter
       // fields and all body content.
       await this.app.fileManager.processFrontMatter(file, (matter: Record<string, unknown>) => {
@@ -189,10 +374,14 @@ export default class MomentumPlugin extends Plugin implements PAHost {
         if (!matter.task_id) matter.task_id = crypto.randomUUID ? crypto.randomUUID() : ("t" + Date.now());
         if (!matter.title) matter.title = file.basename;
         if (!matter.status) matter.status = "backlog";
+        matter.kanban_name = board;
         if (!matter.priority) matter.priority = "medium";
         if (!matter.created) matter.created = new Date().toISOString();
         matter.modified = new Date().toISOString();
       });
+      // A note in a board folder is already correctly filed (folder = board). A loose root
+      // note is filed under General Tasks.
+      if (!inBoardFolder) await this.store.moveTaskToBoardFolder(file, board);
       // Re-sync mirrors so the new task appears in task lists.
       await this.syncMirrors();
     } catch { /* best-effort: if adoption fails the file is left as-is */ }
@@ -281,13 +470,18 @@ export default class MomentumPlugin extends Plugin implements PAHost {
     this.refreshNav();
   }
 
-  /** Find an existing PAView docked in the main/center area (not a sidebar). */
+  /** Find an existing PAView docked in the main/center area (not a sidebar).
+   *  Prefers the currently active leaf so navigation always updates the right tab. */
   private findCenterPAView(): WorkspaceLeaf | null {
     const { workspace } = this.app;
     const rootSplit = workspace.rootSplit;
-    return (
-      workspace.getLeavesOfType(VIEW_TYPE_PA).find((l) => l.getRoot() === rootSplit) ?? null
-    );
+    const centerLeaves = workspace.getLeavesOfType(VIEW_TYPE_PA)
+      .filter((l) => l.getRoot() === rootSplit);
+    if (!centerLeaves.length) return null;
+    // Prefer the active leaf so clicking a nav item updates the focused tab.
+    const active = workspace.getActiveViewOfType(PAView);
+    if (active && centerLeaves.includes(active.leaf)) return active.leaf;
+    return centerLeaves[0];
   }
 
   /** Re-render nav panels so the active-page highlight stays current. */
@@ -484,40 +678,140 @@ export default class MomentumPlugin extends Plugin implements PAHost {
     }
   }
 
-  private lastDueNotified = "";
+  /** (Re)start the periodic Google Tasks sync interval based on current settings. */
+  resetGoogleSyncInterval(): void {
+    if (this.googleSyncIntervalId !== null) {
+      window.clearInterval(this.googleSyncIntervalId);
+      this.googleSyncIntervalId = null;
+    }
+    const mins = this.settings.googleSyncInterval;
+    if (!mins || !this.settings.googleTasksEnabled || !this.settings.googleToken) return;
+    this.googleSyncIntervalId = window.setInterval(() => void this.syncGoogleTasks(true), mins * 60 * 1000);
+  }
 
-  /** Generate any due recurring tasks and fire desktop notifications (while Obsidian is open). */
-  private async runTaskAutomations(): Promise<void> {
+  // ── Google Tasks integration ──────────────────────────────────────────────
+
+  private gtSync(): GTSyncService {
+    return new GTSyncService(
+      this.store,
+      () => this.settings.googleToken,
+      async (t) => { this.settings.googleToken = t; await this.saveSettings(); },
+      {
+        get: (id) => this.settings.gtBaselines?.[id],
+        set: (id, b) => { (this.settings.gtBaselines ??= {})[id] = b; },
+        remove: (id) => { if (this.settings.gtBaselines) delete this.settings.gtBaselines[id]; },
+        keys: () => Object.keys(this.settings.gtBaselines ?? {}),
+        save: async () => { await this.saveSettings(); },
+      },
+    );
+  }
+
+  async connectGoogleTasks(): Promise<void> {
+    const logLines: string[] = [`# Google Tasks Auth Log\n\nStarted: ${new Date().toISOString()}\n`];
+    const log = (msg: string) => { logLines.push(`- ${msg}`); };
+    const flushLog = async () => {
+      try {
+        const logPath = `${this.settings.dataRoot}/Config/google-auth-debug.md`;
+        const f = this.app.vault.getAbstractFileByPath(logPath);
+        const content = logLines.join("\n");
+        if (f instanceof TFile) await this.app.vault.modify(f, content);
+        else await this.app.vault.create(logPath, content);
+      } catch { /* best-effort */ }
+    };
     try {
-      const created = await this.store.generateDueRecurringTasks();
-      if (created.length) {
-        await this.notify("Momentum Life", created.length === 1 ? `New recurring task: ${created[0]}` : `${created.length} recurring tasks added`);
-        this.app.workspace.getLeavesOfType(VIEW_TYPE_PA).forEach((l) => { if (l.view instanceof PAView) l.view.rerender(); });
+      log("Calling authorizeGoogle…");
+      await flushLog();
+      new Notice("Opening Google authorisation in your browser…");
+      const token = await authorizeGoogle(Platform.isMobileApp, (url) => { log(`Opening URL: ${url.slice(0, 80)}…`); window.open(url, "_blank"); }, log);
+      log(`Token received — email: ${token.email}, hasAccess: ${!!token.access_token}, hasRefresh: ${!!token.refresh_token}`);
+      this.settings.googleToken = token;
+      this.settings.googleTasksEnabled = true;
+      await this.saveSettings();
+      log("Settings saved successfully.");
+      await flushLog();
+      new Notice(`✓ Connected as ${token.email || "Google user"}. Syncing…`);
+      const settingTab = (this.app as unknown as { setting?: { open: () => void; openTabById: (id: string) => void } }).setting;
+      if (settingTab) { settingTab.open(); settingTab.openTabById(this.manifest.id); }
+      // Kick off an initial sync right after connecting.
+      void this.syncGoogleTasks(true);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log(`ERROR: ${msg}`);
+      await flushLog();
+      if (msg.includes("MOBILE_PENDING")) {
+        new Notice("Please complete authorisation in the browser. Run 'connect' again after approving.");
+        return;
       }
-      await this.maybeNotifyDue();
-    } catch { /* automations are best-effort */ }
+      new Notice(`Google tasks connection failed: ${msg}`);
+    }
   }
 
-  /** Once per day, notify about tasks whose due date is today and are not done. */
-  private async maybeNotifyDue(): Promise<void> {
-    if (!this.settings.notifyTasks) return;
-    const today = todayLocal();
-    if (this.lastDueNotified === today) return;
-    const due = this.store.loadTasks().filter((t) => t.due === today && t.status !== "done");
-    if (!due.length) return;
-    this.lastDueNotified = today;
-    await this.notify("Tasks due today", due.length === 1 ? due[0].title : `${due.length} tasks are due today`);
-  }
-
-  /** Show a native desktop notification, if enabled and available. Desktop-only. */
-  private async notify(title: string, body: string): Promise<void> {
-    if (!this.settings.notifyTasks || !Platform.isDesktopApp) return;
+  async syncGoogleTasks(silent = false): Promise<void> {
+    if (!this.settings.googleTasksEnabled || !this.settings.googleToken) {
+      if (!silent) new Notice("Google tasks sync is not enabled or not connected.");
+      return;
+    }
+    // Persistent progress banner (duration 0 = stays until we hide it) so the user sees
+    // the sync is running and its progress, and knows not to edit tasks until it finishes.
+    const progress = new Notice("⏳ Google tasks: preparing sync… (please don't edit tasks yet)", 0);
+    const onProgress = (p: { phase: string; done: number; total: number }) => {
+      if (p.phase === "fetching") {
+        progress.setMessage(p.total ? `⏳ Google tasks: reading lists ${p.done}/${p.total}…` : "⏳ Google tasks: reading lists…");
+      } else if (p.phase === "applying" && p.total > 0) {
+        progress.setMessage(`⏳ Google tasks: syncing ${p.done}/${p.total}… (please don't edit tasks yet)`);
+      } else if (p.phase === "finishing") {
+        progress.setMessage("⏳ Google tasks: finishing…");
+      }
+    };
+    const logLines: string[] = [`# Google Tasks Sync Log\n\nStarted: ${new Date().toISOString()}\n`];
+    const log = (msg: string) => { logLines.push(`- ${msg}`); };
+    const flushLog = async () => {
+      try {
+        const logPath = `${this.settings.dataRoot}/Config/google-sync-debug.md`;
+        const f = this.app.vault.getAbstractFileByPath(logPath);
+        const content = logLines.join("\n");
+        if (f instanceof TFile) await this.app.vault.modify(f, content);
+        else await this.app.vault.create(logPath, content);
+      } catch { /* best-effort */ }
+    };
     try {
-      const N = window.Notification;
-      if (!N) return;
-      if (N.permission === "default") await N.requestPermission();
-      if (N.permission === "granted") new N(title, { body });
-    } catch { /* notifications are best-effort */ }
+      log("Starting sync…");
+      // All syncs (startup, interval, and manual) run the FULL pipeline — including
+      // deletion propagation and list consolidation — and bypass the mass-change guard.
+      // (User choice: automatic runs are treated exactly like a manual "Sync now".)
+      // When a mass deletion trips the safety guard, ask the user to decide (a glitch could
+      // otherwise wipe real data). Resolves true to proceed, false (or dismiss) to keep everything.
+      const confirmMass = (msg: string) => new Promise<boolean>((resolve) => {
+        let done = false;
+        const modal = new ConfirmModal(this.app, msg, () => { done = true; resolve(true); });
+        modal.onClose = () => { modal.contentEl.empty(); if (!done) resolve(false); };
+        modal.open();
+      });
+      const result = await this.gtSync().sync({ confirmed: true, onProgress, confirmMass });
+      log(`Done: pushed=${result.pushed} pulled=${result.pulled} linked=${result.linked} blocked=${result.blocked} errors=${result.errors.length}`);
+      if (result.errors.length) result.errors.forEach((e) => log(`  ERROR: ${e}`));
+      await flushLog();
+      await this.syncMirrors();
+      this.app.workspace.getLeavesOfType(VIEW_TYPE_PA).forEach((l) => { if (l.view instanceof PAView) l.view.rerender(); });
+      progress.hide();
+      if (result.blocked > 0) {
+        // Surface the guard even on automatic runs so the user knows nothing was pushed.
+        new Notice(`Google sync paused: ${result.blocked} pending changes. Open the plugin and click "Sync now" to confirm.`);
+      } else if (!silent) {
+        const extra = [
+          result.linked ? `${result.linked} linked` : "",
+          result.deleted ? `${result.deleted} deleted` : "",
+          result.orphaned ? `${result.orphaned} archived` : "",
+          result.errors.length ? `${result.errors.length} error(s)` : "",
+        ].filter(Boolean).join(", ");
+        new Notice(`Google Tasks sync done: ↑${result.pushed} pushed, ↓${result.pulled} pulled${extra ? `, ${extra}` : ""}.`);
+      }
+    } catch (e) {
+      progress.hide();
+      log(`FATAL: ${e instanceof Error ? e.message : String(e)}`);
+      await flushLog();
+      if (!silent) new Notice(`Google Tasks sync failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
 
   onunload(): void {}
@@ -551,7 +845,7 @@ class PASettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Task notifications")
-      .setDesc("Show desktop notifications for new recurring tasks and tasks due today. Desktop only, and only while the app is open.")
+      .setDesc("Show desktop notifications for tasks due today. Desktop only, and only while the app is open.")
       .addToggle((t) =>
         t.setValue(this.plugin.settings.notifyTasks).onChange(async (v) => {
           this.plugin.settings.notifyTasks = v;
@@ -589,5 +883,71 @@ class PASettingTab extends PluginSettingTab {
           window.open("https://buymeacoffee.com/jnagase", "_blank");
         })
       );
+
+    // ── Google Tasks ──────────────────────────────────────────────────────
+    new Setting(containerEl).setName("Google tasks").setHeading();
+
+    const token = this.plugin.settings.googleToken;
+    const connected = !!token?.access_token;
+
+    // eslint-disable-next-line @typescript-eslint/no-deprecated
+    const rerender = () => { containerEl.empty(); this.display(); };
+
+    new Setting(containerEl)
+      .setName("Enable Google tasks sync")
+      .setDesc("Sync momentum tasks bidirectionally with Google tasks.")
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.googleTasksEnabled).onChange(async (v) => {
+          this.plugin.settings.googleTasksEnabled = v;
+          await this.plugin.saveSettings();
+          rerender();
+        })
+      );
+
+    if (this.plugin.settings.googleTasksEnabled) {
+      new Setting(containerEl)
+        .setName("Google account")
+        .setDesc(connected ? `Connected as ${token.email || "Google user"}` : "Not connected.")
+        .addButton((b) => {
+          if (connected) {
+            b.setButtonText("Disconnect").onClick(async () => {
+              this.plugin.settings.googleToken = null;
+              await this.plugin.saveSettings();
+              rerender();
+            });
+          } else {
+            b.setButtonText("Connect Google account").setCta().onClick(() => {
+              void this.plugin.connectGoogleTasks().then(() => rerender());
+            });
+          }
+        });
+
+      if (connected) {
+        new Setting(containerEl)
+          .setName("Auto-sync interval")
+          .setDesc("How often to sync automatically. Syncs once on startup always.")
+          .addDropdown((d) => {
+            d.addOption("0", "Manual only");
+            d.addOption("5", "Every 5 minutes");
+            d.addOption("10", "Every 10 minutes");
+            d.addOption("15", "Every 15 minutes");
+            d.setValue(String(this.plugin.settings.googleSyncInterval ?? 0));
+            d.onChange(async (v) => {
+              this.plugin.settings.googleSyncInterval = parseInt(v, 10) || 0;
+              await this.plugin.saveSettings();
+              this.plugin.resetGoogleSyncInterval();
+            });
+          });
+
+        new Setting(containerEl)
+          .setName("Sync now")
+          .setDesc("Push all boards/tasks to Google tasks and pull new ones.")
+          .addButton((b) =>
+            b.setButtonText("Sync now").setCta().onClick(() => {
+              void this.plugin.syncGoogleTasks();
+            })
+          );
+      }
+    }
   }
 }

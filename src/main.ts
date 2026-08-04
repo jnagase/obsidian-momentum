@@ -831,6 +831,10 @@ class PASettingTab extends PluginSettingTab {
     this.plugin = plugin;
   }
   display(): void {
+    this.renderSettings();
+  }
+
+  private renderSettings(): void {
     const { containerEl } = this;
     containerEl.empty();
     new Setting(containerEl)
@@ -893,8 +897,7 @@ class PASettingTab extends PluginSettingTab {
     const token = this.plugin.settings.googleToken;
     const connected = !!token?.access_token;
 
-    // eslint-disable-next-line @typescript-eslint/no-deprecated
-    const rerender = () => { containerEl.empty(); this.display(); };
+    const rerender = () => { containerEl.empty(); this.renderSettings(); };
 
     new Setting(containerEl)
       .setName("Enable Google tasks sync")

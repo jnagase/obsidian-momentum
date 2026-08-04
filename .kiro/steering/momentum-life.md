@@ -46,14 +46,10 @@ nossas conversas. Vale para toda interação neste repositório.
 - Staging do commit: adicionar explicitamente (`manifest.json package.json versions.json
   styles.css eslint.config.mjs src mcp .kiro/steering`). **Não commitar** `.kiro/settings/`
   nem `.vscode/` (config de máquina). `node_modules`, `main.js`, `*.log` já são ignorados.
-- **Secret / push protection:** `src/googletasks.ts` tem `CLIENT_ID`/`CLIENT_SECRET` do
-  Google hardcoded. O GitHub **bloqueia o push** (secret scanning); em 0.5.0 foi **liberado
-  manualmente** pelos links de unblock. O secret já está público nos `main.js` de releases
-  antigos. **DÍVIDA TÉCNICA (prioridade):** migrar o OAuth pra um **proxy (Cloudflare
-  Worker)** com o secret **server-side** — tira o secret do repo/`main.js`, resolve o
-  cross-platform desktop+mobile (redirect hospedado + deep-link `obsidian://`) e habilita o
-  gate de monetização. ("Desktop app" sozinho não cobre mobile; "Web app" exige secret
-  confidencial que um plugin distribuído não esconde.)
+- **Secret / push protection:** RESOLVIDO na 0.5.1 — o secret saiu do plugin (foi pro
+  Cloudflare Worker, ver seção "Google Tasks sync"). Commits novos não têm secret, então o
+  push não é mais bloqueado. (A 0.5.0 teve o secret liberado manualmente pelos links de
+  unblock; o antigo continua público nos `main.js` de releases ≤0.5.0 → rotacionar.)
 
 ## Ambiente (importante)
 - **Vault de teste:** `/Users/jnagase/Documents/obsidian_1/` (NÃO é `Obsidian_jnagase`).
@@ -115,9 +111,20 @@ nossas conversas. Vale para toda interação neste repositório.
 - Operações **destrutivas** (propagação de deleção, de-dupe) são **manuais**, nunca
   automáticas num upgrade.
 
-## Google Tasks sync (`src/gtSync.ts`, `src/googletasks.ts`)
-- OAuth PKCE via servidor HTTP local na porta 42813, usando `requestUrl` (sem servidor
-  intermediário). CLIENT_ID/SECRET hardcoded (honor-system; monetização é ideia futura).
+## Google Tasks sync (`src/gtSync.ts`, `src/googletasks.ts`) — BETA
+- Marcado **(beta)** na UI (header das settings, tag vermelha `.pa-beta-tag`), no
+  `whatsnew.ts` e no README. Off por padrão.
+- **Auth via Cloudflare Worker** (`worker/`): o Worker `momentum-google` (subdomínio
+  `jaime-nagase` → `https://momentum-google.jaime-nagase.workers.dev`) guarda os secrets
+  `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` **server-side**. O plugin **não embarca
+  secret**. Fluxo PKCE: plugin → Worker `/auth` → Google → Worker `/callback` → deep-link
+  `obsidian://momentum-google` (via `registerObsidianProtocolHandler`, mesmo caminho
+  desktop e mobile) → plugin `/exchange` e `/refresh`. `WORKER_BASE` fica em
+  `googletasks.ts`. O redirect `/callback` está registrado no client **Web** que termina
+  em `8btbj3o6...` no Google Cloud. Deploy do Worker: `cd worker && npx wrangler deploy`;
+  secrets via `npx wrangler secret put <NOME>` (o NOME é fixo, o valor vai no prompt/stdin).
+- **DÍVIDA:** rotacionar o `client_secret` no Google Cloud (o antigo vazou nos `main.js`
+  de releases ≤0.5.0) e atualizar no Worker com `wrangler secret put GOOGLE_CLIENT_SECRET`.
 - **Chave de sync = `google_id` (+ `google_list`)** no frontmatter da task. Casa por id
   estável, nunca por título → rename seguro, sem duplicata por título.
 - **Baseline por item** (persistido em `data.json`, `gtBaselines`): merge 3-way — só

@@ -207,6 +207,7 @@ export class PADataStore {
     if (m.expense_categories) cfg.expenseCategories = coerce(m.expense_categories, cfg.expenseCategories);
     if (m.income_categories) cfg.incomeCategories = coerce(m.income_categories, cfg.incomeCategories);
     if (m.custom_pages) cfg.customPages = coerce(m.custom_pages, cfg.customPages);
+    if (m.board_order) cfg.boardOrder = coerce(m.board_order, cfg.boardOrder);
     return cfg;
   }
 
@@ -238,6 +239,7 @@ export class PADataStore {
       expense_categories: cfg.expenseCategories,
       income_categories: cfg.incomeCategories,
       custom_pages: cfg.customPages,
+      board_order: cfg.boardOrder || [],
       modified: new Date().toISOString(),
     };
     await this.writeFile("Config/settings.md", this.buildDoc(meta, "# Personal Assistant Config\n"));
@@ -396,16 +398,119 @@ export class PADataStore {
         changed = true;
         return `${key}: "${val.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
       }
+      // An UNQUOTED value containing ": " reads as a nested mapping and breaks the block
+      // (e.g. `title: Script provisionador (scripts/provision.sh): roda ...`). Quote it.
+      const quoted = (val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"));
+      if (!quoted && (/:\s/.test(val) || val.endsWith(":"))) {
+        changed = true;
+        return `${key}: "${val.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+      }
       return line;
     });
+    // A repeated top-level key (e.g. google_id written twice) is also invalid YAML and
+    // breaks the whole block the same way. Collapse duplicates: keep the LAST value (the
+    // most recent write) at the position of the FIRST occurrence, so key order is stable.
+    const scalarKey = (line: string): string | null => {
+      const m = line.match(/^([A-Za-z0-9_-]+):[ \t]+\S.*$/);
+      return m ? m[1] : null;
+    };
+    const lastByKey = new Map<string, string>();
+    const counts = new Map<string, number>();
+    for (const line of fixedLines) {
+      const key = scalarKey(line);
+      if (!key) continue;
+      lastByKey.set(key, line);
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    let hasDupes = false;
+    for (const n of counts.values()) if (n > 1) { hasDupes = true; break; }
+    let outLines = fixedLines;
+    if (hasDupes) {
+      changed = true;
+      const emitted = new Set<string>();
+      outLines = fixedLines.filter((line) => {
+        const key = scalarKey(line);
+        if (!key || (counts.get(key) ?? 0) < 2) return true;
+        if (emitted.has(key)) return false;
+        emitted.add(key);
+        return true;
+      }).map((line) => {
+        const key = scalarKey(line);
+        return key && (counts.get(key) ?? 0) > 1 ? (lastByKey.get(key) as string) : line;
+      });
+    }
     if (!changed) return false;
-    await this.app.vault.modify(f, raw.slice(0, fmStart) + fixedLines.join("\n") + raw.slice(closeIdx));
+    await this.app.vault.modify(f, raw.slice(0, fmStart) + outLines.join("\n") + raw.slice(closeIdx));
     return true;
   }
 
   /** Public single-file repair (used by adoption before it writes frontmatter). */
   async repairTaskFile(f: TFile): Promise<boolean> {
     try { return await this.repairFrontmatterText(f); } catch { return false; }
+  }
+
+  /**
+   * Every `google_id` that appears in the RAW TEXT of an active task note. Read straight from
+   * the files instead of the metadata cache on purpose: a note whose frontmatter momentarily
+   * fails to parse (malformed YAML, a half-downloaded Obsidian Sync file) disappears from
+   * `loadTasks()`, and the sync would then conclude the note was deleted and remove the task
+   * from Google. This set is the shield against that — if the id is still written somewhere,
+   * the note exists and its Google task must NOT be deleted.
+   */
+  async rawGoogleIds(): Promise<Set<string>> {
+    const listsPrefix = this.full("Tasks/Lists") + "/";
+    const orphanPrefix = this.full("Tasks/_orphaned") + "/";
+    const tasksPrefix = this.full("Tasks") + "/";
+    const files = this.app.vault.getMarkdownFiles().filter((f) =>
+      f.path.startsWith(tasksPrefix) &&
+      !f.path.startsWith(listsPrefix) && !f.path.startsWith(orphanPrefix));
+    const ids = new Set<string>();
+    for (const f of files) {
+      try {
+        const raw = await this.app.vault.cachedRead(f);
+        const m = raw.match(/^google_id:\s*"?([A-Za-z0-9_-]+)"?\s*$/m);
+        if (m) ids.add(m[1]);
+      } catch { /* unreadable file → skip (it can't shield an id it doesn't show) */ }
+    }
+    return ids;
+  }
+
+  /** Repair a task note's frontmatter by vault path (used by sync reconciliation). */
+  async repairTaskFileByPath(path: string): Promise<boolean> {
+    const f = this.app.vault.getAbstractFileByPath(path);
+    return f instanceof TFile ? await this.repairTaskFile(f) : false;
+  }
+
+  /**
+   * The FILENAME is a note's title in Obsidian, so a task whose frontmatter `title` is still
+   * the "Untitled" placeholder while its file has a real name is stale — that happens because
+   * Obsidian writes "Untitled.md" first and the note is adopted before the user names it. The
+   * rename listener fixes the local case; this sweep also covers renames that arrive from
+   * ANOTHER DEVICE through Obsidian Sync (no local rename event fires for those).
+   * Idempotent; returns how many titles were realigned.
+   */
+  async repairTaskTitles(): Promise<number> {
+    const listsPrefix = this.full("Tasks/Lists") + "/";
+    const orphanPrefix = this.full("Tasks/_orphaned") + "/";
+    const tasksPrefix = this.full("Tasks") + "/";
+    const files = this.app.vault.getMarkdownFiles().filter((f) =>
+      f.path.startsWith(tasksPrefix) &&
+      !f.path.startsWith(listsPrefix) && !f.path.startsWith(orphanPrefix) &&
+      f.name !== "boards.md" && f.name !== "recurring.md");
+    let fixed = 0;
+    for (const f of files) {
+      const m = this.frontmatter(f);
+      if (str(m.type) !== "task") continue;
+      const current = str(m.title);
+      const isPlaceholder = !current || current.toLowerCase() === "untitled";
+      const nameIsReal = f.basename && f.basename.toLowerCase() !== "untitled";
+      if (!isPlaceholder || !nameIsReal || current === f.basename) continue;
+      try {
+        await this.patchFrontmatter(f, (fm) => { fm.title = f.basename; fm.modified = new Date().toISOString(); });
+        fixed++;
+      } catch { /* skip a note that can't be written */ }
+    }
+    return fixed;
   }
 
   /**

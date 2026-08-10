@@ -143,7 +143,7 @@ export class MomentumStore {
       studyColumns: DEFAULT_TASK_COLUMNS.slice(), studyColumnNames: { ...DEFAULT_TASK_COLUMN_NAMES },
       studyTopics: [], customSplits: [], splitNames: {}, currency: "$", monthlyBudget: 0,
       expenseCategories: DEFAULT_EXPENSE_CATEGORIES.slice(), incomeCategories: DEFAULT_INCOME_CATEGORIES.slice(),
-      customPages: [],
+      customPages: [], boardOrder: [],
     };
     const raw = await this.readRaw("Config/settings.md");
     if (!raw) return cfg;
@@ -164,6 +164,7 @@ export class MomentumStore {
     if (m.expense_categories) cfg.expenseCategories = coerce(m.expense_categories, cfg.expenseCategories);
     if (m.income_categories) cfg.incomeCategories = coerce(m.income_categories, cfg.incomeCategories);
     if (m.custom_pages) cfg.customPages = coerce(m.custom_pages, cfg.customPages);
+    if (m.board_order) cfg.boardOrder = coerce(m.board_order, cfg.boardOrder);
     return cfg;
   }
 
@@ -178,6 +179,7 @@ export class MomentumStore {
       currency: cfg.currency, monthly_budget: cfg.monthlyBudget,
       expense_categories: cfg.expenseCategories, income_categories: cfg.incomeCategories,
       custom_pages: cfg.customPages || [],
+      board_order: cfg.boardOrder || [],
       modified: new Date().toISOString(),
     };
     await this.writeRel("Config/settings.md", this.buildDoc(meta, "# Personal Assistant Config\n"));

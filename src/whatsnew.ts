@@ -6,6 +6,35 @@ export interface ChangeEntry { version: string; sections: ChangeSection[]; }
 /** Release notes shown in the "What's new" dialog, newest first. */
 export const CHANGELOG: ChangeEntry[] = [
   {
+    version: "0.5.9",
+    sections: [
+      {
+        title: "New — find and arrange your tasks",
+        items: [
+          "Search tasks from the Tasks & Lists header: type a couple of words (title, board, group or due date) and the card is opened on its board and briefly highlighted, so you can see exactly where it lives.",
+          "Reorder your board tabs by dragging them. \"My Tasks\" stays pinned first; the order is remembered in your settings note. Keyboard users can use \"Move board left/right\" in the board menu.",
+          "\"Sync now\" button for Google tasks (beta) right in the header. If sync isn't set up yet, it shows a short walkthrough instead of doing nothing.",
+        ],
+      },
+      {
+        title: "Fixed",
+        items: [
+          "Tasks created by hand no longer get stuck as \"Untitled\": the note's filename is now the task title, and titles are realigned automatically — including renames that arrive from another device.",
+          "Adding a card with an empty title now tells you a title is required instead of silently closing.",
+          "Cards could get stuck in their column when a note's properties were malformed (duplicate keys, or a value containing \": \"). Those are repaired automatically now.",
+        ],
+      },
+      {
+        title: "Improved — safer Google tasks sync (beta)",
+        items: [
+          "A task is never deleted from Google just because its note momentarily fails to load (for example a file still syncing between devices) — the sync now double-checks the files first.",
+          "Duplicates created by syncing on two devices at once are reconciled automatically: one task and one note survive, chosen the same way on every device.",
+          "The sync log now records what was deleted or archived and why.",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.5.1",
     sections: [
       {

@@ -267,6 +267,35 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       })();
     }));
 
+    // A task note renamed in the vault keeps its frontmatter `title` in step with the new
+    // filename. This is what rescues the common flow of creating a note by hand: Obsidian
+    // first writes "Untitled.md", the plugin adopts it (title "Untitled"), and only THEN
+    // does the file get its real name — without this the card would stay "Untitled" forever.
+    this.registerEvent(this.app.vault.on("rename", (file, oldPath) => {
+      if (!(file instanceof TFile) || file.extension !== "md") return;
+      const tasksPrefix = this.store.full("Tasks") + "/";
+      const listsPrefix = this.store.full("Tasks/Lists") + "/";
+      const orphanPrefix = this.store.full("Tasks/_orphaned") + "/";
+      if (!file.path.startsWith(tasksPrefix)) return;
+      if (file.path.startsWith(listsPrefix) || file.path.startsWith(orphanPrefix)) return;
+      const oldBase = oldPath.split("/").pop()?.replace(/\.md$/, "") ?? "";
+      void (async () => {
+        try {
+          const cache = this.app.metadataCache.getFileCache(file);
+          if (cache?.frontmatter?.["type"] !== "task") return;
+          const current = String(cache.frontmatter["title"] ?? "");
+          // Only follow the filename when the title was a placeholder or mirrored the old
+          // name — never clobber a title the user deliberately made different.
+          const placeholder = !current || current.toLowerCase() === "untitled";
+          if (!placeholder && current !== oldBase) return;
+          if (current === file.basename) return;
+          await this.store.patchFrontmatter(file, (fm) => { fm.title = file.basename; });
+          await this.syncMirrors();
+          this.app.workspace.getLeavesOfType(VIEW_TYPE_PA).forEach((l) => { if (l.view instanceof PAView) l.view.rerender(); });
+        } catch { /* best-effort: a rename should never break on a bad note */ }
+      })();
+    }));
+
     // Inbox: normalise any .md file created in Tasks/ (but NOT in Tasks/Lists/) that
     // doesn't yet have a valid Momentum frontmatter. This lets other plugins, widgets,
     // or manual edits drop files there and have the plugin adopt them automatically.
@@ -299,6 +328,9 @@ export default class MomentumPlugin extends Plugin implements PAHost {
   /** Silent periodic upkeep: file any loose root notes into their board folder. */
   private async maintainTaskFolders(): Promise<void> {
     await this.store.migrateTaskFolders();
+    // Realign any task still carrying the "Untitled" placeholder while its file has a real
+    // name (covers renames that arrived from another device via Obsidian Sync).
+    await this.store.repairTaskTitles();
     await this.syncMirrors();
   }
 
@@ -344,6 +376,9 @@ export default class MomentumPlugin extends Plugin implements PAHost {
     for (const file of files) {
       await this.adoptTaskFile(file);
     }
+    // A note adopted while Obsidian still called it "Untitled.md" keeps that placeholder
+    // title; realign it with the real filename before the mirrors are written.
+    await this.store.repairTaskTitles();
     // Re-sync mirrors after adoption so new tasks appear in the lists.
     await this.syncMirrors();
   }
@@ -375,10 +410,20 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       const board = inBoardFolder && parent ? parent.name : "My Tasks";
       // Patch in the minimum required fields, preserving any existing frontmatter
       // fields and all body content.
+      // The FILENAME is the note's title in Obsidian, so it is the source of truth here.
+      // Obsidian does write "Untitled.md" before the user names the note, though: in that
+      // one case fall back to the first body line, and if the body is empty too the title is
+      // realigned later by the rename listener / repairTaskTitles sweep.
+      let adoptedTitle = file.basename;
+      if (!adoptedTitle || adoptedTitle.toLowerCase().startsWith("untitled")) {
+        const body = await this.store.readBody(file.path);
+        const firstLine = body.split("\n").map((l) => l.replace(/^#+\s*/, "").trim()).find((l) => l.length > 0);
+        if (firstLine) adoptedTitle = firstLine.slice(0, 120);
+      }
       await this.app.fileManager.processFrontMatter(file, (matter: Record<string, unknown>) => {
         if (!matter.type) matter.type = "task";
         if (!matter.task_id) matter.task_id = crypto.randomUUID ? crypto.randomUUID() : ("t" + Date.now());
-        if (!matter.title) matter.title = file.basename;
+        if (!matter.title) matter.title = adoptedTitle;
         if (!matter.status) matter.status = "backlog";
         matter.kanban_name = board;
         if (!matter.priority) matter.priority = "medium";
@@ -684,6 +729,19 @@ export default class MomentumPlugin extends Plugin implements PAHost {
     }
   }
 
+  /** True when the Google Tasks beta is enabled AND an account is connected. */
+  isGoogleTasksReady(): boolean {
+    return !!this.settings.googleTasksEnabled && !!this.settings.googleToken?.access_token;
+  }
+
+  /** Open this plugin's own settings tab (Obsidian's setting registry is untyped). */
+  openPluginSettings(): void {
+    const setting = (this.app as unknown as { setting?: { open: () => void; openTabById: (id: string) => void } }).setting;
+    if (!setting) { new Notice("Open settings → community plugins → momentum life."); return; }
+    setting.open();
+    setting.openTabById(this.manifest.id);
+  }
+
   /** (Re)start the periodic Google Tasks sync interval based on current settings. */
   resetGoogleSyncInterval(): void {
     if (this.googleSyncIntervalId !== null) {
@@ -790,7 +848,10 @@ export default class MomentumPlugin extends Plugin implements PAHost {
         modal.open();
       });
       const result = await this.gtSync().sync({ confirmed: true, onProgress, confirmMass });
-      log(`Done: pushed=${result.pushed} pulled=${result.pulled} linked=${result.linked} blocked=${result.blocked} errors=${result.errors.length}`);
+      // Log the destructive counters too (deleted/orphaned) — without them a sync that
+      // removed a Google task or archived a note left no trace to diagnose afterwards.
+      log(`Done: pushed=${result.pushed} pulled=${result.pulled} linked=${result.linked} deleted=${result.deleted} orphaned=${result.orphaned} blocked=${result.blocked} errors=${result.errors.length}`);
+      if (result.notes.length) result.notes.forEach((n) => log(`  ${n}`));
       if (result.errors.length) result.errors.forEach((e) => log(`  ERROR: ${e}`));
       await flushLog();
       await this.syncMirrors();

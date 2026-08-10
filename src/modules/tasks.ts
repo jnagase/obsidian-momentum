@@ -1,6 +1,6 @@
 import { PAContext } from "../context";
 import { Board, Task } from "../types";
-import { ConfirmModal, FieldSpec, FormModal, showActionMenu, toast, appendSidebarBtn } from "../ui";
+import { ConfirmModal, FieldSpec, FormModal, showActionMenu, toast, appendSidebarBtn, SearchModal, StepsModal, MenuAction } from "../ui";
 import { drawRing, drawScatter, ScatterPoint } from "../charts";
 import { renderCardChips } from "../cardchips";
 import { renderCardActions } from "../cardrender";
@@ -40,6 +40,10 @@ export class TasksModule {
   private currentBoard = "all";
   private view: "kanban" | "list" | "matrix" = "kanban";
   private colLimits: Record<string, number> = {};
+  /** Root of the last render, so search can scroll to and flash a card after re-rendering. */
+  private rootEl: HTMLElement | null = null;
+  /** Path of a task to reveal (scroll + flash) on the next render, set by search. */
+  private revealPath: string | null = null;
 
   constructor(ctx: PAContext) { this.ctx = ctx; }
 
@@ -63,14 +67,115 @@ export class TasksModule {
     return cols[Math.max(0, i - 1)];
   }
 
+  /**
+   * Board display order: "My Tasks" is always pinned first, then whatever order the user
+   * arranged (config `boardOrder`), then any remaining board alphabetically. Boards are
+   * folders, so a board created outside the plugin simply appears at the end.
+   */
+  private orderBoards(raw: Board[]): Board[] {
+    const pinnedFirst = (() => {
+      const i = raw.findIndex((b) => b.name === "My Tasks");
+      return i > 0 ? [raw[i], ...raw.filter((_, k) => k !== i)] : raw.slice();
+    })();
+    const custom = this.ctx.config.boardOrder || [];
+    if (!custom.length) return pinnedFirst;
+    const rank = new Map(custom.map((name, i) => [name, i]));
+    const rest = pinnedFirst.filter((b) => b.name !== "My Tasks");
+    rest.sort((a, b) => {
+      const ra = rank.has(a.name) ? (rank.get(a.name) as number) : Number.MAX_SAFE_INTEGER;
+      const rb = rank.has(b.name) ? (rank.get(b.name) as number) : Number.MAX_SAFE_INTEGER;
+      return ra - rb || a.name.localeCompare(b.name);
+    });
+    const my = pinnedFirst.find((b) => b.name === "My Tasks");
+    return my ? [my, ...rest] : rest;
+  }
+
+  /** Persist a new board order after moving `name` by `dir` (-1 left, +1 right). */
+  private async moveBoard(name: string, dir: -1 | 1, boards: Board[]): Promise<void> {
+    if (name === "My Tasks") { toast("My tasks stays first."); return; }
+    const movable = boards.filter((b) => b.name !== "My Tasks").map((b) => b.name);
+    const i = movable.indexOf(name);
+    const j = i + dir;
+    if (i < 0 || j < 0 || j >= movable.length) return;
+    [movable[i], movable[j]] = [movable[j], movable[i]];
+    const cfg = await this.ctx.store.loadConfig();
+    cfg.boardOrder = movable;
+    await this.ctx.store.saveConfig(cfg);
+    await this.ctx.reloadConfig();
+    this.ctx.refresh();
+  }
+
+  /**
+   * Search every task and jump to the chosen one: switch to its board in Kanban, make sure
+   * its column is expanded far enough to include it, then scroll to the card and flash it
+   * (the "here it is" cue, like Android's highlight-on-navigate).
+   */
+  private openSearch(): void {
+    const cols = this.ctx.config.taskColumns;
+    const colSet = new Set(cols);
+    const names = this.ctx.config.taskColumnNames;
+    const tasks = this.ctx.store.loadTasks();
+    if (!tasks.length) { toast("No tasks to search yet."); return; }
+    const items = tasks.map((t) => {
+      const col = colSet.has(t.status) ? t.status : cols[0];
+      const board = t.kanbanName || "My Tasks";
+      return {
+        value: t,
+        haystack: [t.title, board, t.group, t.due, this.cleanLabel(names[col] || col)].filter(Boolean).join(" "),
+        title: t.title,
+        subtitle: `${board} · ${this.cleanLabel(names[col] || col)}${t.due ? " · due " + t.due : ""}`,
+      };
+    });
+    new SearchModal(this.ctx.app, "Search tasks by title, board or group…", items, (t: Task) => {
+      const col = colSet.has(t.status) ? t.status : cols[0];
+      const board = t.kanbanName || "My Tasks";
+      this.view = "kanban";
+      this.currentBoard = board;
+      // The column paginates at PAGE_SIZE, so raise its limit enough for the card to exist.
+      const siblings = this.ctx.store.loadTasks()
+        .filter((x) => (x.kanbanName || "My Tasks") === board && (colSet.has(x.status) ? x.status : cols[0]) === col);
+      this.colLimits[board + "|" + col] = Math.max(siblings.length, PAGE_SIZE);
+      this.revealPath = t.path;
+      this.ctx.refresh();
+    }).open();
+  }
+
+  /** Walkthrough shown when "sync now" is pressed before Google Tasks is connected. */
+  private openGoogleSetup(): void {
+    new StepsModal(this.ctx.app, {
+      title: "Connect Google tasks (beta)",
+      intro: "Sync isn't set up yet. It takes about a minute:",
+      steps: [
+        "Open the Momentum life settings (button below).",
+        "Scroll to \"Google tasks\" and turn on \"Enable Google tasks sync\".",
+        "Click \"Connect Google account\" — your browser opens Google's consent screen.",
+        "Approve access, then let the browser send you back to Obsidian.",
+        "The settings should now read \"Connected as …\". Optionally pick an auto-sync interval.",
+      ],
+      note: "Each board pairs with a Google tasks list of the same name, and \"My Tasks\" pairs with your default Google list. Sync also runs on startup once connected.",
+      primary: { label: "Open settings", onClick: () => this.ctx.openPluginSettings?.() },
+    }).open();
+  }
+
+  /** Scroll the pending card into view and flash it, then clear the pending reveal. */
+  private revealPendingCard(): void {
+    const path = this.revealPath;
+    const root = this.rootEl;
+    this.revealPath = null;
+    if (!path || !root) return;
+    window.setTimeout(() => {
+      const card = root.querySelector<HTMLElement>(`.pa-task[data-path="${CSS.escape(path)}"]`);
+      if (!card) return;
+      card.scrollIntoView({ behavior: "smooth", block: "center" });
+      card.addClass("pa-flash");
+      window.setTimeout(() => card.removeClass("pa-flash"), 1800);
+    }, 60);
+  }
+
   render(root: HTMLElement): void {
     root.empty();
-    const rawBoards = this.ctx.store.loadBoards();
-    // My Tasks is always pinned first.
-    const gtIdx = rawBoards.findIndex((b) => b.name === "My Tasks");
-    const boards = gtIdx > 0
-      ? [rawBoards[gtIdx], ...rawBoards.filter((_, i) => i !== gtIdx)]
-      : rawBoards;
+    this.rootEl = root;
+    const boards = this.orderBoards(this.ctx.store.loadBoards());
     const tasks = this.ctx.store.loadTasks();
     // Keep the standard-Markdown checkbox mirrors (Tasks/Lists/*.md) in sync with the board.
     void this.ctx.store.syncTaskLists();
@@ -89,6 +194,9 @@ export class TasksModule {
     } else {
       this.renderList(root, filtered);
     }
+
+    // A search pick asked to jump to a card: do it now that the DOM exists.
+    this.revealPendingCard();
   }
 
   // ---- Header: title + subtitle + status rings ----
@@ -97,7 +205,24 @@ export class TasksModule {
     const left = head.createDiv();
     left.createDiv({ text: "✅ Tasks & Lists", cls: "pa-h1" });
     left.createDiv({ text: compact ? "Summary" : "Kanban and list", cls: "pa-muted" });
-    if (!compact && this.ctx.openSidePanel) appendSidebarBtn(left, this.ctx.openSidePanel);
+    if (!compact) {
+      // All three header actions share one row: the sidebar link (secondary) then the two
+      // real buttons.
+      const tools = left.createDiv({ cls: "pa-ht-tools" });
+      if (this.ctx.openSidePanel) appendSidebarBtn(tools, this.ctx.openSidePanel);
+      const find = tools.createEl("button", { text: "🔍 Search tasks", cls: "pa-mini-btn" });
+      find.onclick = () => this.openSearch();
+      if (this.ctx.syncGoogleTasks) {
+        const sync = tools.createEl("button", { text: "🔄 Sync now", cls: "pa-mini-btn" });
+        sync.createSpan({ text: " (beta)", cls: "pa-beta-tag" });
+        sync.onclick = () => {
+          // Not connected yet → explain how to set it up instead of doing nothing.
+          if (this.ctx.googleTasksReady && !this.ctx.googleTasksReady()) { this.openGoogleSetup(); return; }
+          this.ctx.syncGoogleTasks?.();
+          toast("Google tasks sync started.");
+        };
+      }
+    }
 
     const cols = this.ctx.config.taskColumns;
     const names = this.ctx.config.taskColumnNames;
@@ -128,14 +253,67 @@ export class TasksModule {
   // ---- Board tabs ----
   private renderBoardTabs(root: HTMLElement, boards: Board[]): void {
     const bar = root.createDiv({ cls: "pa-tabs" });
-    const mkTab = (id: string, label: string) => {
+    const mkTab = (id: string, label: string): HTMLElement => {
       const t = bar.createEl("button", { text: label, cls: "pa-tab" + (this.currentBoard === id ? " on" : "") });
       t.onclick = () => { this.currentBoard = id; this.ctx.refresh(); };
+      return t;
     };
     mkTab("all", "📋 All");
-    boards.forEach((b) => mkTab(b.name, `${b.emoji || ""} ${b.name}`.trim()));
+    // Board tabs are reordered by DRAGGING them. "My Tasks" stays pinned first (it pairs with
+    // Google's default list), so it is neither draggable nor a drop slot.
+    boards.forEach((b) => {
+      const t = mkTab(b.name, `${b.emoji || ""} ${b.name}`.trim());
+      if (b.name === "My Tasks") return;
+      t.dataset.board = b.name;
+      t.setAttr("draggable", "true");
+      t.setAttr("title", "Drag to reorder");
+      t.addEventListener("dragstart", (e) => {
+        e.dataTransfer?.setData("text/plain", b.name);
+        t.addClass("pa-dragging");
+      });
+      t.addEventListener("dragend", () => t.removeClass("pa-dragging"));
+    });
     const add = bar.createEl("button", { text: "+ board", cls: "pa-tab pa-tab-add" });
     add.onclick = () => this.openBoardModal(boards);
+
+    bar.addEventListener("dragover", (e) => { e.preventDefault(); bar.addClass("pa-drop"); });
+    bar.addEventListener("dragleave", () => bar.removeClass("pa-drop"));
+    bar.addEventListener("drop", (e) => {
+      e.preventDefault();
+      bar.removeClass("pa-drop");
+      const name = e.dataTransfer?.getData("text/plain");
+      if (!name) return;
+      void this.dropBoard(bar, name, e.clientX, boards);
+    });
+  }
+
+  /** Persist the tab order after dropping `name` at horizontal position `x`. */
+  private async dropBoard(bar: HTMLElement, name: string, x: number, boards: Board[]): Promise<void> {
+    const order = boards.filter((b) => b.name !== "My Tasks").map((b) => b.name);
+    if (!order.includes(name)) return; // dropped something that isn't a movable board
+    const afterEl = this.getDropTargetTab(bar, x, name);
+    const rest = order.filter((n) => n !== name);
+    const afterName = afterEl?.dataset.board ?? null;
+    let idx = afterName ? rest.indexOf(afterName) : rest.length;
+    if (idx < 0) idx = rest.length;
+    rest.splice(idx, 0, name);
+    if (rest.join("\u0000") === order.join("\u0000")) return; // nothing moved
+    const cfg = await this.ctx.store.loadConfig();
+    cfg.boardOrder = rest;
+    await this.ctx.store.saveConfig(cfg);
+    await this.ctx.reloadConfig();
+    this.ctx.refresh();
+  }
+
+  /** The tab the dragged board should be inserted BEFORE, based on the cursor's X. */
+  private getDropTargetTab(bar: HTMLElement, x: number, dragging: string): HTMLElement | null {
+    const tabs = Array.from(bar.querySelectorAll<HTMLElement>(".pa-tab[data-board]"))
+      .filter((el) => el.dataset.board !== dragging);
+    for (const el of tabs) {
+      const box = el.getBoundingClientRect();
+      if (x < box.left + box.width / 2) return el;
+    }
+    return null;
   }
 
   // ---- Stats row ----
@@ -175,7 +353,15 @@ export class TasksModule {
     addCol.onclick = () => this.openAddColumnModal();
     if (board) {
       const kebab = actions.createEl("button", { text: "⋮", cls: "pa-icon-btn" });
+      // Tabs are reordered by dragging; these entries are the keyboard-accessible equivalent.
+      const movable = boards.filter((b) => b.name !== "My Tasks");
+      const mIdx = movable.findIndex((b) => b.name === board.name);
+      const moveItems: MenuAction[] = board.name === "My Tasks" ? [] : [
+        ...(mIdx > 0 ? [{ title: "Move board left", icon: "arrow-left", onClick: () => { void this.moveBoard(board.name, -1, boards); } }] : []),
+        ...(mIdx >= 0 && mIdx < movable.length - 1 ? [{ title: "Move board right", icon: "arrow-right", onClick: () => { void this.moveBoard(board.name, 1, boards); } }] : []),
+      ];
       kebab.onclick = (e) => showActionMenu(e, [
+        ...moveItems,
         { title: "Rename board", icon: "pencil", onClick: () => this.openRenameBoardModal(board, boards) },
         { title: "Delete board", icon: "trash", warning: true, onClick: () =>
           new ConfirmModal(this.ctx.app, `Delete board "${board.name}"? (its tasks move to My Tasks)`, async () => {
@@ -565,7 +751,9 @@ export class TasksModule {
       { key: "eisenhower", label: "Eisenhower quadrant", type: "dropdown", options: EISENHOWER_OPTS, value: task?.eisenhower || defaultQuadrant || "" },
     ];
     new FormModal(this.ctx.app, task ? "Edit task" : "New task", fields, async (v) => {
-      if (!(v.title || "").trim()) return;
+      // Never fail silently: an empty title used to close the modal with no card and no
+      // explanation, which looked like the "add card" button was broken.
+      if (!(v.title || "").trim()) { toast("A task needs a title."); return; }
       const data = { title: v.title.trim(), status: v.status, priority: v.priority, kanbanName: v.kanbanName, group: v.group, due: v.due, eisenhower: v.eisenhower };
       if (task) {
         await this.ctx.store.updateTask(task, data);

@@ -181,6 +181,8 @@ export interface PAConfig {
   expenseCategories: string[];
   incomeCategories: string[];
   customPages: CustomPage[];
+  /** User-chosen board order (names). Boards missing here fall back to alphabetical. */
+  boardOrder: string[];
 }
 
 export const DEFAULT_EXPENSE_CATEGORIES = ["Housing", "Food", "Transport", "Health", "Leisure", "Bills", "Shopping", "Other"];
@@ -234,5 +236,6 @@ export function defaultConfig(): PAConfig {
     expenseCategories: DEFAULT_EXPENSE_CATEGORIES.slice(),
     incomeCategories: DEFAULT_INCOME_CATEGORIES.slice(),
     customPages: [],
+    boardOrder: [],
   };
 }

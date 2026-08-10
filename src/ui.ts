@@ -1,4 +1,4 @@
-import { App, Modal, Notice, Setting, Menu } from "obsidian";
+import { App, Modal, Notice, Setting, Menu, SuggestModal } from "obsidian";
 
 export function toast(msg: string): void {
   new Notice(msg);
@@ -11,9 +11,13 @@ export interface MenuAction {
   onClick: () => void;
 }
 
-/** Append a "⇥ open in sidebar" button to a `.pa-ht-header .left` div if openSidePanel is set. */
+/**
+ * Append the "⇥ open in sidebar" action to a page header. It stays a <button> for keyboard
+ * and screen-reader semantics but is styled as a link, so it reads as a secondary action
+ * next to the real buttons instead of competing with them.
+ */
 export function appendSidebarBtn(parent: HTMLElement, openSidePanel: () => void): void {
-  const btn = parent.createEl("button", { text: "⇥ open in sidebar", cls: "pa-mini-btn pa-side-open" });
+  const btn = parent.createEl("button", { text: "⇥ open in sidebar", cls: "pa-link-btn pa-side-open" });
   btn.onclick = openSidePanel;
 }
 
@@ -207,6 +211,85 @@ export class FormModal extends Modal {
       this.modalEl.addClass("pa-modal-overflow-visible");
       this.contentEl.addClass("pa-modal-overflow-visible");
     }
+  }
+
+  onClose(): void { this.contentEl.empty(); }
+}
+
+/** One row of a {@link SearchModal}: what to match on, and what to show. */
+export interface SearchItem<T> {
+  value: T;
+  /** Text the query is matched against (title + board + group, for example). */
+  haystack: string;
+  title: string;
+  subtitle?: string;
+}
+
+/**
+ * Generic search palette (Obsidian's own suggest UI, so keyboard nav and theming come free).
+ * Matching is a simple case-insensitive AND of the query's words, which beats substring
+ * matching for finding a card by a couple of remembered words.
+ */
+export class SearchModal<T> extends SuggestModal<SearchItem<T>> {
+  private items: SearchItem<T>[];
+  private onPick: (value: T) => void;
+
+  constructor(app: App, placeholder: string, items: SearchItem<T>[], onPick: (value: T) => void) {
+    super(app);
+    this.items = items;
+    this.onPick = onPick;
+    this.setPlaceholder(placeholder);
+  }
+
+  getSuggestions(query: string): SearchItem<T>[] {
+    const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+    if (!words.length) return this.items.slice(0, 50);
+    return this.items.filter((it) => {
+      const hay = it.haystack.toLowerCase();
+      return words.every((w) => hay.includes(w));
+    }).slice(0, 50);
+  }
+
+  renderSuggestion(item: SearchItem<T>, el: HTMLElement): void {
+    el.createDiv({ text: item.title, cls: "pa-search-title" });
+    if (item.subtitle) el.createDiv({ text: item.subtitle, cls: "pa-search-sub" });
+  }
+
+  onChooseSuggestion(item: SearchItem<T>): void {
+    this.onPick(item.value);
+  }
+}
+
+/** A numbered how-to modal: intro, ordered steps, optional note and a primary action. */
+export class StepsModal extends Modal {
+  private opts: {
+    title: string;
+    intro?: string;
+    steps: string[];
+    note?: string;
+    primary?: { label: string; onClick: () => void };
+  };
+
+  constructor(app: App, opts: StepsModal["opts"]) {
+    super(app);
+    this.opts = opts;
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h3", { text: this.opts.title });
+    if (this.opts.intro) contentEl.createEl("p", { text: this.opts.intro, cls: "pa-steps-intro" });
+    const ol = contentEl.createEl("ol", { cls: "pa-steps-list" });
+    this.opts.steps.forEach((s) => ol.createEl("li", { text: s }));
+    if (this.opts.note) contentEl.createEl("p", { text: this.opts.note, cls: "pa-steps-note" });
+
+    const row = new Setting(contentEl);
+    if (this.opts.primary) {
+      const p = this.opts.primary;
+      row.addButton((b) => b.setButtonText(p.label).setCta().onClick(() => { this.close(); p.onClick(); }));
+    }
+    row.addButton((b) => b.setButtonText("Close").onClick(() => this.close()));
   }
 
   onClose(): void { this.contentEl.empty(); }

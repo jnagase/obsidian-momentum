@@ -61,6 +61,14 @@ nossas conversas. Vale para toda interação neste repositório.
   exit code costuma ser `-1` mesmo em sucesso. Padrão confiável:
   redirecionar a saída para um arquivo de log no workspace (`cmd > mm.log 2>&1`), depois
   ler com a ferramenta de leitura, e por fim apagar o log (`rm -f mm.log`).
+- **NUNCA editar arquivos do vault com `sed`/shell** (lição aprendida na prática): o comando
+  chega mangled (caracteres especiais como `/`, `<`, `>`, `"` são comidos) e **corrompe dados
+  do usuário**. Para escrever/corrigir notas do vault, usar o **MCP** (`create_task`,
+  `update_task` — grava frontmatter com `JSON.stringify`, escapando certo) ou as ferramentas
+  de edição de arquivo. Shell no vault só para **leitura** (`ls`, `cat`, `grep`, `find`).
+- **Não editar o vault com o Obsidian ABERTO.** O plugin reage às mudanças em disco (adopt,
+  sync, arquivamento) e briga com a edição — já resultou em card arquivado em `_orphaned` no
+  meio de uma correção. Pedir ao usuário para fechar o Obsidian antes de mexer.
 - **NÃO rodar scripts Python** — travam em "working" por muito tempo. O usuário reclamou.
 - Evitar comandos pesados/lentos (find recursivo grande, greps enormes) — podem travar.
 - Preferir `requestUrl` (Obsidian) a `fetch`. Usar `window.setTimeout`, não `setTimeout`.
@@ -85,6 +93,22 @@ nossas conversas. Vale para toda interação neste repositório.
 - `Tasks/_orphaned/` é arquivo morto: excluída dos boards, do load e do sync.
 - **Criar task à mão** = largar um `.md` numa pasta de board (ou na raiz `Tasks/` → cai em
   My Tasks). O plugin adota, repara frontmatter e arquiva.
+- **O NOME DO ARQUIVO é o título da task.** O Obsidian cria a nota como `Untitled.md` **antes**
+  do usuário digitar, então adotar naquele instante gravava `title: Untitled` pra sempre.
+  Três camadas garantem o título: (1) adopt usa o `basename` (e só se ele for "Untitled" cai
+  pra primeira linha/heading do corpo); (2) listener de `rename` mantém o `title` em sincronia
+  com o nome do arquivo (só sobrescreve placeholder ou título que espelhava o nome antigo);
+  (3) `repairTaskTitles()` — varredura no startup e a cada 5 min — realinha qualquer task com
+  `title: Untitled` cujo arquivo tem nome real. A camada (3) é essencial porque **rename feito
+  em OUTRO device chega via Obsidian Sync sem disparar evento de rename local**.
+- **Ordem dos boards**: "My Tasks" fixo em primeiro; o resto o usuário reordena com ◀ ▶ no
+  board bar. Persistida em `Config/settings.md` (`board_order`, campo `boardOrder`). Board
+  ausente da lista cai no fim em ordem alfabética (board criado por fora nunca desaparece).
+- **Busca de tasks** (`SearchModal` em `ui.ts`, sobre o `SuggestModal` do Obsidian): casa por
+  palavras soltas (AND) em título+board+grupo+data+coluna. Ao escolher, pula pro board em
+  Kanban, **eleva o `colLimits` da coluna** (senão o card paginado nem existe no DOM), rola
+  até ele e aplica a classe `.pa-flash` (destaque estilo Android). Respeita
+  `prefers-reduced-motion`.
 - **Recurrency de TASKS foi REMOVIDA — não reintroduzir.** (Gerava duplicação em loop.)
   Recurring de FINANÇAS (`Finance/recurring.md`) continua existindo, é outra coisa.
 
@@ -105,9 +129,13 @@ nossas conversas. Vale para toda interação neste repositório.
   transparente** (com um Notice). Bumpar o número faz re-rodar.
 - **Não-destrutivas**: usam `vault.rename` (move puro, **sem o prompt "update links"** do
   Obsidian — os links resolvem por basename, então mover de pasta não quebra `[[links]]`).
-- Reparo de frontmatter YAML malformado (ex.: título não-aspado `title: [gbm] ...` que
-  quebra o parser) é feito no texto cru (`repairTaskFrontmatter`) — roda na migração e no
-  adopt, pra o `processFrontMatter` (usado pelo botão done) voltar a funcionar.
+- Reparo de frontmatter YAML malformado é feito no texto cru (`repairTaskFrontmatter` /
+  `repairFrontmatterText`) — roda na migração e no adopt, pra o `processFrontMatter` (usado
+  pelo botão done e por mover card) voltar a funcionar. Cobre dois casos:
+  (1) valor que abre flow collection sem fechar (ex.: título não-aspado `title: [gbm] ...`);
+  (2) **chave duplicada** (ex.: `google_id`/`google_list` escritos duas vezes) — colapsa
+  mantendo o **valor mais recente** na posição da **primeira** ocorrência. Chave repetida é
+  YAML inválido e trava o card do mesmo jeito.
 - Operações **destrutivas** (propagação de deleção, de-dupe) são **manuais**, nunca
   automáticas num upgrade.
 
@@ -123,8 +151,15 @@ nossas conversas. Vale para toda interação neste repositório.
   `googletasks.ts`. O redirect `/callback` está registrado no client **Web** que termina
   em `8btbj3o6...` no Google Cloud. Deploy do Worker: `cd worker && npx wrangler deploy`;
   secrets via `npx wrangler secret put <NOME>` (o NOME é fixo, o valor vai no prompt/stdin).
-- **DÍVIDA:** rotacionar o `client_secret` no Google Cloud (o antigo vazou nos `main.js`
-  de releases ≤0.5.0) e atualizar no Worker com `wrangler secret put GOOGLE_CLIENT_SECRET`.
+- **Rotação do secret (FEITA):** o `client_secret` foi rotacionado no Google Cloud (client
+  Web `8btbj3o6...`) — geradas chaves novas, colocado o valor novo no Worker com
+  `wrangler secret put GOOGLE_CLIENT_SECRET`, e as antigas (incl. a vazada nos `main.js`
+  ≤0.5.0) desabilitadas/deletadas. Estado alvo: **1 secret** ativo no Google Cloud, igual
+  ao do Worker. Armadilhas que já morderam: (a) rodar `wrangler` **fora de `worker/`** →
+  "Required Worker name missing"; (b) colar o **valor** no lugar do **nome** (o nome é
+  sempre `GOOGLE_CLIENT_SECRET`, o valor vai só no prompt); (c) espaço/quebra no fim do
+  valor colado → `invalid_client` (HTTP 401) no `/exchange`. Log de auth do plugin em
+  `Config/google-auth-debug.md` ajuda a cravar (401 = client errado, não grant).
 - **Chave de sync = `google_id` (+ `google_list`)** no frontmatter da task. Casa por id
   estável, nunca por título → rename seguro, sem duplicata por título.
 - **Baseline por item** (persistido em `data.json`, `gtBaselines`): merge 3-way — só
@@ -142,6 +177,22 @@ nossas conversas. Vale para toda interação neste repositório.
   deleção real ou glitch de sync/carga). Cancelar mantém tudo. Obsidian→Google apaga a task;
   Google→Obsidian **arquiva** a nota em `Tasks/_orphaned/` (nunca hard-delete), confirmado
   por GET (404/410/`deleted`).
+- **ESCUDO DA DELEÇÃO (`rawGoogleIds`) — não remover.** O ramo A ("nenhuma nota referencia
+  esse baseline → apaga no Google") lia só o `metadataCache`, e uma nota que momentaneamente
+  não parseia (YAML ruim, arquivo que o Obsidian Sync ainda não terminou de baixar) **sai do
+  `loadTasks()`** → o plugin apagava a task real no Google. Agora, antes de apagar, confere o
+  **texto cru** dos arquivos; se o `google_id` ainda aparece escrito, mantém a task e registra
+  `Deletion shield: kept ...`. Se a varredura falhar, **blinda tudo** (nunca apaga às cegas).
+  A guarda de massa não cobria isso porque 1–2 tasks passavam direto.
+- **Log auditável**: a linha final do log inclui `deleted=` e `orphaned=`, e cada ação
+  destrutiva grava o **motivo** em `result.notes` (deletado no Google / arquivado / duplicata
+  removida). Sem isso ficamos cegos pra diagnosticar (aconteceu).
+- **YAML inválido no frontmatter — o que realmente quebra** (verificado com o parser `yaml`):
+  (a) valor abrindo flow collection sem fechar (`title: [gbm] ...`); (b) **chave duplicada**;
+  (c) **`: ` (dois-pontos + espaço) dentro de valor não-aspado** (ex.: `title: Script
+  (provision.sh): roda...`). **Aspas no MEIO de um escalar sem aspas são VÁLIDAS** — não é
+  causa de erro (eu errei esse diagnóstico uma vez). Os três casos (a)(b)(c) são reparados por
+  `repairFrontmatterText`.
 - **Consolidação de listas (`consolidateLists`, sync confirmed)**: (1) realoca toda task
   vinculada cuja lista no Google ≠ a lista do seu board (Google não move entre listas →
   recria na certa + apaga a antiga + revincula); (2) apaga por inteiro as listas
@@ -158,6 +209,18 @@ nossas conversas. Vale para toda interação neste repositório.
 - Progresso: o sync mostra um **Notice persistente** (duration 0) com evolução (X/total) e
   fecha ao terminar; pede pro usuário não editar tasks até acabar.
 - Logs de debug em `Momentum Life/Config/google-sync-debug.md` e `google-auth-debug.md`.
+- **⚠️ Multi-device + Obsidian Sync (LIMITAÇÃO conhecida):** com o **mesmo vault espelhado
+  por Obsidian Sync** em dois dispositivos e o **Google sync ligado nos dois**, os dois
+  escrevem `google_id` na mesma nota e/ou criam a task no Google antes do id propagar. Dá
+  dois estragos: (1) o Sync faz **merge linha a linha** e duplica chaves no frontmatter →
+  YAML inválido → card **travado** (curado pelo `repairFrontmatterText`); (2) cada device
+  cria **sua própria task no Google** (ids diferentes p/ o mesmo título) + nota com sufixo
+  ` 2`/` 3` via `uniquePath` — o de-dupe por `google_id` **não pega** isso porque os ids são
+  distintos. Assinatura no vault: vários arquivos mesmo título com `google_id` diferente e
+  `modified` a poucos ms um do outro. **Mitigação atual (orientação de uso):** manter o
+  Google sync ligado em **um só device**; o Obsidian Sync continua espelhando as notas. O
+  endurecimento de verdade (lock de sync entre devices, ou reconciliar duplicatas por
+  título+lista mesmo com ids distintos) é mudança estruturante → tratar via **spec**.
 
 ## MCP (`mcp/src/*.mjs`)
 - O MCP é um port Node do data layer do plugin (ESM `.mjs`, **sem build** — roda direto;
@@ -166,6 +229,11 @@ nossas conversas. Vale para toda interação neste repositório.
   espelhar**: boards = pastas (sem `boards.md`), `createTask` grava em `Tasks/<board>/` com
   default **"My Tasks"**, `loadTasks` deriva board da pasta, mirror **achatado**
   `Tasks/Lists/<board>.md`, exclui `_orphaned`, lê/preserva `google_id`/`google_list`.
+- **Campo novo no config = adicionar no `loadConfig` E no `saveConfig` do MCP também.** O
+  `saveConfig` do MCP reescreve o arquivo inteiro, então um campo que ele não conhece é
+  **apagado** (aconteceria com `board_order`).
+- **O MCP é a via segura pra escrever notas do vault** (frontmatter escapado via
+  `JSON.stringify`) — preferir ao shell quando precisar corrigir dados.
 - **O MCP NÃO faz sync com Google Tasks** — isso é exclusivo do plugin. O MCP só lê/escreve
   os arquivos do vault.
 
@@ -201,7 +269,14 @@ nossas conversas. Vale para toda interação neste repositório.
     "Risk"/"Shell Execution" e derruba o score. Se precisar de ponte local pessoal, manter
     fora do build da comunidade.
   - Regra `obsidianmd/prefer-create-el`: usar `createDiv()` / `createEl()`, **nunca**
-    `document.createElement`.
+    `document.createElement`. (`activeDocument.createElementNS` para SVG é OK e necessário.)
+  - **Não usar `eslint-disable` de `@typescript-eslint/no-deprecated`** — a review proíbe
+    (e comentário de disable sem descrição também vira erro). Corrigir a causa raiz.
+    Ex.: `PluginSettingTab.display()` é deprecado desde 1.13.0 → extraímos o corpo para
+    `renderSettings()` privado e o `display()` só delega.
+  - O warning **`getSettingDefinitions()`** (API declarativa de settings do 1.13) é só
+    **recomendação** — decidimos NÃO migrar por ora (a aba tem partes dinâmicas e subiria o
+    `minAppVersion`). Não derruba o score ("Excellent").
 - **"No release matches your manifest version"** no portal costuma ser cache/atraso — se a
   release com a tag certa existe, o rótulo atualiza sozinho; clicar em **"Review branch"**
   força o re-scan.

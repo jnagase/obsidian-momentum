@@ -40,6 +40,12 @@ export interface PAHost {
   editCustomPage(id: string): void;
   /** Delete a custom section by id. */
   removeCustomPage(id: string): void | Promise<void>;
+  /** Run a Google Tasks sync now (used by the "sync now" button on the tasks page). */
+  syncGoogleTasks(silent?: boolean): void | Promise<void>;
+  /** True when Google Tasks sync is enabled AND connected. */
+  isGoogleTasksReady(): boolean;
+  /** Open this plugin's settings tab. */
+  openPluginSettings(): void;
 }
 
 export class PAView extends ItemView {
@@ -73,6 +79,11 @@ export class PAView extends ItemView {
           if (l.view instanceof PASideView) l.view.showPage(this.page);
         }); void workspace.revealLeaf(leaf); });
     };
+    // "Sync now" is always offered: when Google isn't connected yet the button explains how
+    // to set it up instead of failing silently.
+    this.ctx.syncGoogleTasks = () => { void host.syncGoogleTasks(false); };
+    this.ctx.googleTasksReady = () => host.isGoogleTasksReady();
+    this.ctx.openPluginSettings = () => host.openPluginSettings();
     this.habitTrackerModule = new HabitTrackerModule(this.ctx);
     this.tasksModule = new TasksModule(this.ctx);
     this.fitnessModule = new FitnessModule(this.ctx);

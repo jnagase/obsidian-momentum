@@ -435,6 +435,8 @@
 
 /* ===== Compact Tasks side panel (right sidebar) ===== */
 .pa-side-open{margin-top:8px;font-size:.8rem;cursor:pointer}
+/* Inside the header tools row the link sits inline, so it needs no top margin. */
+.pa-ht-tools .pa-side-open{margin-top:0}
 .pa-side-root{padding:8px}
 .pa-side-root .pa-ht-rings{flex-wrap:wrap;gap:8px}
 .pa-side-root .pa-list-cards{grid-template-columns:1fr}
@@ -500,3 +502,97 @@
 
 /* ===== Beta tag (e.g. Google tasks settings heading) ===== */
 .pa-beta-tag{color:var(--text-error);font-weight:600;font-size:.82em;text-transform:uppercase;letter-spacing:.02em}
+
+/* ── Tasks header tools (search / sync now) ─────────────────────────────── */
+.pa-ht-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+/* ── Link-styled action (a real <button> for a11y, drawn as a link) ────────
+   Themes style bare `button` with a background, padding, radius and shadow at a
+   higher specificity than a lone class, so the visual reset is forced here. */
+button.pa-link-btn {
+  background: none !important;
+  background-color: transparent !important;
+  border: none !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  padding: 0 !important;
+  height: auto !important;
+  min-height: 0 !important;
+  line-height: inherit;
+  color: var(--text-accent);
+  font-size: 0.8rem;
+  font-weight: inherit;
+  cursor: pointer;
+  text-decoration: none;
+}
+button.pa-link-btn:hover,
+button.pa-link-btn:focus-visible {
+  color: var(--text-accent-hover);
+  text-decoration: underline;
+}
+
+/* ── Search palette rows ────────────────────────────────────────────────── */
+.pa-search-title {
+  font-weight: 600;
+}
+.pa-search-sub {
+  font-size: 0.8em;
+  opacity: 0.7;
+  margin-top: 2px;
+}
+
+/* ── "Here it is" cue after jumping to a card from search ───────────────── */
+.pa-flash {
+  animation: pa-flash-anim 1.8s ease-out;
+}
+@keyframes pa-flash-anim {
+  0%   { box-shadow: 0 0 0 0 var(--interactive-accent); }
+  15%  { box-shadow: 0 0 0 4px var(--interactive-accent); }
+  100% { box-shadow: 0 0 0 0 rgba(0, 0, 0, 0); }
+}
+/* Respect users who ask the OS to reduce motion: show a steady ring instead. */
+@media (prefers-reduced-motion: reduce) {
+  .pa-flash {
+    animation: none;
+    box-shadow: 0 0 0 3px var(--interactive-accent);
+  }
+}
+
+/* ── Steps / walkthrough modal (e.g. connect Google tasks) ──────────────── */
+.pa-steps-intro {
+  margin: 0 0 8px;
+}
+.pa-steps-list {
+  margin: 0 0 8px;
+  padding-left: 22px;
+  line-height: 1.55;
+}
+.pa-steps-list li {
+  margin-bottom: 6px;
+}
+.pa-steps-note {
+  font-size: 0.85em;
+  opacity: 0.75;
+  margin: 0;
+}
+
+/* ── Board tabs: drag to reorder ────────────────────────────────────────── */
+.pa-tab[data-board] {
+  cursor: grab;
+}
+.pa-tab[data-board].pa-dragging {
+  opacity: 0.45;
+  cursor: grabbing;
+}
+/* Subtle hint on the tab strip while a board is being dragged over it. */
+.pa-tabs.pa-drop {
+  outline: 1px dashed var(--interactive-accent);
+  outline-offset: 3px;
+  border-radius: 6px;
+}

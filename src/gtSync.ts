@@ -48,6 +48,8 @@ export interface GTSyncResult {
   orphaned: number;
   blocked: number;
   errors: string[];
+  /** Audit trail of destructive actions (what was deleted/archived and why). */
+  notes: string[];
 }
 
 /** Above this many pending writes an unconfirmed (automatic) run is blocked. */
@@ -72,6 +74,39 @@ function fromGTDue(due?: string): string { return due ? due.slice(0, 10) : ""; }
 function isBlankTitle(t?: string): boolean { const s = (t || "").trim().toLowerCase(); return !s || s === "untitled"; }
 function sameBase(a: GTBaseline, b: GTBaseline): boolean {
   return a.title === b.title && a.status === b.status && (a.due || "") === (b.due || "");
+}
+
+// ── Reconciliation helpers (multi-device duplicate convergence) ─────────────────
+/** Title with a trailing uniquePath suffix (" 2", " 10") removed, trimmed. */
+function baseTitle(title: string): string {
+  return (title || "").trim().replace(/\s+\d+$/, "").trim();
+}
+/** A base title that carries no real content (blank or "untitled") → never a duplicate. */
+function isBlankBase(title: string): boolean {
+  const s = baseTitle(title).toLowerCase();
+  return !s || s === "untitled";
+}
+function normStatus(s?: string): "completed" | "needsAction" {
+  return s === "completed" ? "completed" : "needsAction";
+}
+/** Grouping key: base title + normalized due + normalized status. */
+function sigKey(title: string, due: string | undefined, status?: string): string {
+  return `${baseTitle(title)}\u0000${normalizeYmd(due)}\u0000${normStatus(status)}`;
+}
+/** Deterministic winner among Google ids: smallest by code-point order. Same on every device. */
+function pickWinnerGoogleId(ids: string[]): string {
+  return ids.reduce((w, x) => (x < w ? x : w));
+}
+/**
+ * Deterministic winner note across devices: prefer a linked note (has google_id) and among
+ * those the smallest google_id; if none is linked, the smallest task_id. Never uses
+ * wall-clock, device state, or API ordering.
+ */
+function pickWinnerNote(notes: Task[]): Task {
+  const linked = notes.filter((n) => n.googleId);
+  const pool = linked.length ? linked : notes;
+  const key = (n: Task) => (linked.length ? (n.googleId as string) : (n.id || n.title));
+  return pool.reduce((w, n) => (key(n) < key(w) ? n : w));
 }
 function pushInto<T>(m: Map<string, T[]>, k: string, v: T): void {
   const a = m.get(k); if (a) a.push(v); else m.set(k, [v]);
@@ -103,7 +138,7 @@ export class GTSyncService {
     /** Ask the user to approve a suspicious mass deletion; resolves true to proceed. */
     confirmMass?: (msg: string) => Promise<boolean>;
   } = {}): Promise<GTSyncResult> {
-    const result: GTSyncResult = { pushed: 0, pulled: 0, linked: 0, deleted: 0, orphaned: 0, blocked: 0, errors: [] };
+    const result: GTSyncResult = { pushed: 0, pulled: 0, linked: 0, deleted: 0, orphaned: 0, blocked: 0, errors: [], notes: [] };
     const report = opts.onProgress ?? (() => {});
     report({ phase: "fetching", done: 0, total: 0 });
 
@@ -283,10 +318,142 @@ export class GTSyncService {
     if (opts.confirmed) {
       await this.reconcileDeletions(at, tasks, gtByList, listIds, result, opts.confirmMass);
       await this.consolidateLists(at, tasks, boardToListId, gtLists, defaultListId, localStatus, result);
+      // End-of-sync convergence: collapse duplicate Google tasks / notes created by the
+      // multi-device race so two devices converge on one item each. Wrapped so a failure
+      // in one group never aborts the run.
+      try {
+        await this.reconcileDuplicates(at, boardToListId, listIdToBoard, ignoredListIds, defaultListId, localStatus, result, opts.confirmMass);
+      } catch (e) { result.errors.push(`Reconcile duplicates: ${String(e)}`); }
     }
 
     await this.baselines.save();
     return result;
+  }
+
+  /**
+   * End-of-sync reconciliation (multi-device convergence). After the normal ops ran, the
+   * same vault synced on two devices can have (a) duplicate Google tasks with distinct ids
+   * for one logical task and (b) duplicate notes (" 2"/" 3"). This pass re-reads the fresh
+   * Google state and the local notes, groups by a deterministic Match_Signature
+   * (baseTitle + due + status), and collapses each duplicate set to a single Winner chosen
+   * the SAME way on every device (smallest google_id, then smallest task_id), deleting the
+   * losing Google tasks and notes. Google deletions are counted against a mass guard.
+   */
+  private async reconcileDuplicates(
+    at: string,
+    boardToListId: Map<string, string>,
+    listIdToBoard: Map<string, string>,
+    ignoredListIds: Set<string>,
+    defaultListId: string,
+    localStatus: (t: Task) => GTTask["status"],
+    result: GTSyncResult,
+    confirmMass?: (msg: string) => Promise<boolean>,
+  ): Promise<void> {
+    // Lists to inspect: board lists + discovered lists, minus tombstoned ones.
+    const listIds = new Set<string>([...boardToListId.values(), ...listIdToBoard.keys()]);
+    for (const id of ignoredListIds) listIds.delete(id);
+
+    // Re-list fresh Google state (post-apply).
+    const gtByList = new Map<string, GTTask[]>();
+    for (const listId of listIds) {
+      try { gtByList.set(listId, await listTasks(at, listId)); }
+      catch (e) { result.errors.push(`Reconcile fetch (${listId}): ${String(e)}`); }
+    }
+
+    const googleDeletes: Array<{ listId: string; gtId: string }> = [];
+    // For each (list, signature) the surviving Google winner id — used to relink stray notes.
+    const listSigWinner = new Map<string, string>();
+
+    // Google-side: within a list, tasks with the SAME full title + due + status are race
+    // duplicates (Google has no uniquePath suffixing). Keep the smallest id, delete the rest.
+    for (const [listId, arr] of gtByList) {
+      const groups = new Map<string, GTTask[]>();
+      for (const gt of arr) {
+        if (!gt.id || isBlankBase(gt.title)) continue;
+        pushInto(groups, sigKey(gt.title, fromGTDue(gt.due), gt.status), gt);
+      }
+      for (const [k, g] of groups) {
+        if (g.length < 2) continue;
+        if (new Set(g.map((x) => (x.title || "").trim())).size !== 1) continue; // distinct titles → not artifacts
+        const winner = pickWinnerGoogleId(g.map((x) => x.id as string));
+        listSigWinner.set(`${listId}\u0000${k}`, winner);
+        for (const x of g) if (x.id !== winner) googleDeletes.push({ listId, gtId: x.id as string });
+      }
+    }
+
+    // Note-side: within a board, notes sharing base title + due + status are artifacts when
+    // their full titles are identical OR form a base + " N" suffix set (the base is present).
+    const tasks = this.store.loadTasks();
+    const noteDeletes: Task[] = [];
+    const byBoard = new Map<string, Task[]>();
+    for (const t of tasks) { if (!isBlankBase(t.title)) pushInto(byBoard, t.kanbanName || "My Tasks", t); }
+    for (const [, arr] of byBoard) {
+      const groups = new Map<string, Task[]>();
+      for (const t of arr) pushInto(groups, sigKey(t.title, t.due, localStatus(t)), t);
+      for (const [, g] of groups) {
+        if (g.length < 2) continue;
+        const fulls = g.map((t) => t.title.trim());
+        const allSame = new Set(fulls).size === 1;
+        const hasPlainBase = fulls.some((f) => f === baseTitle(f));
+        if (!(allSame || hasPlainBase)) continue; // e.g. "Phase 2"/"Phase 3" with no "Phase" → keep both
+        const winner = pickWinnerNote(g);
+        for (const t of g) {
+          if (t === winner) continue;
+          if (t.googleId && t.googleId !== winner.googleId) googleDeletes.push({ listId: t.googleList || "", gtId: t.googleId });
+          noteDeletes.push(t);
+        }
+      }
+    }
+
+    const dels = googleDeletes.filter((d) => d.gtId && d.listId);
+    if (!dels.length && !noteDeletes.length) return;
+
+    // Mass guard on Google deletions (same shape as the deletion phase).
+    const tracked = this.baselines.keys().length || tasks.filter((t) => t.googleId).length;
+    const guard = Math.max(15, Math.ceil(tracked * 0.25));
+    if (dels.length > guard) {
+      const msg = `Momentum sync: reconciliation wants to remove ${dels.length} duplicate Google tasks — more than the safety limit (${guard}).\n\nThis usually means duplicates piled up from syncing on two devices, but it can also be a sync glitch. If you continue, the extra copies are removed from Google (one is kept per task).\n\nRemove the duplicates?`;
+      const ok = confirmMass ? await confirmMass(msg) : false;
+      if (!ok) { result.errors.push(`Reconcile guard: user declined; kept ${dels.length} duplicate Google tasks.`); return; }
+    }
+
+    // Apply Google deletions.
+    const deletedIds = new Set<string>();
+    for (const d of dels) {
+      try {
+        await deleteTask(at, d.listId, d.gtId);
+        this.baselines.remove(d.gtId);
+        deletedIds.add(d.gtId);
+        result.deleted++;
+        result.notes.push(`Reconcile: removed duplicate Google task ${d.gtId}.`);
+      }
+      catch (e) { result.errors.push(`Reconcile delete GT ${d.gtId}: ${String(e)}`); }
+    }
+
+    // Delete loser notes (hard delete — the Winner note is kept; not archived).
+    for (const t of noteDeletes) {
+      try {
+        await this.store.deleteTask(t);
+        result.orphaned++;
+        result.notes.push(`Reconcile: removed duplicate note "${t.title}".`);
+      }
+      catch (e) { result.errors.push(`Reconcile delete note "${t.title}": ${String(e)}`); }
+    }
+
+    // Relink any surviving note whose Google task was deleted as a loser to the Winner id,
+    // and repair duplicate-key frontmatter on it so a previously stuck card works again.
+    for (const t of this.store.loadTasks()) {
+      try { await this.store.repairTaskFileByPath(t.path); } catch { /* best-effort */ }
+      if (t.googleId && deletedIds.has(t.googleId) && t.googleList) {
+        const winnerId = listSigWinner.get(`${t.googleList}\u0000${sigKey(t.title, t.due, localStatus(t))}`);
+        if (winnerId && winnerId !== t.googleId) {
+          try {
+            await this.store.setTaskGoogleLink(t, winnerId, t.googleList);
+            this.baselines.set(winnerId, { title: t.title, status: localStatus(t), due: normalizeYmd(t.due) });
+          } catch (e) { result.errors.push(`Reconcile relink "${t.title}": ${String(e)}`); }
+        }
+      }
+    }
   }
 
   /**
@@ -348,7 +515,21 @@ export class GTSyncService {
 
     // A. Local note deleted → delete on Google.
     const baseIds = this.baselines.keys();
-    const localDeleted = baseIds.filter((id) => !localIdSet.has(id) && fetchedIds.has(id));
+    const candidates = baseIds.filter((id) => !localIdSet.has(id) && fetchedIds.has(id));
+    // SHIELD: `loadTasks()` reads the metadata cache, so a note that momentarily fails to
+    // parse (malformed YAML, a file Obsidian Sync hasn't finished writing) vanishes from it —
+    // and this branch would read that as "the user deleted the note" and delete the task from
+    // Google. Re-check the RAW text: if the id is still written in a note, keep the task.
+    const localDeleted: string[] = [];
+    if (candidates.length) {
+      let rawIds: Set<string>;
+      try { rawIds = await this.store.rawGoogleIds(); }
+      catch { rawIds = new Set(candidates); } // can't verify → shield everything (never delete blind)
+      for (const id of candidates) {
+        if (rawIds.has(id)) result.errors.push(`Deletion shield: kept Google task ${id} — a note still references it.`);
+        else localDeleted.push(id);
+      }
+    }
     const staleBoth = baseIds.filter((id) => !localIdSet.has(id) && !fetchedIds.has(id));
     for (const id of staleBoth) this.baselines.remove(id); // both sides gone → drop the tombstone.
     const delGuard = Math.max(15, Math.ceil(baseIds.length * 0.25));
@@ -362,7 +543,12 @@ export class GTSyncService {
       for (const id of localDeleted) {
         const lid = idToListId.get(id);
         if (!lid) continue;
-        try { await deleteTask(at, lid, id); this.baselines.remove(id); result.deleted++; }
+        try {
+          await deleteTask(at, lid, id);
+          this.baselines.remove(id);
+          result.deleted++;
+          result.notes.push(`Deleted Google task ${id} (its Obsidian note is gone).`);
+        }
         catch (e) { result.errors.push(`Delete GT ${id}: ${String(e)}`); }
       }
     }
@@ -383,12 +569,14 @@ export class GTSyncService {
           await this.store.orphanTaskNote(t);
           this.baselines.remove(t.googleId as string);
           result.orphaned++;
+          result.notes.push(`Archived "${t.title}" to _orphaned (Google reported it deleted).`);
         }
       } catch (e) {
         if (isGoneErr(e)) {
           await this.store.orphanTaskNote(t);
           this.baselines.remove(t.googleId as string);
           result.orphaned++;
+          result.notes.push(`Archived "${t.title}" to _orphaned (Google task ${t.googleId} is gone).`);
         } else {
           result.errors.push(`Orphan check ${t.googleId}: ${String(e)}`);
         }

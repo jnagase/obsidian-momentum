@@ -6,7 +6,7 @@ import { PASideView, VIEW_TYPE_PA_SIDE, momentumNoteType } from "./side";
 import { WhatsNewModal, CHANGELOG, cmpVersion } from "./whatsnew";
 import { CustomPage } from "./types";
 import { FormModal, ConfirmModal, FieldSpec } from "./ui";
-import { GoogleToken, authorizeGoogle, completeGoogleAuth, GOOGLE_PROTOCOL_ACTION } from "./googletasks";
+import { GoogleToken, authorizeGoogle, completeGoogleAuth, GOOGLE_PROTOCOL_ACTION, GoogleAuthExpiredError } from "./googletasks";
 import { GTSyncService } from "./gtSync";
 interface PASettings {
   dataRoot: string;
@@ -871,9 +871,17 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       }
     } catch (e) {
       progress.hide();
-      log(`FATAL: ${e instanceof Error ? e.message : String(e)}`);
+      const msg = e instanceof Error ? e.message : String(e);
+      log(`FATAL: ${msg}`);
+      if (e instanceof GoogleAuthExpiredError) {
+        log("  Cause: Google revoked the refresh token. Reconnect Google tasks in settings.");
+        log("  If this repeats every ~7 days, set the OAuth consent screen to \"In production\" (Testing revokes refresh tokens after 7 days).");
+      }
       await flushLog();
-      if (!silent) new Notice(`Google Tasks sync failed: ${e instanceof Error ? e.message : String(e)}`);
+      // An expired grant needs the user to act, so surface it even on a silent (startup /
+      // interval) run — staying quiet just leaves the sync dead with no explanation.
+      if (e instanceof GoogleAuthExpiredError) new Notice("Google tasks: session expired. Reconnect it in the plugin settings.", 10000);
+      else if (!silent) new Notice(`Google tasks sync failed: ${msg}`);
     }
   }
 

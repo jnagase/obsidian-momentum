@@ -115,8 +115,10 @@ export async function completeGoogleAuth(params: Record<string, string>, onLog?:
       url: `${WORKER_BASE}/exchange`, method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ code, code_verifier: verifier }),
+      throw: false,
     });
-    if (r.status >= 400) throw new Error(`Token exchange failed: ${r.status} ${r.text}`);
+    // 401 invalid_client = wrong/stale secret on the Worker; 400 = bad grant/verifier.
+    if (r.status >= 400) throw new Error(`Token exchange failed: ${r.status}${fmtErr(r.text)}`);
     const j = r.json as { access_token: string; refresh_token: string; expires_in: number };
     const email = await fetchEmail(j.access_token);
     onLog?.(`Token OK — email: ${email}`);
@@ -130,20 +132,51 @@ export async function completeGoogleAuth(params: Record<string, string>, onLog?:
 async function fetchEmail(accessToken: string): Promise<string> {
   try {
     const r = await requestUrl({ url: "https://www.googleapis.com/oauth2/v3/userinfo",
-      headers: { Authorization: `Bearer ${accessToken}` } });
+      headers: { Authorization: `Bearer ${accessToken}` }, throw: false });
     if (r.status >= 400) return "";
     const j = r.json as { email?: string };
     return j.email ?? "";
   } catch { return ""; }
 }
 
+/**
+ * Thrown when Google refuses the stored refresh token (`invalid_grant`): the grant was
+ * revoked or aged out, so no retry can fix it — the user has to reconnect. Callers use
+ * this to show an actionable message instead of a generic "sync failed".
+ */
+export class GoogleAuthExpiredError extends Error {
+  constructor(detail?: string) {
+    super(`Google session expired — reconnect Google tasks in settings.${detail ? ` (${detail})` : ""}`);
+    this.name = "GoogleAuthExpiredError";
+  }
+}
+
 export async function refreshToken(token: GoogleToken): Promise<GoogleToken> {
+  // `throw: false` is required: requestUrl throws on 4xx by default, which would bypass
+  // the checks below and surface an opaque "Request failed, status 400" with no clue that
+  // it was the token refresh (and no Google error_description) — that cost us a debug session.
   const r = await requestUrl({ url: `${WORKER_BASE}/refresh`, method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ refresh_token: token.refresh_token }) });
-  if (r.status >= 400) throw new Error(`Token refresh failed: ${r.status}`);
+    body: JSON.stringify({ refresh_token: token.refresh_token }), throw: false });
+  if (r.status >= 400) {
+    const err = googleError(r.text);
+    // invalid_grant = refresh token revoked/expired. Common cause: the OAuth consent screen
+    // is still in "Testing", where Google kills refresh tokens after 7 days.
+    if (err.includes("invalid_grant")) throw new GoogleAuthExpiredError(err);
+    throw new Error(`Token refresh failed: ${r.status}${err ? ` — ${err}` : ""}`);
+  }
   const j = r.json as { access_token: string; expires_in: number };
   return { ...token, access_token: j.access_token, expires_at: Date.now() + (j.expires_in - 60) * 1000 };
+}
+
+/** Pull Google's `error`/`error_description` out of a failed response body, for logs. */
+function googleError(text: string): string {
+  if (!text) return "";
+  try {
+    const j = JSON.parse(text) as { error?: string | { message?: string }; error_description?: string };
+    const code = typeof j.error === "string" ? j.error : j.error?.message;
+    return [code, j.error_description].filter(Boolean).join(": ") || text.slice(0, 200);
+  } catch { return text.slice(0, 200); }
 }
 
 export async function ensureFreshToken(token: GoogleToken): Promise<GoogleToken> {
@@ -153,26 +186,35 @@ export async function ensureFreshToken(token: GoogleToken): Promise<GoogleToken>
 
 const BASE = "https://tasks.googleapis.com/tasks/v1";
 
+// Every helper below passes `throw: false` on purpose. requestUrl throws on 4xx/5xx by
+// default, which made the status checks dead code and reduced every API failure to
+// "Request failed, status 400" — no path, no Google message. Keep it.
 async function get<T>(path: string, token: string): Promise<T> {
-  const r = await requestUrl({ url: `${BASE}${path}`, headers: { Authorization: `Bearer ${token}` } });
-  if (r.status >= 400) throw new Error(`GET ${path} failed: ${r.status}`);
+  const r = await requestUrl({ url: `${BASE}${path}`, headers: { Authorization: `Bearer ${token}` }, throw: false });
+  if (r.status >= 400) throw new Error(`GET ${path} failed: ${r.status}${fmtErr(r.text)}`);
   return r.json as T;
 }
 
 async function post<T>(path: string, token: string, body: unknown): Promise<T> {
   const r = await requestUrl({ url: `${BASE}${path}`, method: "POST",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: JSON.stringify(body) });
-  if (r.status >= 400) throw new Error(`POST ${path} failed: ${r.status}`);
+    body: JSON.stringify(body), throw: false });
+  if (r.status >= 400) throw new Error(`POST ${path} failed: ${r.status}${fmtErr(r.text)}`);
   return r.json as T;
 }
 
 async function patch<T>(path: string, token: string, body: unknown): Promise<T> {
   const r = await requestUrl({ url: `${BASE}${path}`, method: "PATCH",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: JSON.stringify(body) });
-  if (r.status >= 400) throw new Error(`PATCH ${path} failed: ${r.status}`);
+    body: JSON.stringify(body), throw: false });
+  if (r.status >= 400) throw new Error(`PATCH ${path} failed: ${r.status}${fmtErr(r.text)}`);
   return r.json as T;
+}
+
+/** Google's error message, prefixed for appending to a thrown message. */
+function fmtErr(text: string): string {
+  const e = googleError(text);
+  return e ? ` — ${e}` : "";
 }
 
 export async function listTaskLists(token: string): Promise<GTTaskList[]> {
@@ -210,13 +252,15 @@ export async function getTask(token: string, listId: string, taskId: string): Pr
 }
 
 export async function deleteTask(token: string, listId: string, taskId: string): Promise<void> {
+  // `throw: false` also keeps the 404 tolerance working — already-gone is success here,
+  // but the default throw turned it into a hard error.
   const r = await requestUrl({ url: `${BASE}/lists/${listId}/tasks/${taskId}`, method: "DELETE",
-    headers: { Authorization: `Bearer ${token}` } });
-  if (r.status >= 400 && r.status !== 404) throw new Error(`DELETE task failed: ${r.status}`);
+    headers: { Authorization: `Bearer ${token}` }, throw: false });
+  if (r.status >= 400 && r.status !== 404) throw new Error(`DELETE task failed: ${r.status}${fmtErr(r.text)}`);
 }
 
 export async function deleteTaskList(token: string, listId: string): Promise<void> {
   const r = await requestUrl({ url: `${BASE}/users/@me/lists/${listId}`, method: "DELETE",
-    headers: { Authorization: `Bearer ${token}` } });
-  if (r.status >= 400 && r.status !== 404) throw new Error(`DELETE list failed: ${r.status}`);
+    headers: { Authorization: `Bearer ${token}` }, throw: false });
+  if (r.status >= 400 && r.status !== 404) throw new Error(`DELETE list failed: ${r.status}${fmtErr(r.text)}`);
 }

@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Momentum Life</title>
+<meta name="description" content="Momentum Life is an Obsidian plugin for tasks, habits, fitness, nutrition and studies, with optional two-way Google Tasks sync.">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<main>
+
+  <h1>Momentum Life</h1>
+  <p class="lead">An Obsidian plugin for tasks, habits, fitness, nutrition and studies. Everything
+  is stored as plain Markdown notes inside your own Obsidian vault.</p>
+
+  <h2>Google Tasks sync</h2>
+  <p>Momentum Life can synchronise your tasks <strong>two ways</strong> between the notes in your
+  Obsidian vault and your lists in Google Tasks. A task you create in Obsidian appears in Google
+  Tasks, and a task you create in Google Tasks appears in your vault. Each board in the plugin is
+  paired with one list in Google Tasks.</p>
+  <p>This sync is <strong>optional and turned off by default</strong>. It does nothing until you
+  enable it yourself in the plugin settings and connect your Google account. You can disconnect at
+  any time, and your notes stay in your vault when you do.</p>
+
+  <h2>What the app accesses, and why</h2>
+  <p>When you enable the sync, Momentum Life asks Google for permission to read and write your
+  tasks. That permission is used for exactly two things:</p>
+  <ul>
+    <li><strong>Your task lists</strong> — to mirror each of your plugin boards to the matching
+    Google Tasks list, and to create a board when it finds a new list.</li>
+    <li><strong>Your tasks</strong> — to create, update, complete and delete tasks on either side
+    so both stay in step. Only the title, notes, due date, completion status and the task and list
+    identifiers are used.</li>
+  </ul>
+  <p>Nothing else in your Google account is read or written. Momentum Life does not access your
+  email, your files, your calendar or your contacts.</p>
+  <p>Your task data is never sent to a server owned by the author. The plugin talks to Google
+  directly from your own device, and the synchronised content is written only to Markdown files in
+  your vault. The details are in the <a href="/privacy">privacy policy</a>.</p>
+
+  <h2>Install</h2>
+  <p>Momentum Life is free and open source. It is available in the Obsidian community plugin
+  directory, and the full source code is public.</p>
+  <ul>
+    <li><a href="https://github.com/jnagase/obsidian-momentum">Source code on GitHub</a></li>
+    <li><a href="/privacy">Privacy policy</a></li>
+  </ul>
+
+  <h2>Author and contact</h2>
+  <p>Momentum Life is built and maintained by <strong>Jaime Nagase</strong>.</p>
+  <p>For questions about the plugin, the Google Tasks sync or privacy, write to
+  <a href="mailto:jaime.nagase@gmail.com">jaime.nagase@gmail.com</a>.</p>
+
+</main>
+</body>
+</html>

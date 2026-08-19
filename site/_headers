@@ -1,0 +1,9 @@
+# Cloudflare Pages headers.
+#
+# The OAuth review requires these pages to be publicly indexable, so nothing here may emit
+# X-Robots-Tag: noindex. Note that Pages PREVIEW deployments add that header automatically —
+# only the production deployment on the custom domain is used as the declared URL.
+/*
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: no-referrer
+  X-Frame-Options: DENY

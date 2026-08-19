@@ -1,0 +1,4 @@
+# The Google OAuth review requires the homepage and the privacy policy to be reachable by
+# automated crawlers. Allow everything; add no Disallow rule for / or /privacy.
+User-agent: *
+Allow: /

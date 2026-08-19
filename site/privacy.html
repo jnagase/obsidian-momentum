@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy policy — Momentum Life</title>
+<meta name="description" content="Privacy policy for the Momentum Life Obsidian plugin and its optional Google Tasks sync.">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<main>
+
+  <p class="back"><a href="/">← Momentum Life</a></p>
+
+  <h1>Privacy policy</h1>
+  <p class="lead">This policy explains what <strong>Momentum Life</strong>, an Obsidian plugin, does
+  with your data when you enable its optional Google Tasks sync. It describes the behaviour of the
+  plugin as published, and it is updated in the same release as any change to that behaviour.</p>
+
+  <h2>Where your data lives</h2>
+  <p>Momentum Life is a local plugin. Every task, habit, workout, meal and note it manages is stored
+  as a plain Markdown file inside your own Obsidian vault, on your own device.</p>
+  <p>The task data the plugin reads from Google Tasks is written <strong>only</strong> to Markdown
+  files inside your local Obsidian vault. There is no account to create, no database owned by the
+  author, and no copy of your tasks held anywhere else.</p>
+
+  <h2>Who talks to Google</h2>
+  <p>All Google Tasks API requests are made <strong>from your own device, directly to
+  <code>tasks.googleapis.com</code></strong>. Your task content does not pass through any server
+  operated by the author, and the author has no server that stores it.</p>
+
+  <h2>The OAuth broker</h2>
+  <p>Signing in to Google requires a confidential client secret that must not be shipped inside a
+  public plugin. For that reason, and only for that reason, the sign-in step passes through a small
+  service operated by the author, called the OAuth broker.</p>
+  <p>The broker takes part <strong>exclusively in the OAuth handshake</strong>: it exchanges the
+  authorization code Google returns for access tokens, and it renews an expired access token. It
+  <strong>does not receive, does not process and does not store the content of your tasks</strong>.
+  Task data never touches it.</p>
+  <p>The broker is stateless. It <strong>does not persist tokens, authorization codes or user
+  identifiers</strong>. It keeps no database, no log of your identity and no record of your
+  requests' contents.</p>
+
+  <h2>Tokens</h2>
+  <p>When you connect your Google account, Google issues an access token and a refresh token. Both
+  are stored <strong>only in the plugin's local configuration file</strong>
+  (<code>data.json</code>, inside your vault's plugin folder) on your own device.</p>
+  <p>They stay there until you disconnect Google in the plugin or delete that file. They are
+  <strong>not retained in any system controlled by the author</strong>.</p>
+
+  <h2>Data we read and write</h2>
+  <p>When the sync runs, the plugin reads and writes exactly the following fields of your Google
+  Tasks data, and nothing more:</p>
+  <ul>
+    <li><strong>Task title</strong> — mirrored to and from the note title.</li>
+    <li><strong>Task notes</strong> — mirrored to and from the note body.</li>
+    <li><strong>Due date</strong> — mirrored to and from the note's due date.</li>
+    <li><strong>Completion status</strong> — so completing a task on one side completes it on the
+    other.</li>
+    <li><strong>Task identifier</strong> — stored in the note so the same task is matched reliably
+    after a rename.</li>
+    <li><strong>Task list identifier</strong> — to keep each board paired with its list.</li>
+  </ul>
+  <p><strong>No other data in your Google Account is read or written.</strong> The plugin requests a
+  single permission, covering Google Tasks only. It has no access to Gmail, Google Drive, Google
+  Calendar, your contacts or your profile.</p>
+
+  <h2>How the data is used</h2>
+  <p>The data obtained through the Google Tasks permission is used <strong>solely to perform the
+  synchronisation you asked for</strong>, on your own device.</p>
+  <p>It is <strong>not sold</strong>. It is <strong>not transferred to third parties</strong>. It is
+  <strong>not used for advertising</strong>. It is <strong>not used to train artificial intelligence
+  or machine learning models</strong>.</p>
+
+  <h2>No telemetry</h2>
+  <p>Momentum Life collects <strong>no telemetry and no analytics</strong> about your use of the
+  sync or of the plugin. There is no usage tracking, no crash reporting service and no identifier
+  assigned to you.</p>
+
+  <!--
+    POLICY v1 — describes the CURRENTLY RELEASED plugin, where disconnecting deletes the local
+    tokens but does not ask Google to revoke the grant.
+
+    v2 SWAP POINT (spec task 10.10, checklist item 3.15): in the release commit that ships
+    revokeGoogleToken(), replace the "In the plugin" bullet below with wording that says
+    disconnecting REVOKES the app's access, and bump "Last updated" to the release date.
+
+    Do not publish v2 earlier. Cloudflare Pages deploys on push to main, so a v2 published
+    before the plugin release would promise users something the version they are running does
+    not do — the exact mismatch that fails an OAuth review.
+  -->
+  <h2>Revoking access</h2>
+  <p>You can end the plugin's access to your Google account in two ways, and either one is enough:</p>
+  <ul>
+    <li><strong>In the plugin</strong> — open the Momentum Life settings and use the disconnect
+    control. The tokens stored on your device are deleted and the plugin immediately stops making
+    any request to the Google Tasks API. To also withdraw the permission you granted, use the second
+    method below.</li>
+    <li><strong>In your Google Account</strong> — open
+    <a href="https://myaccount.google.com/permissions">Third-party apps &amp; services</a> and remove
+    access for Momentum Life. This revokes the permission at Google, so the stored tokens stop
+    working.</li>
+  </ul>
+  <p>In both cases, <strong>the task notes already in your vault are kept</strong>. Revoking access
+  stops future synchronisation; it never deletes your notes.</p>
+
+  <h2>Deleting your data</h2>
+  <ul>
+    <li><strong>Tokens</strong> — disconnect Google in the plugin, or delete the plugin's
+    <code>data.json</code> file. That removes the stored access and refresh tokens from your device.</li>
+    <li><strong>Synchronised content</strong> — delete the task notes from your vault. Because the
+    content lives only in your vault, deleting those files deletes the data.</li>
+    <li><strong>On Google's side</strong> — tasks you no longer want in Google Tasks are deleted in
+    Google Tasks itself, or in your Google Account.</li>
+  </ul>
+  <p>There is nothing for the author to delete on your behalf, because the author holds no copy of
+  your data.</p>
+
+  <h2>Changes to this policy</h2>
+  <p>This policy is versioned alongside the plugin's source code. If the plugin's behaviour around
+  collecting, transmitting, storing or retaining your data changes, this page is updated in the same
+  release as that change, and the date below changes with it.</p>
+
+  <h2>Contact</h2>
+  <p>Questions about this policy or about your data:
+  <a href="mailto:jaime.nagase@gmail.com">jaime.nagase@gmail.com</a>.</p>
+
+  <p class="updated">Last updated: 2026-08-15</p>
+
+</main>
+</body>
+</html>

@@ -5,8 +5,12 @@ import { PANavView, VIEW_TYPE_PA_NAV } from "./nav";
 import { PASideView, VIEW_TYPE_PA_SIDE, momentumNoteType } from "./side";
 import { WhatsNewModal, CHANGELOG, cmpVersion } from "./whatsnew";
 import { CustomPage } from "./types";
-import { FormModal, ConfirmModal, FieldSpec } from "./ui";
-import { GoogleToken, authorizeGoogle, completeGoogleAuth, GOOGLE_PROTOCOL_ACTION, GoogleAuthExpiredError } from "./googletasks";
+import { FormModal, ConfirmModal, StepsModal, FieldSpec } from "./ui";
+import {
+  GoogleToken, authorizeGoogle, completeGoogleAuth, GOOGLE_PROTOCOL_ACTION,
+  GoogleAuthExpiredError, revokeGoogleToken, redactSecrets, isUserCapError,
+} from "./googletasks";
+import { SITE_HOST } from "./appdomain";
 import { GTSyncService } from "./gtSync";
 interface PASettings {
   dataRoot: string;
@@ -770,40 +774,140 @@ export default class MomentumPlugin extends Plugin implements PAHost {
     );
   }
 
-  async connectGoogleTasks(): Promise<void> {
-    const logLines: string[] = [`# Google Tasks Auth Log\n\nStarted: ${new Date().toISOString()}\n`];
-    const log = (msg: string) => { logLines.push(`- ${msg}`); };
-    const flushLog = async () => {
+  /**
+   * Single writer for the Google auth log. Every line passes through `redactSecrets`, so a
+   * token can never reach the file even if a future call site logs a whole URL or header.
+   */
+  private authLogger(): { log: (stage: string, msg: string) => void; flush: () => Promise<void> } {
+    const lines: string[] = [`# Google Tasks Auth Log\n\nStarted: ${new Date().toISOString()}\n`];
+    const log = (stage: string, msg: string) => {
+      lines.push(`- ${new Date().toISOString()} · stage=${stage} · ${redactSecrets(msg, this.settings.googleToken)}`);
+    };
+    const flush = async () => {
       try {
         const logPath = `${this.settings.dataRoot}/Config/google-auth-debug.md`;
         const f = this.app.vault.getAbstractFileByPath(logPath);
-        const content = logLines.join("\n");
+        const content = lines.join("\n");
         if (f instanceof TFile) await this.app.vault.modify(f, content);
         else await this.app.vault.create(logPath, content);
-      } catch { /* best-effort */ }
+      } catch { /* best-effort: a log write must never break auth */ }
     };
+    return { log, flush };
+  }
+
+  /**
+   * Shows a one-time-per-click explainer before opening Google's consent flow, so the
+   * "Google hasn't verified this app" screen doesn't read as a scam or a broken plugin.
+   * That screen is unavoidable while the OAuth verification is pending (it depends on
+   * Google's review, not on anything the plugin does) — the least we can do is tell the
+   * user exactly which two clicks get them past it, and why they're safe.
+   */
+  explainGoogleVerificationWarning(onContinue: () => void): void {
+    new StepsModal(this.app, {
+      title: "Before you connect: a Google warning screen",
+      intro:
+        "Momentum Life's Google sign-in is still pending Google's app verification, so " +
+        "Google shows a warning before you can continue. This is expected — it's not an " +
+        "error, and it isn't specific to this update.",
+      steps: [
+        "Click \"Connect Google account\" below. Google opens in your browser.",
+        "If you see a red screen titled \"Google hasn't verified this app\", click " +
+          "\"Advanced\" (small link, bottom left).",
+        `Click the link that appears, "Go to ${SITE_HOST} (unsafe)".`,
+        "Choose your Google account and approve the Google tasks permission.",
+      ],
+      note:
+        "Why it's safe to continue: Momentum Life is open source " +
+        "(github.com/jnagase/obsidian-momentum), and this screen only means Google's review " +
+        "of the app is still pending — not that anything is wrong with the request. The " +
+        "permission asks for Google tasks access only, never your email, files or contacts.",
+      primary: { label: "Connect Google account", onClick: onContinue },
+    }).open();
+  }
+
+  async connectGoogleTasks(): Promise<void> {
+    const { log, flush } = this.authLogger();
     try {
-      log("Calling authorizeGoogle…");
-      await flushLog();
+      log("authorize", "Calling authorizeGoogle…");
+      await flush();
       new Notice("Opening Google authorisation in your browser…");
-      const token = await authorizeGoogle((url) => { log(`Opening URL: ${url.slice(0, 80)}…`); window.open(url, "_blank"); }, log);
-      log(`Token received — email: ${token.email}, hasAccess: ${!!token.access_token}, hasRefresh: ${!!token.refresh_token}`);
+      const token = await authorizeGoogle(
+        (url) => { log("authorize", `Opening URL: ${url.slice(0, 80)}…`); window.open(url, "_blank"); },
+        (m) => log("authorize", m),
+      );
+      log("exchange", `Token received — hasAccess: ${!!token.access_token}, hasRefresh: ${!!token.refresh_token}`);
       this.settings.googleToken = token;
       this.settings.googleTasksEnabled = true;
       await this.saveSettings();
-      log("Settings saved successfully.");
-      await flushLog();
-      new Notice(`✓ Connected as ${token.email || "Google user"}. Syncing…`);
+      log("exchange", "Settings saved successfully.");
+      await flush();
+      new Notice("✓ connected to Google tasks. Syncing…");
       const settingTab = (this.app as unknown as { setting?: { open: () => void; openTabById: (id: string) => void } }).setting;
       if (settingTab) { settingTab.open(); settingTab.openTabById(this.manifest.id); }
       // Kick off an initial sync right after connecting.
       void this.syncGoogleTasks(true);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      log(`ERROR: ${msg}`);
-      await flushLog();
-      new Notice(`Google tasks connection failed: ${msg}`);
+      log("authorize", `ERROR: ${msg}`);
+      await flush();
+      // The lifetime cap of an unverified app blocks NEW accounts only; anyone already
+      // connected keeps syncing. Saying so avoids the conclusion that the plugin is broken.
+      if (isUserCapError(msg)) {
+        new Notice(
+          "Google tasks: this app has reached the limit of accounts Google allows while its " +
+          "verification is pending. Accounts already connected keep syncing. See the README " +
+          "for the verification status.",
+          15000,
+        );
+      } else {
+        new Notice(`Google tasks connection failed: ${msg}`);
+      }
     }
+  }
+
+  /**
+   * Disconnects Google: asks Google to revoke the grant, then drops the local token.
+   *
+   * Previously this only cleared the token locally, which left the authorisation alive in the
+   * user's Google account — an orphan grant, and a privacy policy that would have been lying
+   * when it says disconnecting ends the app's access.
+   *
+   * Vault notes are never touched, including their google_id/google_list fields, so
+   * reconnecting later resumes instead of re-importing everything.
+   */
+  async disconnectGoogleTasks(): Promise<void> {
+    const token = this.settings.googleToken;
+    if (!token) return;
+    const confirmed = await new Promise<boolean>((resolve) => {
+      let decided = false;
+      const modal = new ConfirmModal(
+        this.app,
+        "Disconnect Google tasks? The app's access to your Google account will be revoked. Your task notes in the vault are kept.",
+        () => { decided = true; resolve(true); },
+      );
+      modal.onClose = () => { modal.contentEl.empty(); if (!decided) resolve(false); };
+      modal.open();
+    });
+    // Cancelling changes nothing at all — no request sent, token untouched.
+    if (!confirmed) return;
+
+    const { log, flush } = this.authLogger();
+    const outcome = await revokeGoogleToken(token);
+    log("revoke", outcome.ok ? "Revocation confirmed by Google." : `Revocation NOT confirmed (${outcome.reason}): ${outcome.detail}`);
+
+    // The local token goes either way: a user who asked to disconnect must end up
+    // disconnected even when Google is unreachable.
+    this.settings.googleToken = null;
+    await this.saveSettings();
+    this.resetGoogleSyncInterval();
+    await flush();
+
+    new Notice(
+      outcome.ok
+        ? "✓ Google tasks: access revoked and disconnected."
+        : "Google tasks: disconnected locally, but revocation wasn't confirmed. You can also remove access at myaccount.google.com/permissions.",
+      outcome.ok ? undefined : 15000,
+    );
   }
 
   async syncGoogleTasks(silent = false): Promise<void> {
@@ -982,17 +1086,21 @@ class PASettingTab extends PluginSettingTab {
     if (this.plugin.settings.googleTasksEnabled) {
       new Setting(containerEl)
         .setName("Google account")
-        .setDesc(connected ? `Connected as ${token.email || "Google user"}` : "Not connected.")
+        // No email is shown: the Tasks scope doesn't grant access to the user's profile, so
+        // the plugin genuinely doesn't know the address (see the note in googletasks.ts).
+        .setDesc(connected ? "Connected." : "Not connected.")
         .addButton((b) => {
           if (connected) {
             b.setButtonText("Disconnect").onClick(async () => {
-              this.plugin.settings.googleToken = null;
-              await this.plugin.saveSettings();
+              // Revokes the grant at Google and clears the local token, after confirmation.
+              await this.plugin.disconnectGoogleTasks();
               rerender();
             });
           } else {
             b.setButtonText("Connect Google account").setCta().onClick(() => {
-              void this.plugin.connectGoogleTasks().then(() => rerender());
+              this.plugin.explainGoogleVerificationWarning(() => {
+                void this.plugin.connectGoogleTasks().then(() => rerender());
+              });
             });
           }
         });

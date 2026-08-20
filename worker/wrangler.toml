@@ -2,6 +2,34 @@ name = "momentum-google"
 main = "src/index.js"
 compatibility_date = "2024-11-01"
 
+# ---------------------------------------------------------------------------------------
+# DO NOT set this to false, and do not remove it.
+#
+# Every Momentum Life release published so far has the workers.dev hostname compiled into
+# main.js as WORKER_BASE. Those installs call /auth, /exchange and /refresh on that hostname.
+# Turning workers.dev off would break Google authentication for ALL of them at once, with no
+# way for the user to fix it other than upgrading the plugin.
+#
+# The custom domain below is ADDITIVE: the Worker answers on both hostnames, with identical
+# behaviour, because the redirect_uri it sends to Google is a fixed constant (src/config.js)
+# and never derived from the incoming host.
+# ---------------------------------------------------------------------------------------
+workers_dev = true
+
+# Custom domain for the broker. Must stay in sync with `authHost` in ../app-domain.json —
+# TOML cannot import JSON, so test/worker-config.test.ts guards that pair.
+#
+# First-level subdomain on purpose: Cloudflare Universal SSL covers the apex and one wildcard
+# level only, so momentumlife-auth.jnagase.com gets a certificate automatically while
+# auth.momentumlife.jnagase.com would not.
+[[routes]]
+pattern = "momentumlife-auth.jnagase.com"
+custom_domain = true
+
 # Secrets (set with wrangler, NOT here):
 #   npx wrangler secret put GOOGLE_CLIENT_ID
 #   npx wrangler secret put GOOGLE_CLIENT_SECRET
+#
+# No storage bindings (KV / D1 / R2 / Durable Objects) are declared, and none may be added:
+# the privacy policy states the broker is stateless and persists no tokens, authorization
+# codes or user identifiers.

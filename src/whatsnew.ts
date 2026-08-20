@@ -6,6 +6,25 @@ export interface ChangeEntry { version: string; sections: ChangeSection[]; }
 /** Release notes shown in the "What's new" dialog, newest first. */
 export const CHANGELOG: ChangeEntry[] = [
   {
+    version: "0.6.0",
+    sections: [
+      {
+        title: "Improved — Google tasks (beta)",
+        items: [
+          "Your Google connection keeps working exactly as before: this release moves the sign-in service to its own address, and **nothing is required from you** — no reconnecting, no settings to change.",
+          "Disconnecting now really disconnects: it asks Google to revoke the app's access instead of only forgetting the token locally, so no stale authorisation is left behind in your Google account. Your task notes are always kept.",
+          "Clearer errors when Google refuses: an expired session now says so and tells you to reconnect, instead of a generic failure.",
+        ],
+      },
+      {
+        title: "New — privacy policy",
+        items: [
+          "Momentum Life now has a published privacy policy describing exactly what the Google tasks sync touches: your tasks stay in your vault, and the sign-in service never sees their content. Linked from the README.",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.5.9",
     sections: [
       {

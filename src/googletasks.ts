@@ -1,10 +1,17 @@
 import { requestUrl } from "obsidian";
+import { WORKER_BASE } from "./appdomain";
 
 // OAuth is brokered by a Cloudflare Worker that holds the Google client_id/secret
 // server-side — NO secret ships in the plugin. The plugin only talks to the Worker:
 //   /auth (build consent URL) · /callback (deep-links back) · /exchange · /refresh.
-// Set this to your deployed Worker URL (no trailing slash). See worker/README.md.
-const WORKER_BASE = "https://momentum-google.jaime-nagase.workers.dev";
+//
+// WORKER_BASE is derived from app-domain.json, the same file the Worker reads to build its
+// CANONICAL_REDIRECT_URI — so the two can never drift apart. There is deliberately NO fallback
+// to the old workers.dev origin: that host stays online for installs that still point at it,
+// but a new release never goes back to it.
+
+/** Google's token revocation endpoint. Takes the token itself; needs no client credentials. */
+const GOOGLE_REVOKE = "https://oauth2.googleapis.com/revoke";
 /** Obsidian protocol action the Worker deep-links back to: obsidian://momentum-google */
 export const GOOGLE_PROTOCOL_ACTION = "momentum-google";
 
@@ -120,24 +127,24 @@ export async function completeGoogleAuth(params: Record<string, string>, onLog?:
     // 401 invalid_client = wrong/stale secret on the Worker; 400 = bad grant/verifier.
     if (r.status >= 400) throw new Error(`Token exchange failed: ${r.status}${fmtErr(r.text)}`);
     const j = r.json as { access_token: string; refresh_token: string; expires_in: number };
-    const email = await fetchEmail(j.access_token);
-    onLog?.(`Token OK — email: ${email}`);
-    resolve({ access_token: j.access_token, refresh_token: j.refresh_token, expires_at: Date.now() + (j.expires_in - 60) * 1000, email });
+    onLog?.("Token OK.");
+    resolve({ access_token: j.access_token, refresh_token: j.refresh_token, expires_at: Date.now() + (j.expires_in - 60) * 1000 });
   } catch (e) {
     onLog?.(`ERROR completing auth: ${e instanceof Error ? e.message : String(e)}`);
     reject(e instanceof Error ? e : new Error(String(e)));
   }
 }
 
-async function fetchEmail(accessToken: string): Promise<string> {
-  try {
-    const r = await requestUrl({ url: "https://www.googleapis.com/oauth2/v3/userinfo",
-      headers: { Authorization: `Bearer ${accessToken}` }, throw: false });
-    if (r.status >= 400) return "";
-    const j = r.json as { email?: string };
-    return j.email ?? "";
-  } catch { return ""; }
-}
+// NOTE: there is no fetchEmail() any more, on purpose.
+//
+// It called Google's OAuth2 `userinfo` endpoint, which the requested scope (.../auth/tasks)
+// does not authorise — so it always answered 401 and the function always returned "". The
+// settings UI shows a plain "Connected.", so removing it changes nothing a user can see.
+//
+// Keeping a call that is guaranteed to fail would also contradict what the privacy policy and
+// the scope justification state: that the plugin reads tasks and task lists, and nothing else
+// from the Google account. Restoring it would mean adding `openid email` to the scopes, which
+// widens the consent screen and the verification surface for a cosmetic label.
 
 /**
  * Thrown when Google refuses the stored refresh token (`invalid_grant`): the grant was
@@ -167,6 +174,92 @@ export async function refreshToken(token: GoogleToken): Promise<GoogleToken> {
   }
   const j = r.json as { access_token: string; expires_in: number };
   return { ...token, access_token: j.access_token, expires_at: Date.now() + (j.expires_in - 60) * 1000 };
+}
+
+/**
+ * Outcome of asking Google to revoke a grant. `reason` exists for the log and the message
+ * shown to the user — it never changes what happens to the local token, which is always
+ * removed by the caller. A user who clicked "disconnect" must end up disconnected even if
+ * Google is unreachable.
+ */
+export type RevokeOutcome =
+  | { ok: true }
+  | { ok: false; reason: "google_error" | "network" | "timeout"; detail: string };
+
+/** Hard ceiling for the revoke call. requestUrl exposes no timeout, hence the manual race. */
+const REVOKE_TIMEOUT_MS = 10_000;
+
+/**
+ * Asks Google to revoke the grant. ONE attempt, no retry: a retry would only delay the answer
+ * the user is waiting on, and the local token is dropped either way.
+ *
+ * Sends the refresh token when there is one — revoking a refresh token also invalidates the
+ * access tokens derived from it, so it ends the grant rather than one session.
+ *
+ * Does NOT touch stored settings; `disconnectGoogleTasks` in main.ts owns that.
+ */
+export async function revokeGoogleToken(
+  token: GoogleToken,
+  /** Overridable only so the property test can exercise the timeout branch quickly. */
+  timeoutMs: number = REVOKE_TIMEOUT_MS,
+): Promise<RevokeOutcome> {
+  const value = token.refresh_token || token.access_token;
+  if (!value) return { ok: true }; // nothing to revoke
+  let timer: number | undefined;
+  try {
+    const revoke = requestUrl({
+      url: GOOGLE_REVOKE,
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: `token=${encodeURIComponent(value)}`,
+      throw: false,
+    });
+    const timeout = new Promise<"timeout">((resolve) => {
+      timer = window.setTimeout(() => resolve("timeout"), timeoutMs);
+    });
+    const result = await Promise.race([revoke, timeout]);
+    if (result === "timeout") {
+      return { ok: false, reason: "timeout", detail: `no response within ${timeoutMs / 1000}s` };
+    }
+    if (result.status >= 400) {
+      // Google answers 400 invalid_token when the grant is already gone — which means the
+      // goal is met, so treat it as success rather than alarming the user.
+      const detail = googleError(result.text);
+      if (detail.includes("invalid_token")) return { ok: true };
+      return { ok: false, reason: "google_error", detail: `${result.status}${detail ? ` — ${detail}` : ""}` };
+    }
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, reason: "network", detail: e instanceof Error ? e.message : String(e) };
+  } finally {
+    if (timer !== undefined) window.clearTimeout(timer);
+  }
+}
+
+/**
+ * Replaces every known secret with "<redacted>" before a line reaches a log file.
+ *
+ * Applied at the single point where the auth log is written, so "no secret in the log" is an
+ * invariant of the writer instead of a rule each call site has to remember.
+ */
+export function redactSecrets(line: string, token: GoogleToken | null): string {
+  let out = line;
+  for (const secret of [token?.access_token, token?.refresh_token]) {
+    if (secret && secret.length >= 8) out = out.split(secret).join("<redacted>");
+  }
+  // Bearer headers and code/token query params, in case a URL or header ever gets logged.
+  // Deliberately `\S+` and not a base64url character class: a token carrying an unexpected
+  // character would otherwise slip past the redaction, which is the one failure mode this
+  // function exists to prevent.
+  out = out.replace(/Bearer\s+\S+/gi, "Bearer <redacted>");
+  out = out.replace(/\b(code|token|refresh_token|access_token|client_secret)=([^\s&"']+)/gi, "$1=<redacted>");
+  return out;
+}
+
+/** True when Google refused because the unverified app hit its lifetime user cap. */
+export function isUserCapError(message: string): boolean {
+  const m = message.toLowerCase();
+  return m.includes("rate_limit_exceeded") || m.includes("user cap") || m.includes("admin_policy_enforced");
 }
 
 /** Pull Google's `error`/`error_description` out of a failed response body, for logs. */

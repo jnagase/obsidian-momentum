@@ -72,6 +72,13 @@ nossas conversas. Vale para toda interação neste repositório.
 - **NÃO rodar scripts Python** — travam em "working" por muito tempo. O usuário reclamou.
 - Evitar comandos pesados/lentos (find recursivo grande, greps enormes) — podem travar.
 - Preferir `requestUrl` (Obsidian) a `fetch`. Usar `window.setTimeout`, não `setTimeout`.
+- **`requestUrl` LANÇA em 4xx/5xx por padrão** (`throw?: boolean`, default `true` — confirmado no
+  `obsidian.d.ts`). Se o código for checar `r.status`, **passe `throw: false`**, senão a guarda é
+  **código morto** e o erro chega como `Request failed, status 400`, sem path e sem a mensagem do
+  Google. Foi exatamente isso que escondeu um bug de auth por uma sessão inteira. Pior: também
+  anulava a tolerância a 404 dos deletes (`status !== 404`), transformando "já não existe" em erro
+  fatal. Ao pegar erro de API, inclua o corpo da resposta na mensagem (ver `googleError()` em
+  `src/googletasks.ts`).
 - **Não usar `console.log`** (o lint bloqueia) — usar logs em arquivo ou `Notice`.
 
 ## Lint / convenções de UI
@@ -209,6 +216,17 @@ nossas conversas. Vale para toda interação neste repositório.
 - Progresso: o sync mostra um **Notice persistente** (duration 0) com evolução (X/total) e
   fecha ao terminar; pede pro usuário não editar tasks até acabar.
 - Logs de debug em `Momentum Life/Config/google-sync-debug.md` e `google-auth-debug.md`.
+- **Publishing status "Testing" revoga o refresh token a cada 7 dias.** Sintoma: sync morre com
+  `400 invalid_grant` / "Token has been expired or revoked", exatamente 7 dias após a autorização.
+  Fix: OAuth consent screen → **Publish app** → "In production" (não exige verificação pra isso) +
+  reconectar uma vez. **Nunca voltar para "Testing".** Diagnóstico rápido pelo código de erro:
+  `400 invalid_grant` = grant do usuário morto (client OK, secret OK) · `401 invalid_client` =
+  secret errado no Worker. O plugin trata o primeiro caso com `GoogleAuthExpiredError` e Notice
+  acionável, inclusive em sync silencioso.
+- **App não verificado tem teto de 100 contas**, válido pra vida toda do projeto e **sem reset**.
+  Ao atingir, usuário novo é bloqueado (não é só o aviso "Google hasn't verified this app"). O
+  contador fica em Google Auth Platform → Audience. Remover o aviso e o teto exige verificação
+  OAuth → spec em `.kiro/specs/google-oauth-verification/`.
 - **⚠️ Multi-device + Obsidian Sync (LIMITAÇÃO conhecida):** com o **mesmo vault espelhado
   por Obsidian Sync** em dois dispositivos e o **Google sync ligado nos dois**, os dois
   escrevem `google_id` na mesma nota e/ou criam a task no Google antes do id propagar. Dá

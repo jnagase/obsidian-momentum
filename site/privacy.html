@@ -77,29 +77,18 @@
   sync or of the plugin. There is no usage tracking, no crash reporting service and no identifier
   assigned to you.</p>
 
-  <!--
-    POLICY v1 — describes the CURRENTLY RELEASED plugin, where disconnecting deletes the local
-    tokens but does not ask Google to revoke the grant.
-
-    v2 SWAP POINT (spec task 10.10, checklist item 3.15): in the release commit that ships
-    revokeGoogleToken(), replace the "In the plugin" bullet below with wording that says
-    disconnecting REVOKES the app's access, and bump "Last updated" to the release date.
-
-    Do not publish v2 earlier. Cloudflare Pages deploys on push to main, so a v2 published
-    before the plugin release would promise users something the version they are running does
-    not do — the exact mismatch that fails an OAuth review.
-  -->
   <h2>Revoking access</h2>
   <p>You can end the plugin's access to your Google account in two ways, and either one is enough:</p>
   <ul>
     <li><strong>In the plugin</strong> — open the Momentum Life settings and use the disconnect
-    control. The tokens stored on your device are deleted and the plugin immediately stops making
-    any request to the Google Tasks API. To also withdraw the permission you granted, use the second
-    method below.</li>
+    control. After you confirm, the plugin asks Google to revoke the app's access and deletes the
+    tokens stored on your device, so it immediately stops making any request to the Google Tasks
+    API. If Google's revocation cannot be confirmed (for example, no network connection), the local
+    tokens are deleted anyway and you are told to also remove access from your Google Account
+    using the method below.</li>
     <li><strong>In your Google Account</strong> — open
     <a href="https://myaccount.google.com/permissions">Third-party apps &amp; services</a> and remove
-    access for Momentum Life. This revokes the permission at Google, so the stored tokens stop
-    working.</li>
+    access for Momentum Life. This revokes the permission at Google directly.</li>
   </ul>
   <p>In both cases, <strong>the task notes already in your vault are kept</strong>. Revoking access
   stops future synchronisation; it never deletes your notes.</p>
@@ -125,7 +114,7 @@
   <p>Questions about this policy or about your data:
   <a href="mailto:jaime.nagase@gmail.com">jaime.nagase@gmail.com</a>.</p>
 
-  <p class="updated">Last updated: 2026-08-15</p>
+  <p class="updated">Last updated: 2026-08-19</p>
 
 </main>
 </body>

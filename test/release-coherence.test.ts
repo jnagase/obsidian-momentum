@@ -50,8 +50,12 @@ describe("the changelog covers this release", () => {
     expect(CHANGELOG[0].version).toBe(manifest.version);
   });
 
-  it("tells the user that nothing is required of them (7.8)", () => {
-    const entry = CHANGELOG.find((e) => e.version === manifest.version);
+  it("tells the user that nothing is required of them, in the release that shipped the domain migration (7.8)", () => {
+    // Requirement 7.8 is about the specific release that moved the Google auth service to its
+    // own domain (0.6.0) — not "whichever version manifest.json currently carries". Later,
+    // unrelated releases (e.g. 0.6.1's cardio/finance work) must not be required to repeat this
+    // notice, so this checks the 0.6.0 entry by version, not `manifest.version`.
+    const entry = CHANGELOG.find((e) => e.version === "0.6.0");
     expect(entry).toBeDefined();
     const text = entry!.sections.flatMap((s) => [s.title, ...s.items]).join(" ").toLowerCase();
     // The domain migration is invisible; saying so is what keeps it from looking like a

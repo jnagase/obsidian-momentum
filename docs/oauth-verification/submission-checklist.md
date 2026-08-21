@@ -24,7 +24,7 @@ Tracking document for the verification of project `obsidian-tasks-499613`.
 | ID | Critério (resumo) | Estado | Evidência | Última mudança |
 | --- | --- | --- | --- | --- |
 | 1.1 | Domínio registrado ao autor, fora de sufixo público, expiração ≥ 90 d da submissão | concluído | `jnagase.com` já registrado; confirmar validade no painel | 2026-08-15 |
-| 1.2 | HTTPS válido em cada host usado, resposta ≤ 5 s, cert com cadeia completa e ≥ 15 d | não iniciado | saída de `curl -sSI` (tarefa 4.7) | — |
+| 1.2 | HTTPS válido em cada host usado, resposta ≤ 5 s, cert com cadeia completa e ≥ 15 d | concluído | `curl -sSI` em `momentumlife.jnagase.com/` e `/privacy`: ambos `HTTP/2 200`, sem `301`; `curl -sSv`: TLSv1.3, `SSL certificate verify ok`, cert válido até 2026-11-17 (>15d); `momentumlife-auth.jnagase.com/auth` responde `HTTP/2 400` (esperado, sem parâmetros) sobre TLS válido | 2026-08-21 |
 | 1.3 | Propriedade verificada no Search Console por conta com papel **Owner** no projeto | concluído | domínio `jnagase.com` verificado via TXT (integração direta Google↔Cloudflare); dashboard confirmado | 2026-08-19 |
 | 1.4 | "Authorized domains" recebe o domínio raiz, sem esquema/subdomínio/caminho/barra | concluído | Consent Screen mostra apenas `jnagase.com` | 2026-08-19 |
 | 1.5 | Todo domínio raiz de URL registrada consta em "Authorized domains" | concluído | homepage, política e redirect canônico todos sob `jnagase.com`, único domínio listado | 2026-08-19 |
@@ -122,7 +122,7 @@ Tracking document for the verification of project `obsidian-tasks-499613`.
 | 7.5 | Versões novas usam o domínio como único `WORKER_BASE`, sem fallback | concluído | `src/appdomain.ts` + Property 11 | 2026-08-15 |
 | 7.6 | Redirect URI ainda usado por versão em suporte permanece registrado | concluído | Fase 2 é aditiva; remoção só na Fase 6 | 2026-08-15 |
 | 7.7 | Encerrar o legacy registra data, versão mínima e ≥ 90 d de aviso | não iniciado | **fora do escopo desta submissão** | — |
-| 7.8 | Release informa no changelog que nada precisa ser feito | não iniciado | `src/whatsnew.ts` | — |
+| 7.8 | Release informa no changelog que nada precisa ser feito | concluído | `src/whatsnew.ts` 0.6.0: "nothing is required from you" | 2026-08-20 |
 | 7.9 | `/exchange` pelo legacy envia o mesmo canônico do `/auth` | concluído | Property 1 | 2026-08-15 |
 | 7.10 | Refresh recusado preserva token e notas, sem reautorização automática | concluído | `GoogleAuthExpiredError` + Property 8 | 2026-08-15 |
 | 7.11 | Sem versão usando o legacy, o canônico é o único redirect registrado | concluído | redirect URI `workers.dev/callback` removido do client; revalidado por `curl` nos dois hosts (mesma resposta, mesmo redirect_uri) | 2026-08-19 |
@@ -137,7 +137,7 @@ Tracking document for the verification of project `obsidian-tasks-499613`.
 | 8.4 | Declara as 4 restrições de Limited Use explicitamente | concluído | `scope-justification.md` | 2026-08-15 |
 | 8.5 | Texto único em inglês, ≤ 4.000 caracteres | concluído | `test/submission-docs.test.ts` | 2026-08-15 |
 | 8.6 | Consistente com a política em armazenamento, compartilhamento e retenção | concluído | revisão cruzada | 2026-08-15 |
-| 8.7 | Versionado no repo, cópia idêntica no Verification Center, hash registrado | em andamento | hash registrado no envio | 2026-08-15 |
+| 8.7 | Versionado no repo, cópia idêntica no Verification Center, hash registrado | em andamento | `docs/oauth-verification/scope-justification.md` no repo; falta colar no Verification Center e registrar hash | 2026-08-20 |
 | 8.8 | Divergência entre justificativa, política e código bloqueia a submissão | não iniciado | Property 13 | — |
 
 ## Requirement 9 — Vídeo demonstrativo
@@ -163,16 +163,20 @@ Tracking document for the verification of project `obsidian-tasks-499613`.
 A submissão **não sai** enquanto houver item em estado diferente de `concluído`.
 `test/checklist.property.test.ts` calcula a lista a partir deste arquivo.
 
-**Bloqueadores no momento** (resumo por fase):
+**Bloqueadores no momento** (resumo por fase) — atualizado 2026-08-21, após reconferir todo o
+código e a plataforma das Fases 1-7:
 
-- **Fase 3 — plataforma**: 1.2, 1.3, 1.4, 1.5, 2.1, 3.1, 5.1
-- **Fase 2/6 — OAuth client**: 6.3, 7.11
-- **Fase 4/5 — deploy do Worker**: 6.1
-- **Gates de integração**: 7.3 (I2), 7.4 (I3)
-- **Fase 7 — release**: 3.15, 7.8, 8.7
-- **Fase 8 — vídeo**: 9.1 a 9.11
-- **Processo (durante o review)**: 1.6, 1.8, 1.9, 2.9, 3.16, 5.3, 5.6, 5.7, 5.8, 8.8
+- **Fase 7 — release**: 8.7 (falta colar a justificativa no Verification Center e registrar o
+  hash — ação que só faz sentido no momento da submissão, tarefa 13.3)
+- **Fase 8 — vídeo**: 9.1 a 9.11 (nada gravado ainda; único bloco de trabalho real restante fora
+  do processo de review)
+- **Processo (só se aplica durante o review, depois do envio)**: 1.6, 1.8, 1.9, 2.9, 3.16, 5.3,
+  5.6, 5.7, 5.8, 8.8
 - **Fora do escopo desta submissão**: 7.7 (encerrar o legacy)
+
+Todo o resto (Fases 1-6, gates I1-I5, release da Fase 7 exceto 8.7) está `concluído` e verificado:
+código com 127/127 testes passando (`npm test`), lint limpo, build limpo, e os dois hosts de
+produção reconferidos por `curl` em 2026-08-21 (ver 1.2 acima).
 
 ## Registro de verificação de domínio
 

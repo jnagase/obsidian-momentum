@@ -30,7 +30,7 @@ crítico.
 
 ## Tasks
 
-- [ ] 1. Fase 1 — Domínio, fonte única do domínio e checklist de submissão
+- [x] 1. Fase 1 — Domínio, fonte única do domínio e checklist de submissão
 
   - [x] 1.1 👤 **MANUAL** Conferir a zona `jnagase.com` na Cloudflare (nada a comprar)
     - **Domínio decidido: `jnagase.com`, já registrado pelo autor** (D1). Não há compra de domínio
@@ -121,10 +121,10 @@ crítico.
       checklist, com um estado válido. Falha se um critério for esquecido ou duplicado.
     - _Requirements: 10.1_
 
-- [ ] 2. Checkpoint — base do domínio
+- [x] 2. Checkpoint — base do domínio
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 3. Fase 2 — Registrar o redirect canônico no OAuth_Client (aditivo, reversível)
+- [x] 3. Fase 2 — Registrar o redirect canônico no OAuth_Client (aditivo, reversível)
 
   - [x] 3.1 👤 **MANUAL** Adicionar o redirect canônico mantendo o legado
     - Google Cloud, projeto `obsidian-tasks-499613`, OAuth_Client **Web `8btbj3o6…`** — o mesmo,
@@ -140,7 +140,7 @@ crítico.
     - Registrar no checklist (print da tela dos redirect URIs).
     - _Requirements: 6.3, 7.6, 10.1_
 
-- [ ] 4. Fase 3 — Publicar as páginas, verificar o domínio e alinhar a consent screen
+- [x] 4. Fase 3 — Publicar as páginas, verificar o domínio e alinhar a consent screen
 
   - [x] 4.1 🤖 **CÓDIGO** Criar `site/index.html` (App_Homepage)
     - `<h1>` com `Momentum Life` — caractere a caractere igual ao nome que será configurado na
@@ -248,10 +248,10 @@ crítico.
     - Registrar prints no checklist.
     - _Requirements: 5.1, 5.2, 5.3, 5.4, 1.4, 1.5_
 
-- [ ] 5. Checkpoint — páginas no ar e Google alinhado
+- [x] 5. Checkpoint — páginas no ar e Google alinhado
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 6. Fase 4 — Custom domain do Worker (dois hostnames ativos)
+- [x] 6. Fase 4 — Custom domain do Worker (dois hostnames ativos)
 
   - [x] 6.1 🤖 **CÓDIGO** Configurar `worker/wrangler.toml`
     - Adicionar `workers_dev = true` **explicitamente**, com comentário de que desligar isso quebra
@@ -281,7 +281,7 @@ crítico.
     - Registrar no checklist.
     - _Requirements: 6.1, 7.1_
 
-- [ ] 7. Fase 5 — Deploy do redirect canônico (gate I1 + I2)
+- [x] 7. Fase 5 — Deploy do redirect canônico (gate I1 + I2)
 
   - [x] 7.1 🤖 **CÓDIGO** Trocar `url.origin` pelo `CANONICAL_REDIRECT_URI` em `worker/src/index.js`
     - Importar `CANONICAL_REDIRECT_URI` de `worker/src/config.js`.
@@ -410,10 +410,10 @@ crítico.
     - **Bloqueia a Fase 6.** Registrar resultado e data no checklist.
     - _Requirements: 7.3_
 
-- [ ] 8. Checkpoint — Broker canônico validado
+- [x] 8. Checkpoint — Broker canônico validado
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 9. Fase 6 — Remover o redirect legado do OAuth_Client
+- [x] 9. Fase 6 — Remover o redirect legado do OAuth_Client
 
   - [x] 9.1 👤 **MANUAL** Remover o redirect URI de `workers.dev`
     - **Só executar com I1 (7.11) e I2 (7.12) verdes.** Antes disso, remover deixa usuários sem
@@ -436,7 +436,7 @@ crítico.
     - Registrar no checklist.
     - _Requirements: 7.1, 7.2, 7.11_
 
-- [ ] 10. Fase 7 — Release único do plugin (gate I3 + I4)
+- [x] 10. Fase 7 — Release único do plugin (gate I3 + I4)
 
   Um **único commit** e um **único release** com código + política v2 + README + whatsnew + bump.
   Não fatiar: a política de privacidade não pode ficar mais generosa que o código (D11).
@@ -553,7 +553,7 @@ crítico.
     - `fc.assert(fc.property(...), { numRuns: 100 })`
     - Tag: `// Feature: google-oauth-verification, Property 10: A superfície de rede do plugin é fechada`
 
-  - [ ] 10.9 🤖 **CÓDIGO** Publicar a política de privacidade na **versão v2**
+  - [x] 10.9 🤖 **CÓDIGO** Publicar a política de privacidade na **versão v2**
     - Editar `site/privacy.html`: em "Revoking access", o caminho do plugin passa a declarar que
       desconectar **revoga o acesso do app** e remove o token local. O caminho da página de
       permissões da conta Google permanece.
@@ -596,7 +596,7 @@ crítico.
       release usa `npm ci`, e lock dessincronizado já quebrou a verificação de attestation.
     - _Requirements: 7.8_
 
-  - [ ] 10.14 ⚠️ **CONFIRMAÇÃO** Lint, build e deploy local no vault de teste
+  - [x] 10.14 ⚠️ **CONFIRMAÇÃO** Lint, build e deploy local no vault de teste
     - Perguntar ao usuário antes de rodar. Ordem: `npx eslint src --ext .ts` → `npm test` →
       `npm run build`.
     - O warning pré-existente `'ymdLocal' is defined but never used` em `src/data.ts` é inofensivo.
@@ -620,7 +620,7 @@ crítico.
     - **Bloqueia o release (10.17).** Registrar no checklist.
     - _Requirements: 4.1, 4.3, 4.4, 4.6_
 
-  - [ ] 10.17 ⚠️ **CONFIRMAÇÃO** Publicar o release
+  - [x] 10.17 ⚠️ **CONFIRMAÇÃO** Publicar o release
     - **Só com I3 (10.15) e I4 (10.16) verdes**, e só com ordem explícita do usuário.
     - **Um único commit** com: `src/appdomain.ts`, `src/googletasks.ts`, `src/main.ts`,
       `src/whatsnew.ts`, `site/privacy.html` (v2), `README.md`, os quatro arquivos de versão e o
@@ -635,7 +635,7 @@ crítico.
       que o `main.js` publicado não contém `child_process`.
     - _Requirements: 7.8_
 
-- [ ] 11. Checkpoint — release publicado
+- [x] 11. Checkpoint — release publicado
   - Ensure all tests pass, ask the user if questions arise.
 
 - [ ] 12. Fase 8 — Artefatos de submissão e vídeo demonstrativo

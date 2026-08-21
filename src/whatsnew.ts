@@ -6,6 +6,42 @@ export interface ChangeEntry { version: string; sections: ChangeSection[]; }
 /** Release notes shown in the "What's new" dialog, newest first. */
 export const CHANGELOG: ChangeEntry[] = [
   {
+    version: "0.6.1",
+    sections: [
+      {
+        title: "New — Fitness cardio support",
+        items: [
+          "Exercises can now be marked as strength or cardio. Cardio exercises track distance and duration instead of weight and sets, with pace (min/km) computed automatically.",
+          "A new cardio progress chart sits next to the weight progress chart, plotting distance over time per split.",
+          "The monthly fitness summary now shows total distance for months with cardio activity.",
+          "Existing exercises and workouts keep working exactly as before — nothing to migrate.",
+        ],
+      },
+      {
+        title: "New — Finance net worth trends",
+        items: [
+          "A new net worth card on the Finance page shows your accumulated balance since you started tracking, with an optional starting balance for money you already had.",
+          "Two small yearly donuts show how past years closed and how the current year is going so far.",
+          "Line charts across the app now show the exact value when you hover a point.",
+        ],
+      },
+      {
+        title: "Fixed",
+        items: [
+          "Confirming a meal for a past day in Nutrition no longer logs it to today by mistake.",
+          "You can now delete a single meal log or a single workout for a day, instead of clearing the whole day.",
+          "Habits can be marked, unmarked, or have a relapse toggled on any past day, not just today — tap any day on the heatmap.",
+        ],
+      },
+      {
+        title: "Support the project",
+        items: [
+          "If Momentum Life has been useful, consider [buying me a coffee](https://buymeacoffee.com/jnagase) — it helps keep this plugin free and actively maintained. No pressure, just genuinely appreciated 🙏",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.6.0",
     sections: [
       {
@@ -272,9 +308,30 @@ export class WhatsNewModal extends Modal {
       e.sections.forEach((sec) => {
         contentEl.createDiv({ cls: "pa-whatsnew-section", text: sec.title });
         const ul = contentEl.createEl("ul", { cls: "pa-whatsnew-list" });
-        sec.items.forEach((it) => ul.createEl("li", { text: it }));
+        sec.items.forEach((it) => ul.createEl("li", {}, (li) => this.renderItemText(li, it)));
       });
     });
+  }
+
+  /** Renders one changelog item's text, turning `[label](url)` into a real clickable link
+   *  and `**bold**` into a real <strong> — a minimal inline-markdown subset, since these
+   *  items are plain strings rendered outside Obsidian's Markdown renderer. */
+  private renderItemText(li: HTMLElement, text: string): void {
+    const pattern = /\[([^\]]+)\]\((https?:\/\/[^)]+)\)|\*\*([^*]+)\*\*/g;
+    let lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(text))) {
+      if (match.index > lastIndex) li.appendText(text.slice(lastIndex, match.index));
+      if (match[1] != null) {
+        const a = li.createEl("a", { text: match[1], href: match[2] });
+        a.setAttr("target", "_blank");
+        a.setAttr("rel", "noopener");
+      } else if (match[3] != null) {
+        li.createEl("strong", { text: match[3] });
+      }
+      lastIndex = pattern.lastIndex;
+    }
+    if (lastIndex < text.length) li.appendText(text.slice(lastIndex));
   }
 
   onClose(): void {

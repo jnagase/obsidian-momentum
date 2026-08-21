@@ -86,3 +86,33 @@ export function safeName(title) {
     .replace(/\s+/g, " ")
     .trim()) || "untitled";
 }
+
+// ============================================================
+// FITNESS — pure cardio helpers, hand-mirrored from src/loaders.ts / src/data.ts.
+// Keep computePace / deriveWorkoutKind / totalCardioDistance in sync with the plugin.
+// ============================================================
+
+/** Pace in minutes/km, rounded to 1 decimal; null when distance or duration is not > 0. */
+export function computePace(distanceKm, durationMin) {
+  if (!(distanceKm > 0) || !(durationMin > 0)) return null;
+  return Math.round((durationMin / distanceKm) * 10) / 10;
+}
+
+/** Derives a Workout's kind from its logged entries. Empty array -> "empty". */
+export function deriveWorkoutKind(entries) {
+  if (!entries || entries.length === 0) return "empty";
+  const kinds = new Set(entries.map((e) => e.kind ?? "strength"));
+  if (kinds.size > 1) return "mixed";
+  return kinds.has("cardio") ? "cardio" : "strength";
+}
+
+/** Sum of distance across all cardio entries in the given workouts. */
+export function totalCardioDistance(workouts) {
+  let total = 0;
+  for (const w of workouts) {
+    for (const e of w.exercises || []) {
+      if ((e.kind ?? "strength") === "cardio") total += Number(e.distance) || 0;
+    }
+  }
+  return total;
+}

@@ -174,7 +174,7 @@ export function drawLineChart(
   parent: HTMLElement,
   labels: string[],
   series: LineSeries[],
-  opts: { goal?: number; goalColor?: string; height?: number } = {}
+  opts: { goal?: number; goalColor?: string; height?: number; format?: (n: number) => string } = {}
 ): void {
   const wrap = parent.createDiv({ cls: "pa-linechart" });
   const height = opts.height ?? 220;
@@ -182,6 +182,18 @@ export function drawLineChart(
     wrap.createDiv({ cls: "pa-muted", text: "Not enough data yet." });
     return;
   }
+  const fmt = opts.format ?? ((n: number) => String(n));
+  const tooltip = wrap.createDiv({ cls: "pa-chart-tooltip" });
+  // The SVG renders at width:100% (variable px) but its viewBox width is the fixed `w`
+  // below, so x must be converted to a percentage of the container; the SVG's height
+  // attribute equals the viewBox height, so y maps 1:1 to rendered pixels.
+  const showTip = (xPct: number, yPx: number, text: string) => {
+    tooltip.setText(text);
+    tooltip.style.left = `${xPct}%`;
+    tooltip.style.top = `${yPx}px`;
+    tooltip.addClass("visible");
+  };
+  const hideTip = () => tooltip.removeClass("visible");
   const w = 520;
   const padL = 34;
   const padR = 10;
@@ -201,6 +213,9 @@ export function drawLineChart(
   const yAt = (v: number) => padT + plotH * (1 - (v - min) / (max - min));
 
   const svg = svgEl("svg", { width: "100%", height, viewBox: `0 0 ${w} ${height}` });
+  // Stretch to fill the rendered box exactly (matches the other chart helpers below), so
+  // tooltip positions computed in viewBox units map 1:1 onto the rendered pixel box.
+  svg.setAttribute("preserveAspectRatio", "none");
 
   // Y gridlines + labels (4 steps)
   for (let g = 0; g <= 4; g++) {
@@ -231,7 +246,19 @@ export function drawLineChart(
     s.values.forEach((v, i) => { if (v != null) pts.push(`${xAt(i).toFixed(1)},${yAt(v).toFixed(1)}`); });
     if (pts.length) {
       svg.appendChild(svgEl("polyline", { fill: "none", stroke: s.color, "stroke-width": 2, points: pts.join(" ") }));
-      s.values.forEach((v, i) => { if (v != null) svg.appendChild(svgEl("circle", { cx: xAt(i), cy: yAt(v), r: 2.5, fill: s.color })); });
+      s.values.forEach((v, i) => {
+        if (v == null) return;
+        const cx = xAt(i);
+        const cy = yAt(v);
+        // Small visible dot + a larger invisible hit-area circle on top, so hovering
+        // near a point (not just the exact 2.5px dot) still triggers the tooltip.
+        svg.appendChild(svgEl("circle", { cx, cy, r: 2.5, fill: s.color }));
+        const hit = svgEl("circle", { cx, cy, r: 8, fill: "transparent", cursor: "pointer" });
+        const label = series.length > 1 ? `${s.name}: ${fmt(v)}` : `${labels[i]}: ${fmt(v)}`;
+        hit.addEventListener("mouseenter", () => showTip((cx / w) * 100, cy, label));
+        hit.addEventListener("mouseleave", hideTip);
+        svg.appendChild(hit);
+      });
     }
   });
 

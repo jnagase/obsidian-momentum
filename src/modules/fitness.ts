@@ -1,8 +1,9 @@
 import { PAContext } from "../context";
-import { Exercise, Split, Workout, WorkoutExercise, DEFAULT_SPLITS } from "../types";
+import { Exercise, ExerciseKind, Split, Workout, WorkoutExercise, DEFAULT_SPLITS } from "../types";
 import { ConfirmModal, FieldSpec, FormModal, toast, appendSidebarBtn } from "../ui";
 import { todayLocal, ymd } from "../util";
 import { drawRing, drawLineChart, LineSeries } from "../charts";
+import { computePace } from "../data";
 
 const SERIES_COLORS = ["#7c3aed", "#f59e0b", "#16a34a", "#3b82f6", "#ec4899", "#0ea5e9", "#ef4444", "#10b981", "#a855f7"];
 
@@ -53,6 +54,7 @@ export class FitnessModule {
     const cols = root.createDiv({ cls: "pa-two-col" });
     this.renderCalendar(cols, workouts);
     this.renderWeightProgress(cols, exercises, workouts);
+    this.renderCardioProgress(cols, exercises, workouts);
 
     this.renderWorkoutPlan(root, exercises);
     if (this.selectedSplit) this.renderWorkoutEditor(root, exercises);
@@ -172,7 +174,7 @@ export class FitnessModule {
     }
   }
 
-  // ---- Weight progress ----
+  // ---- Weight progress (strength exercises only) ----
   private renderWeightProgress(root: HTMLElement, exercises: Exercise[], workouts: Workout[]): void {
     const card = root.createDiv({ cls: "pa-panel" });
     const head = card.createDiv({ cls: "pa-section-head" });
@@ -183,7 +185,7 @@ export class FitnessModule {
 
     const splitWorkouts = workouts.filter((w) => w.split === this.weightSplit).sort((a, b) => a.date.localeCompare(b.date));
     const labels = splitWorkouts.map((w) => w.date.slice(5));
-    const exs = exercises.filter((e) => e.split === this.weightSplit);
+    const exs = exercises.filter((e) => e.split === this.weightSplit && e.kind !== "cardio");
     const series: LineSeries[] = exs.map((ex, i) => ({
       name: ex.name,
       color: SERIES_COLORS[i % SERIES_COLORS.length],
@@ -194,6 +196,26 @@ export class FitnessModule {
     })).filter((s) => s.values.some((v) => v != null));
 
     drawLineChart(card, labels, series, { height: 220 });
+  }
+
+  // ---- Cardio progress (distance over time, cardio exercises only) — sibling to weight progress ----
+  private renderCardioProgress(root: HTMLElement, exercises: Exercise[], workouts: Workout[]): void {
+    const card = root.createDiv({ cls: "pa-panel" });
+    card.createEl("h3", { text: "🏃 Cardio progress", cls: "pa-panel-title" });
+
+    const splitWorkouts = workouts.filter((w) => w.split === this.weightSplit).sort((a, b) => a.date.localeCompare(b.date));
+    const labels = splitWorkouts.map((w) => w.date.slice(5));
+    const exs = exercises.filter((e) => e.split === this.weightSplit && e.kind === "cardio");
+    const series: LineSeries[] = exs.map((ex, i) => ({
+      name: ex.name,
+      color: SERIES_COLORS[i % SERIES_COLORS.length],
+      values: splitWorkouts.map((w) => {
+        const found = w.exercises.find((we) => we.exercise === ex.name);
+        return found && found.distance != null ? found.distance : null;
+      }),
+    })).filter((s) => s.values.some((v) => v != null));
+
+    drawLineChart(card, labels, series, { height: 220 }); // empty series -> empty chart when the split has no cardio
   }
 
   // ---- Calendar day detail ----
@@ -226,26 +248,56 @@ export class FitnessModule {
     const card = panel.createDiv({ cls: "pa-card" });
     const head = card.createDiv({ cls: "pa-card-title-row" });
     head.createEl("strong", { text: `${w.split} - ${split?.name || ""} · ${w.duration}min` });
+    const del = head.createEl("button", { text: "🗑", cls: "pa-icon-btn" });
+    del.setAttr("aria-label", "Delete this workout log");
+    del.onclick = () => new ConfirmModal(this.ctx.app, `Delete this ${split?.name || w.split} workout (${w.duration}min)?`, async () => {
+      await this.ctx.store.deleteWorkout(w);
+      this.ctx.refresh();
+    }).open();
 
     if (!w.exercises.length) { card.createEl("p", { cls: "pa-muted", text: "No exercises." }); return; }
     const table = card.createEl("table", { cls: "pa-fit-table" });
     const thr = table.createEl("thead").createEl("tr");
-    ["Exercise", "Weight", "Sets"].forEach((h) => thr.createEl("th", { text: h }));
+    const hasCardio = w.exercises.some((we) => (we.kind ?? "strength") === "cardio");
+    const hasStrength = w.exercises.some((we) => (we.kind ?? "strength") === "strength");
+    const headers = ["Exercise"];
+    if (hasStrength) headers.push("Weight", "Sets");
+    if (hasCardio) headers.push("Distance (km)", "Duration (min)", "Pace");
+    headers.forEach((h) => thr.createEl("th", { text: h }));
     const tbody = table.createEl("tbody");
     w.exercises.forEach((we, idx) => {
+      const kind: ExerciseKind = we.kind ?? "strength";
       const tr = tbody.createEl("tr");
       tr.dataset.idx = String(idx);
       tr.createEl("td", { text: we.exercise, cls: "pa-fit-name" });
-      const wIn = tr.createEl("td").createEl("input", { cls: "pa-fit-input pa-log-w" });
-      wIn.type = "number"; wIn.value = String(we.weight);
-      const sIn = tr.createEl("td").createEl("input", { cls: "pa-fit-input pa-log-s" });
-      sIn.value = we.sets;
+      if (kind === "cardio") {
+        if (hasStrength) { tr.createEl("td", { text: "—" }); tr.createEl("td", { text: "—" }); }
+        const dIn = tr.createEl("td").createEl("input", { cls: "pa-fit-input pa-log-dist" });
+        dIn.type = "number"; dIn.value = String(we.distance ?? 0);
+        const durIn = tr.createEl("td").createEl("input", { cls: "pa-fit-input pa-log-dur" });
+        durIn.type = "number"; durIn.value = String(we.duration ?? 0);
+        const paceTd = tr.createEl("td", { cls: "pa-fit-pace" });
+        const pace = computePace(we.distance ?? 0, we.duration ?? 0);
+        paceTd.setText(pace != null ? `${pace} min/km` : "—");
+      } else {
+        const wIn = tr.createEl("td").createEl("input", { cls: "pa-fit-input pa-log-w" });
+        wIn.type = "number"; wIn.value = String(we.weight);
+        const sIn = tr.createEl("td").createEl("input", { cls: "pa-fit-input pa-log-s" });
+        sIn.value = we.sets;
+        if (hasCardio) { tr.createEl("td", { text: "—" }); tr.createEl("td", { text: "—" }); tr.createEl("td", { text: "—" }); }
+      }
     });
 
     const save = card.createEl("button", { text: "💾 Save changes", cls: "pa-mini-btn" });
     save.onclick = async () => {
       const updated: WorkoutExercise[] = w.exercises.map((we, idx) => {
+        const kind: ExerciseKind = we.kind ?? "strength";
         const tr = tbody.querySelector(`tr[data-idx="${idx}"]`);
+        if (kind === "cardio") {
+          const dv = tr?.querySelector("input.pa-log-dist") as HTMLInputElement | null;
+          const durv = tr?.querySelector("input.pa-log-dur") as HTMLInputElement | null;
+          return { ...we, distance: dv ? parseFloat(dv.value) || 0 : we.distance, duration: durv ? parseFloat(durv.value) || 0 : we.duration };
+        }
         const wv = tr?.querySelector("input.pa-log-w") as HTMLInputElement | null;
         const sv = tr?.querySelector("input.pa-log-s") as HTMLInputElement | null;
         return { ...we, weight: wv ? parseFloat(wv.value) || 0 : we.weight, sets: sv ? (sv.value.trim() || we.sets) : we.sets };
@@ -278,12 +330,20 @@ export class FitnessModule {
     if (!exs.length) {
       panel.createEl("p", { cls: "pa-muted", text: "No exercises in this workout. Add some with + exercise." });
     } else {
+      const hasStrength = exs.some((e) => e.kind !== "cardio");
+      const hasCardio = exs.some((e) => e.kind === "cardio");
       const table = panel.createEl("table", { cls: "pa-fit-table" });
-      const cols = this.workoutActive ? ["✓", "Exercise", "Weight", "Sets", "How-to", ""] : ["Exercise", "Weight", "Sets", "How-to", ""];
+      const cols = [
+        ...(this.workoutActive ? ["✓"] : []),
+        "Exercise",
+        ...(hasStrength ? ["Weight", "Sets"] : []),
+        ...(hasCardio ? ["Distance (km)", "Duration (min)", "Pace"] : []),
+        "How-to", "",
+      ];
       const thead = table.createEl("thead").createEl("tr");
       cols.forEach((h) => thead.createEl("th", { text: h }));
       const tbody = table.createEl("tbody");
-      exs.forEach((ex) => this.renderExerciseRow(tbody, ex));
+      exs.forEach((ex) => this.renderExerciseRow(tbody, ex, hasStrength, hasCardio));
     }
 
     const actions = panel.createDiv({ cls: "pa-active-actions" });
@@ -314,10 +374,22 @@ export class FitnessModule {
     close.onclick = () => { this.endWorkout(); this.ctx.refresh(); };
   }
 
-  /** Persist edited weight/sets back to the exercise files. Returns number changed. */
+  /** Persist edited weight/sets (strength) or targetDistance/targetDuration (cardio) back
+   *  to the exercise files. Returns number changed. */
   private async persistRowEdits(exs: Exercise[], panel: HTMLElement): Promise<number> {
     let changed = 0;
     for (const ex of exs) {
+      if (ex.kind === "cardio") {
+        const dInput = panel.querySelector<HTMLInputElement>(`input.pa-target-dist[data-ex="${CSS.escape(ex.name)}"]`);
+        const durInput = panel.querySelector<HTMLInputElement>(`input.pa-target-dur[data-ex="${CSS.escape(ex.name)}"]`);
+        const newDist = dInput ? parseFloat(dInput.value) || 0 : ex.targetDistance ?? 0;
+        const newDur = durInput ? parseFloat(durInput.value) || 0 : ex.targetDuration ?? 0;
+        if (newDist !== (ex.targetDistance ?? 0) || newDur !== (ex.targetDuration ?? 0)) {
+          await this.ctx.store.saveExercise({ ...ex, targetDistance: newDist, targetDuration: newDur });
+          changed++;
+        }
+        continue;
+      }
       const wInput = panel.querySelector<HTMLInputElement>(`input.pa-weight-input[data-ex="${CSS.escape(ex.name)}"]`);
       const sInput = panel.querySelector<HTMLInputElement>(`input.pa-sets-input[data-ex="${CSS.escape(ex.name)}"]`);
       const newWeight = wInput ? parseFloat(wInput.value) || 0 : ex.weight;
@@ -327,7 +399,7 @@ export class FitnessModule {
     return changed;
   }
 
-  private renderExerciseRow(tbody: HTMLElement, ex: Exercise): void {
+  private renderExerciseRow(tbody: HTMLElement, ex: Exercise, hasStrength: boolean, hasCardio: boolean): void {
     const tr = tbody.createEl("tr");
     if (this.workoutActive) {
       const check = tr.createEl("td").createEl("input");
@@ -341,11 +413,24 @@ export class FitnessModule {
     nameTd.createDiv({ text: ex.name });
     if (ex.howto) nameTd.setAttr("title", ex.howto);
 
-    const wInput = tr.createEl("td").createEl("input", { cls: "pa-fit-input" });
-    wInput.type = "number"; wInput.value = String(ex.weight); wInput.dataset.ex = ex.name; wInput.addClass("pa-weight-input");
+    if (ex.kind === "cardio") {
+      if (hasStrength) { tr.createEl("td", { text: "—" }); tr.createEl("td", { text: "—" }); }
+      const dInput = tr.createEl("td").createEl("input", { cls: "pa-fit-input pa-target-dist" });
+      dInput.type = "number"; dInput.value = String(ex.targetDistance ?? 0); dInput.dataset.ex = ex.name;
+      const durInput = tr.createEl("td").createEl("input", { cls: "pa-fit-input pa-target-dur" });
+      durInput.type = "number"; durInput.value = String(ex.targetDuration ?? 0); durInput.dataset.ex = ex.name; durInput.addClass("pa-target-dur");
+      dInput.addClass("pa-target-dist");
+      const paceTd = tr.createEl("td", { cls: "pa-fit-pace" });
+      const pace = computePace(ex.targetDistance ?? 0, ex.targetDuration ?? 0);
+      paceTd.setText(pace != null ? `${pace} min/km` : "—");
+    } else {
+      const wInput = tr.createEl("td").createEl("input", { cls: "pa-fit-input" });
+      wInput.type = "number"; wInput.value = String(ex.weight); wInput.dataset.ex = ex.name; wInput.addClass("pa-weight-input");
 
-    const setsInput = tr.createEl("td").createEl("input", { cls: "pa-fit-input" });
-    setsInput.value = ex.sets; setsInput.dataset.ex = ex.name; setsInput.addClass("pa-sets-input");
+      const setsInput = tr.createEl("td").createEl("input", { cls: "pa-fit-input" });
+      setsInput.value = ex.sets; setsInput.dataset.ex = ex.name; setsInput.addClass("pa-sets-input");
+      if (hasCardio) { tr.createEl("td", { text: "—" }); tr.createEl("td", { text: "—" }); tr.createEl("td", { text: "—" }); }
+    }
 
     tr.createEl("td", { text: ex.howto || "—", cls: "pa-fit-howto" });
 
@@ -372,42 +457,68 @@ export class FitnessModule {
     this.timerId = window.setInterval(tick, 1000);
   }
 
+  /** Reads one exercise's row inputs and builds its WorkoutExercise entry (or null if a
+   *  cardio row's distance/duration is not greater than zero — rejected per Req 2.4). */
+  private readLoggedEntry(ex: Exercise, panel: HTMLElement): WorkoutExercise | null {
+    if (ex.kind === "cardio") {
+      const dInput = panel.querySelector<HTMLInputElement>(`input.pa-target-dist[data-ex="${CSS.escape(ex.name)}"]`);
+      const durInput = panel.querySelector<HTMLInputElement>(`input.pa-target-dur[data-ex="${CSS.escape(ex.name)}"]`);
+      const distance = dInput ? parseFloat(dInput.value) || 0 : ex.targetDistance ?? 0;
+      const duration = durInput ? parseFloat(durInput.value) || 0 : ex.targetDuration ?? 0;
+      if (!(distance > 0) || !(duration > 0)) return null; // Req 2.4: reject, leave unchanged
+      return { exercise: ex.name, weight: 0, sets: "", kind: "cardio", distance, duration };
+    }
+    const wInput = panel.querySelector<HTMLInputElement>(`input.pa-weight-input[data-ex="${CSS.escape(ex.name)}"]`);
+    const sInput = panel.querySelector<HTMLInputElement>(`input.pa-sets-input[data-ex="${CSS.escape(ex.name)}"]`);
+    const weight = wInput ? parseFloat(wInput.value) || 0 : ex.weight;
+    const sets = sInput ? (sInput.value.trim() || ex.sets) : ex.sets;
+    return { exercise: ex.name, weight, sets, kind: "strength", feel: "good", oldWeight: ex.weight };
+  }
+
   private async finishWorkout(splitId: string, exs: Exercise[], panel: HTMLElement): Promise<void> {
     if (!this.startTime) return;
     const duration = Math.max(1, Math.floor((Date.now() - this.startTime) / 1000 / 60));
     const logged: WorkoutExercise[] = [];
+    let rejected = 0;
     for (const ex of exs) {
-      const wInput = panel.querySelector<HTMLInputElement>(`input.pa-weight-input[data-ex="${CSS.escape(ex.name)}"]`);
-      const sInput = panel.querySelector<HTMLInputElement>(`input.pa-sets-input[data-ex="${CSS.escape(ex.name)}"]`);
-      const newWeight = wInput ? parseFloat(wInput.value) || 0 : ex.weight;
-      const newSets = sInput ? (sInput.value.trim() || ex.sets) : ex.sets;
-      if (newWeight !== ex.weight || newSets !== ex.sets) await this.ctx.store.saveExercise({ ...ex, weight: newWeight, sets: newSets });
-      if (this.checked.has(ex.name)) logged.push({ exercise: ex.name, weight: newWeight, sets: newSets, feel: "good", oldWeight: ex.weight });
+      if (!this.checked.has(ex.name)) continue;
+      const entry = this.readLoggedEntry(ex, panel);
+      if (!entry) { rejected++; continue; } // cardio row with invalid distance/duration
+      if (ex.kind === "cardio") {
+        if (entry.distance !== ex.targetDistance || entry.duration !== ex.targetDuration) {
+          await this.ctx.store.saveExercise({ ...ex, targetDistance: entry.distance, targetDuration: entry.duration });
+        }
+      } else if (entry.weight !== ex.weight || entry.sets !== ex.sets) {
+        await this.ctx.store.saveExercise({ ...ex, weight: entry.weight, sets: entry.sets });
+      }
+      logged.push(entry);
     }
-    if (!logged.length) { toast("Check at least one exercise to log."); return; }
+    if (!logged.length) { toast(rejected ? "Enter a distance and duration greater than zero for checked cardio exercises." : "Check at least one exercise to log."); return; }
     await this.ctx.store.logWorkout(splitId, duration, logged);
     this.endWorkout();
     this.selectedDate = todayLocal(); // show the just-logged workout as a log at the bottom
     this.ctx.refresh();
-    toast(`💪 Workout logged (${logged.length} exercises, ${duration}min)`);
+    toast(`💪 Workout logged (${logged.length} exercises, ${duration}min)${rejected ? `, ${rejected} skipped` : ""}`);
   }
 
-  /** Log the editor's workout (with current row weights/sets) to a specific date, no live timer. */
+  /** Log the editor's workout (with current row weights/sets or distance/duration) to a
+   *  specific date, no live timer. Cardio rows with invalid distance/duration are skipped
+   *  (Req 2.4) rather than blocking the rest of the workout from being logged. */
   private async logWorkoutForDate(splitId: string, exs: Exercise[], panel: HTMLElement, date: string): Promise<void> {
     await this.persistRowEdits(exs, panel);
-    const logged: WorkoutExercise[] = exs.map((ex) => {
-      const wInput = panel.querySelector<HTMLInputElement>(`input.pa-weight-input[data-ex="${CSS.escape(ex.name)}"]`);
-      const sInput = panel.querySelector<HTMLInputElement>(`input.pa-sets-input[data-ex="${CSS.escape(ex.name)}"]`);
-      const newWeight = wInput ? parseFloat(wInput.value) || 0 : ex.weight;
-      const newSets = sInput ? (sInput.value.trim() || ex.sets) : ex.sets;
-      return { exercise: ex.name, weight: newWeight, sets: newSets, feel: "good", oldWeight: ex.weight };
-    });
-    if (!logged.length) { toast("This workout has no exercises to log."); return; }
+    const logged: WorkoutExercise[] = [];
+    let rejected = 0;
+    for (const ex of exs) {
+      const entry = this.readLoggedEntry(ex, panel);
+      if (!entry) { rejected++; continue; }
+      logged.push(entry);
+    }
+    if (!logged.length) { toast(rejected ? "Enter a distance and duration greater than zero for cardio exercises." : "This workout has no exercises to log."); return; }
     await this.ctx.store.logWorkout(splitId, 0, logged, date);
     this.endWorkout();
     this.selectedDate = date;
     this.ctx.refresh();
-    toast(`💪 ${splitId} logged for ${date}`);
+    toast(`💪 ${splitId} logged for ${date}${rejected ? ` (${rejected} skipped)` : ""}`);
   }
 
   // ---- Modals ----
@@ -426,15 +537,26 @@ export class FitnessModule {
     const fields: FieldSpec[] = [
       { key: "name", label: "Name", type: "text", value: ex?.name || "" },
       { key: "split", label: "Workout", type: "dropdown", options: splitOptions, value: ex?.split || (this.selectedSplit || "A") },
-      { key: "sets", label: "Sets x reps", type: "text", value: ex?.sets || "3x10" },
-      { key: "weight", label: "Weight (kg)", type: "number", value: ex?.weight ?? 0 },
+      {
+        key: "kind", label: "Kind", type: "dropdown",
+        options: [{ value: "strength", label: "Strength" }, { value: "cardio", label: "Cardio" }],
+        value: ex?.kind || "strength",
+      },
+      { key: "sets", label: "Sets x reps", type: "text", value: ex?.sets || "3x10", visibleWhen: (v) => v.kind !== "cardio" },
+      { key: "weight", label: "Weight (kg)", type: "number", value: ex?.weight ?? 0, visibleWhen: (v) => v.kind !== "cardio" },
+      { key: "targetDistance", label: "Target distance (km)", type: "number", value: ex?.targetDistance ?? 0, visibleWhen: (v) => v.kind === "cardio" },
+      { key: "targetDuration", label: "Target duration (min)", type: "number", value: ex?.targetDuration ?? 0, visibleWhen: (v) => v.kind === "cardio" },
       { key: "howto", label: "How-to", type: "textarea", value: ex?.howto || "" },
     ];
     new FormModal(this.ctx.app, ex ? "Edit exercise" : "New exercise", fields, async (v) => {
       const name = (v.name || "").trim();
       if (!name) return;
+      const kind: ExerciseKind = v.kind === "cardio" ? "cardio" : "strength";
       const ok = await this.ctx.store.saveExercise({
-        name, split: v.split, sets: v.sets || "3x10", weight: parseFloat(v.weight) || 0, howto: v.howto || "",
+        name, split: v.split, kind,
+        sets: v.sets || "3x10", weight: parseFloat(v.weight) || 0,
+        targetDistance: parseFloat(v.targetDistance) || 0, targetDuration: parseFloat(v.targetDuration) || 0,
+        howto: v.howto || "",
         // preserve metadata not edited here
         muscle: ex?.muscle || "", type: ex?.type || "machine",
       }, ex?.name);

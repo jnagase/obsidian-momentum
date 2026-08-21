@@ -2,10 +2,11 @@ import { App, TFile, TFolder, normalizePath } from "obsidian";
 import {
   Board, Task, Note, Habit, Exercise, Workout, WorkoutExercise, Split,
   StudyCard, Meal, MealItem, MealLog, Transaction, RecurringItem, PAConfig, defaultConfig,
+  ExerciseKind,
 } from "./types";
 import { todayLocal } from "./util";
 import { monthHubTitle, monthKeyOf, monthName, financeTxTitle, mealLogTitle, workoutTitle, formatAmount, mergeBody } from "./readablenotes";
-import { mapTransaction, mapMealLog, mapWorkout } from "./loaders";
+import { mapTransaction, mapMealLog, mapWorkout, computePace, deriveWorkoutKind, totalCardioDistance } from "./loaders";
 
 /** Root folder inside the vault that holds all Personal Assistant data. */
 export let DATA_ROOT = "Momentum Life";
@@ -101,6 +102,12 @@ export function safeName(title: string): string {
     .replace(/\s+/g, " ")
     .trim() || "untitled";
 }
+
+// Fitness cardio pure helpers (computePace, deriveWorkoutKind, totalCardioDistance) live in
+// ./loaders.ts (imported above) so mapWorkout can use deriveWorkoutKind without a circular
+// import — loaders.ts is the Obsidian-free module data.ts already imports from. Re-exported
+// here so other modules (e.g. fitness.ts) can import them from data.ts alongside safeName.
+export { computePace, deriveWorkoutKind, totalCardioDistance };
 
 /**
  * Data layer: reads/writes the same markdown files the web app uses,
@@ -204,6 +211,7 @@ export class PADataStore {
     if (m.split_names) cfg.splitNames = coerce(m.split_names, cfg.splitNames);
     if (m.currency) cfg.currency = str(m.currency);
     if (m.monthly_budget != null) cfg.monthlyBudget = num(m.monthly_budget);
+    if (m.starting_balance != null) cfg.startingBalance = num(m.starting_balance);
     if (m.expense_categories) cfg.expenseCategories = coerce(m.expense_categories, cfg.expenseCategories);
     if (m.income_categories) cfg.incomeCategories = coerce(m.income_categories, cfg.incomeCategories);
     if (m.custom_pages) cfg.customPages = coerce(m.custom_pages, cfg.customPages);
@@ -236,6 +244,7 @@ export class PADataStore {
       split_names: cfg.splitNames,
       currency: cfg.currency,
       monthly_budget: cfg.monthlyBudget,
+      starting_balance: cfg.startingBalance,
       expense_categories: cfg.expenseCategories,
       income_categories: cfg.incomeCategories,
       custom_pages: cfg.customPages,
@@ -1261,6 +1270,23 @@ export class PADataStore {
     });
   }
 
+  /** Toggle a relapse mark on a past (or today's) day for a "quit" habit, then recompute
+   *  `lastReset` as the most recent logged relapse day (or the habit's creation date if
+   *  none remain) so the streak — days since the last relapse — stays correct regardless
+   *  of which day was retroactively edited, not just "today". */
+  async toggleHabitRelapse(habit: Habit, date: string): Promise<void> {
+    const f = this.app.vault.getAbstractFileByPath(habit.path || "");
+    if (!(f instanceof TFile)) return;
+    await this.patchFrontmatter(f, (fm) => {
+      const log = coerce<Record<string, boolean>>(fm.log, {});
+      if (log[date]) delete log[date]; else log[date] = true;
+      const relapseDays = Object.keys(log).filter((d) => log[d]).sort();
+      fm.log = log;
+      fm.lastReset = relapseDays.length ? relapseDays[relapseDays.length - 1] : (str(fm.created) || date);
+      fm.modified = new Date().toISOString();
+    });
+  }
+
   async deleteHabit(habit: Habit): Promise<void> {
     const f = this.app.vault.getAbstractFileByPath(habit.path || "");
     if (f instanceof TFile) await this.removeFile(f);
@@ -1269,6 +1295,20 @@ export class PADataStore {
   // ============================================================
   // FITNESS
   // ============================================================
+
+  /**
+   * Applied on every loadExercises() row so `kind` (and the cardio target fields) are
+   * always present, defaulting legacy files (no `kind` field) to "strength" (Req 1.2, 7.1).
+   */
+  private applyExerciseDefaults(m: FM): { kind: ExerciseKind; targetDistance?: number; targetDuration?: number } {
+    const kind: ExerciseKind = str(m.kind) === "cardio" ? "cardio" : "strength";
+    return {
+      kind,
+      targetDistance: m.target_distance != null ? num(m.target_distance) : undefined,
+      targetDuration: m.target_duration != null ? num(m.target_duration) : undefined,
+    };
+  }
+
   loadSplits(): Split[] {
     const f = this.fileAt("Fitness/splits.md");
     if (!f) return [];
@@ -1288,6 +1328,7 @@ export class PADataStore {
         weight: num(m.weight),
         howto: str(m.howto),
         path: f.path,
+        ...this.applyExerciseDefaults(m),
       };
     });
   }
@@ -1320,7 +1361,12 @@ export class PADataStore {
       howto: ex.howto || "",
       type: "exercise",
       modified: new Date().toISOString(),
+      kind: ex.kind || "strength",
     };
+    if ((ex.kind || "strength") === "cardio") {
+      meta.target_distance = ex.targetDistance || 0;
+      meta.target_duration = ex.targetDuration || 0;
+    }
     await this.writeFile(targetRel, this.buildDoc(meta, `# ${ex.name}\n`));
 
     if (renaming && originalFull && originalFull !== targetFull) {
@@ -1399,11 +1445,21 @@ export class PADataStore {
 
     const int = (n: number) => Math.round(n).toString();
 
+    // Req 6.1/6.2/6.3: total distance across cardio entries, only shown when > 0.
+    // Req 6.4: a failure computing it must not abort hub regeneration — log and fall back to 0.
+    let totalDistance = 0;
+    try {
+      totalDistance = totalCardioDistance(sorted);
+    } catch {
+      totalDistance = 0;
+    }
+
     const year = monthKey.slice(0, 4);
     let body = `# Fitness — ${monthName(monthKey)} ${year}\n\n`;
     body += `**Workouts:** ${workoutCount}\n`;
-    body += `**Total minutes:** ${int(totalMinutes)} min\n\n`;
-    body += `## By split\n\n`;
+    body += `**Total minutes:** ${int(totalMinutes)} min\n`;
+    if (totalDistance > 0) body += `**Total distance:** ${totalDistance.toFixed(2)} km\n`;
+    body += `\n## By split\n\n`;
     for (const r of splitRows) {
       body += `- ${r.name}: ${r.count} workout${r.count === 1 ? "" : "s"}, ${int(r.minutes)} min\n`;
     }
@@ -1437,6 +1493,7 @@ export class PADataStore {
       split: splitId,
       duration,
       exercises,
+      kind: deriveWorkoutKind(exercises),
       logged: new Date().toISOString(),
     };
     const monthKey = monthKeyOf(date);
@@ -1456,7 +1513,11 @@ export class PADataStore {
   async updateWorkoutExercises(workout: Workout, exercises: WorkoutExercise[]): Promise<void> {
     const f = this.app.vault.getAbstractFileByPath(workout.path);
     if (!(f instanceof TFile)) return;
-    await this.patchFrontmatter(f, (fm) => { fm.exercises = exercises; fm.modified = new Date().toISOString(); });
+    await this.patchFrontmatter(f, (fm) => {
+      fm.exercises = exercises;
+      fm.kind = deriveWorkoutKind(exercises);
+      fm.modified = new Date().toISOString();
+    });
   }
 
   async deleteWorkout(workout: Workout): Promise<void> {

@@ -17,7 +17,7 @@
  *   across renames for real data.
  */
 
-import { MealItem, MealLog, Transaction, Workout, WorkoutExercise } from "./types";
+import { ExerciseKind, MealItem, MealLog, Transaction, Workout, WorkoutExercise, WorkoutKind } from "./types";
 
 /** Frontmatter is an untyped bag of parsed YAML values. */
 export type Frontmatter = Record<string, unknown>;
@@ -87,15 +87,54 @@ export function mapMealLog(fm: Frontmatter, basename: string, path: string): Mea
 /**
  * Map a Fitness workout note's frontmatter to a `Workout`.
  * Data fields (`id`, `date`, `split`, `duration`, `exercises`) come from frontmatter;
- * `basename` is only the `id` fallback and `path` is metadata.
+ * `basename` is only the `id` fallback and `path` is metadata. `kind` is read verbatim
+ * when it is a valid WorkoutKind value, else derived from the exercises (legacy files
+ * have neither the top-level nor the per-entry `kind` field, so this resolves to
+ * "strength" when non-empty and "empty" when not — see deriveWorkoutKind).
  */
 export function mapWorkout(fm: Frontmatter, basename: string, path: string): Workout {
+  const exercises = coerce<WorkoutExercise[]>(fm.exercises, []);
+  const storedKind = str(fm.kind);
+  const kind: WorkoutKind = storedKind === "strength" || storedKind === "cardio" || storedKind === "mixed" || storedKind === "empty"
+    ? storedKind
+    : deriveWorkoutKind(exercises);
   return {
     id: str(fm.id) || basename,
     date: str(fm.date).substring(0, 10),
     split: str(fm.split) || "A",
     duration: num(fm.duration),
-    exercises: coerce<WorkoutExercise[]>(fm.exercises, []),
+    exercises,
     path,
+    kind,
   };
+}
+
+// ============================================================
+// FITNESS — pure cardio helpers (no Obsidian imports; mirrored by hand in
+// mcp/src/store.mjs since the MCP has no build step and cannot import from src/*.ts).
+// ============================================================
+
+/** Pace in minutes/km, rounded to 1 decimal; null when distance or duration is not > 0. */
+export function computePace(distanceKm: number, durationMin: number): number | null {
+  if (!(distanceKm > 0) || !(durationMin > 0)) return null;
+  return Math.round((durationMin / distanceKm) * 10) / 10;
+}
+
+/** Derives a Workout's kind from its logged entries. Empty array -> "empty". */
+export function deriveWorkoutKind(entries: Array<{ kind?: ExerciseKind }>): WorkoutKind {
+  if (entries.length === 0) return "empty";
+  const kinds = new Set(entries.map((e) => e.kind ?? "strength"));
+  if (kinds.size > 1) return "mixed";
+  return kinds.has("cardio") ? "cardio" : "strength";
+}
+
+/** Sum of distance across all cardio entries in the given workouts. */
+export function totalCardioDistance(workouts: Array<{ exercises: Array<{ kind?: ExerciseKind; distance?: number }> }>): number {
+  let total = 0;
+  for (const w of workouts) {
+    for (const e of w.exercises) {
+      if ((e.kind ?? "strength") === "cardio") total += Number(e.distance) || 0;
+    }
+  }
+  return total;
 }

@@ -15,6 +15,7 @@ import YAML from "yaml";
 import {
   monthHubTitle, monthKeyOf, monthName, financeTxTitle, mealLogTitle,
   workoutTitle, formatAmount, mergeBody, safeName,
+  computePace, deriveWorkoutKind, totalCardioDistance,
 } from "./naming.mjs";
 
 const DEFAULT_TASK_COLUMNS = ["backlog", "in progress", "done"];
@@ -141,7 +142,7 @@ export class MomentumStore {
       calorieTarget: 2000, proteinTarget: 120, carbsTarget: 200, waterTarget: 2.5,
       taskColumns: DEFAULT_TASK_COLUMNS.slice(), taskColumnNames: { ...DEFAULT_TASK_COLUMN_NAMES },
       studyColumns: DEFAULT_TASK_COLUMNS.slice(), studyColumnNames: { ...DEFAULT_TASK_COLUMN_NAMES },
-      studyTopics: [], customSplits: [], splitNames: {}, currency: "$", monthlyBudget: 0,
+      studyTopics: [], customSplits: [], splitNames: {}, currency: "$", monthlyBudget: 0, startingBalance: 0,
       expenseCategories: DEFAULT_EXPENSE_CATEGORIES.slice(), incomeCategories: DEFAULT_INCOME_CATEGORIES.slice(),
       customPages: [], boardOrder: [],
     };
@@ -161,6 +162,7 @@ export class MomentumStore {
     if (m.split_names) cfg.splitNames = coerce(m.split_names, cfg.splitNames);
     if (m.currency) cfg.currency = str(m.currency);
     if (m.monthly_budget != null) cfg.monthlyBudget = num(m.monthly_budget);
+    if (m.starting_balance != null) cfg.startingBalance = num(m.starting_balance);
     if (m.expense_categories) cfg.expenseCategories = coerce(m.expense_categories, cfg.expenseCategories);
     if (m.income_categories) cfg.incomeCategories = coerce(m.income_categories, cfg.incomeCategories);
     if (m.custom_pages) cfg.customPages = coerce(m.custom_pages, cfg.customPages);
@@ -176,7 +178,7 @@ export class MomentumStore {
       task_columns: cfg.taskColumns, task_column_names: cfg.taskColumnNames,
       study_columns: cfg.studyColumns, study_column_names: cfg.studyColumnNames,
       study_topics: cfg.studyTopics, custom_splits: cfg.customSplits, split_names: cfg.splitNames,
-      currency: cfg.currency, monthly_budget: cfg.monthlyBudget,
+      currency: cfg.currency, monthly_budget: cfg.monthlyBudget, starting_balance: cfg.startingBalance,
       expense_categories: cfg.expenseCategories, income_categories: cfg.incomeCategories,
       custom_pages: cfg.customPages || [],
       board_order: cfg.boardOrder || [],
@@ -609,7 +611,14 @@ export class MomentumStore {
     const out = [];
     for (const abs of files) {
       const m = await this.fmOf(abs);
-      out.push({ name: str(m.name) || this.basename(abs), split: str(m.split) || "A", type: str(m.equipment) || "machine", muscle: str(m.muscle), sets: str(m.sets) || "3x10", weight: num(m.weight), howto: str(m.howto), path: abs });
+      const kind = str(m.kind) === "cardio" ? "cardio" : "strength";
+      out.push({
+        name: str(m.name) || this.basename(abs), split: str(m.split) || "A", type: str(m.equipment) || "machine",
+        muscle: str(m.muscle), sets: str(m.sets) || "3x10", weight: num(m.weight), howto: str(m.howto), path: abs,
+        kind,
+        targetDistance: m.target_distance != null ? num(m.target_distance) : undefined,
+        targetDuration: m.target_duration != null ? num(m.target_duration) : undefined,
+      });
     }
     return out;
   }
@@ -618,7 +627,10 @@ export class MomentumStore {
     const out = [];
     for (const abs of files) {
       const m = await this.fmOf(abs);
-      const w = { id: str(m.id) || this.basename(abs), date: str(m.date).slice(0, 10), split: str(m.split) || "A", duration: num(m.duration), exercises: coerce(m.exercises, []), path: abs };
+      const exercises = coerce(m.exercises, []);
+      const storedKind = str(m.kind);
+      const kind = ["strength", "cardio", "mixed", "empty"].includes(storedKind) ? storedKind : deriveWorkoutKind(exercises);
+      const w = { id: str(m.id) || this.basename(abs), date: str(m.date).slice(0, 10), split: str(m.split) || "A", duration: num(m.duration), exercises, path: abs, kind };
       if (w.date) out.push(w);
     }
     return out;
@@ -648,8 +660,16 @@ export class MomentumStore {
         for (const [splitId, agg] of bySplit) rows.push({ name: await this.resolveSplitName(splitId, cfg), splitId, ...agg });
         rows.sort((a, b) => a.name.localeCompare(b.name) || a.splitId.localeCompare(b.splitId));
         const int = (n) => Math.round(n).toString();
+        let totalDistance = 0;
+        try {
+          totalDistance = totalCardioDistance(sorted);
+        } catch {
+          totalDistance = 0; // Req 6.4: never abort hub regeneration on a distance-sum failure
+        }
         let body = `# Fitness — ${monthName(monthKey)} ${monthKey.slice(0, 4)}\n\n`;
-        body += `**Workouts:** ${sorted.length}\n**Total minutes:** ${int(totalMinutes)} min\n\n## By split\n\n`;
+        body += `**Workouts:** ${sorted.length}\n**Total minutes:** ${int(totalMinutes)} min\n`;
+        if (totalDistance > 0) body += `**Total distance:** ${totalDistance.toFixed(2)} km\n`;
+        body += `\n## By split\n\n`;
         for (const r of rows) body += `- ${r.name}: ${r.count} workout${r.count === 1 ? "" : "s"}, ${int(r.minutes)} min\n`;
         body += `\n## Sessions\n\n`;
         for (const w of sorted) body += `- [[${basename(w)}]]\n`;
@@ -662,7 +682,7 @@ export class MomentumStore {
     const splitId = split || "A";
     const splitName = await this.resolveSplitName(splitId, cfg);
     const d = (date || todayLocal()).slice(0, 10);
-    const meta = { id: Date.now(), type: "workout-log", date: d, split: splitId, duration: num(duration), exercises, logged: new Date().toISOString() };
+    const meta = { id: Date.now(), type: "workout-log", date: d, split: splitId, duration: num(duration), exercises, kind: deriveWorkoutKind(exercises), logged: new Date().toISOString() };
     const monthKey = monthKeyOf(d);
     let baseBody = `# ${splitName} - ${d}\n\n`;
     exercises.forEach((e) => { baseBody += `- ${e.exercise}: ${e.weight ?? ""}kg x ${e.sets ?? ""}${e.feel ? ` (${e.feel})` : ""}\n`; });

@@ -41,6 +41,7 @@
 .pa-task.prio-medium{border-left-color:#d97706}
 .pa-task.prio-low{border-left-color:#16a34a}
 .pa-card-title-row strong{font-size:.88rem}
+.pa-card-title-row{display:flex;align-items:center;justify-content:space-between;gap:8px}
 /* Card chips (priority + date) */
 .pa-card-chips{display:flex;flex-wrap:wrap;gap:5px;margin-top:7px}
 .pa-chip{display:inline-flex;align-items:center;gap:3px;font-size:.68rem;font-weight:600;line-height:1;padding:3px 7px;border-radius:999px;white-space:nowrap}
@@ -87,6 +88,8 @@
 .pa-mini-btn:hover{color:var(--text-normal)}
 .pa-heatmap{display:grid;grid-template-columns:repeat(18,1fr);gap:3px;width:100%}
 .pa-hm-cell{aspect-ratio:1;border-radius:50%;background:var(--background-modifier-border)}
+.pa-hm-cell.pa-clickable:hover{outline:2px solid var(--interactive-accent);outline-offset:1px}
+.pa-habit-hint{font-size:.68rem;margin:2px 0 6px}
 
 /* ===== Charts ===== */
 .pa-ring{display:flex;flex-direction:column;align-items:center;gap:2px}
@@ -596,3 +599,21 @@ button.pa-link-btn:focus-visible {
   outline-offset: 3px;
   border-radius: 6px;
 }
+
+/* FormModal conditional fields (visibleWhen) — fitness-cardio */
+.pa-hidden { display: none !important; }
+
+/* Net worth panel: line chart + small stacked yearly donuts side by side */
+.pa-networth-body{display:flex;gap:14px;align-items:flex-start}
+.pa-networth-chart{flex:1;min-width:0}
+.pa-networth-yearly{display:flex;flex-direction:column;gap:8px;flex:0 0 auto}
+.pa-networth-mini{background:var(--background-primary);border:1px solid var(--background-modifier-border);border-radius:8px;padding:8px}
+.pa-networth-mini .pa-panel-title{margin:0 0 4px;font-size:.78rem;text-align:center}
+.pa-networth-mini .pa-donut-legend{font-size:.62rem;gap:4px}
+.pa-networth-mini .pa-legend-item{font-size:.62rem}
+@media(max-width:900px){.pa-networth-body{flex-direction:column}.pa-networth-yearly{flex-direction:row}}
+
+/* Line chart hover tooltip */
+.pa-linechart{position:relative}
+.pa-chart-tooltip{position:absolute;transform:translate(-50%,-130%);background:var(--background-primary);border:1px solid var(--background-modifier-border);border-radius:6px;padding:3px 7px;font-size:.72rem;color:var(--text-normal);white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .1s;z-index:5;box-shadow:0 2px 6px rgba(0,0,0,.15)}
+.pa-chart-tooltip.visible{opacity:1}

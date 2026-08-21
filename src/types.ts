@@ -67,32 +67,42 @@ export interface Habit {
   path?: string; // present when stored as an individual file
 }
 
+export type ExerciseKind = "strength" | "cardio";
+export type WorkoutKind = "strength" | "cardio" | "mixed" | "empty";
+
 export interface Exercise {
   name: string;
   split: string;
   type: string; // equipment type / machine | free ...
   muscle: string;
-  sets: string; // e.g. "3x10"
-  weight: number;
+  sets: string; // e.g. "3x10" — strength only
+  weight: number; // strength only
   howto: string;
   path?: string;
+  kind: ExerciseKind; // "strength" | "cardio" — always present after load (defaulted to "strength")
+  targetDistance?: number; // km — cardio only
+  targetDuration?: number; // minutes — cardio only
 }
 
 export interface WorkoutExercise {
   exercise: string;
-  weight: number;
-  sets: string;
+  weight: number; // strength only
+  sets: string; // strength only
   feel?: string;
   oldWeight?: number;
+  kind?: ExerciseKind; // copied from Exercise.kind at log time; absent (legacy) treated as "strength"
+  distance?: number; // km — cardio only
+  duration?: number; // minutes — cardio only (entry-level, distinct from Workout.duration)
 }
 
 export interface Workout {
   id: string;
   date: string; // YYYY-MM-DD
   split: string;
-  duration: number; // minutes
+  duration: number; // minutes (whole session)
   exercises: WorkoutExercise[];
   path: string;
+  kind: WorkoutKind; // derived from the exercises' kinds; always present after load
 }
 
 export interface Split {
@@ -178,6 +188,9 @@ export interface PAConfig {
   splitNames: Record<string, string>;
   currency: string;
   monthlyBudget: number;
+  /** Balance before the earliest tracked transaction, so the running balance reflects
+   *  money the user already had (or owed) when they started using the app. Defaults to 0. */
+  startingBalance: number;
   expenseCategories: string[];
   incomeCategories: string[];
   customPages: CustomPage[];
@@ -233,6 +246,7 @@ export function defaultConfig(): PAConfig {
     splitNames: {},
     currency: "$",
     monthlyBudget: 0,
+    startingBalance: 0,
     expenseCategories: DEFAULT_EXPENSE_CATEGORIES.slice(),
     incomeCategories: DEFAULT_INCOME_CATEGORIES.slice(),
     customPages: [],

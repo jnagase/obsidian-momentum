@@ -289,15 +289,18 @@ export class NutritionModule {
     recalc();
 
     const actions = panel.createDiv({ cls: "pa-active-actions" });
-    const confirm = actions.createEl("button", { text: "✓ confirm meal", cls: "pa-btn" });
+    // Confirm to the currently selected day (falls back to today when nothing is selected),
+    // matching the "add a food" bar's behavior of targeting the open calendar day.
+    const targetDate = this.selectedDate || todayLocal();
+    const confirm = actions.createEl("button", { text: targetDate === todayLocal() ? "✓ confirm meal" : `✓ confirm meal for ${targetDate}`, cls: "pa-btn" });
     confirm.onclick = async () => {
       const eaten = this.readRows(tbody, meal, true);
       if (!eaten.length) { toast("Check at least one item."); return; }
-      await this.ctx.store.logMeal(meal, eaten);
+      await this.ctx.store.logMeal(meal, eaten, targetDate);
       this.selectedMeal = null;
-      this.selectedDate = todayLocal(); // show the log at the bottom
+      this.selectedDate = targetDate; // show the log at the bottom
       this.ctx.refresh();
-      toast(`✓ ${meal.name} confirmed`);
+      toast(`✓ ${meal.name} confirmed${targetDate !== todayLocal() ? ` (${targetDate})` : ""}`);
     };
     const save = actions.createEl("button", { text: "💾 Save plan", cls: "pa-mini-btn" });
     save.onclick = async () => { await this.ctx.store.saveMeal({ id: meal.id, name: meal.name, emoji: meal.emoji, items: this.readRows(tbody, meal, false) }); this.ctx.refresh(); toast("💾 Plan saved"); };
@@ -430,6 +433,12 @@ export class NutritionModule {
       const card = panel.createDiv({ cls: "pa-card" });
       const tr = card.createDiv({ cls: "pa-card-title-row" });
       tr.createEl("strong", { text: meal ? `${meal.emoji || ""} ${meal.name}` : l.mealId || "Meal" });
+      const del = tr.createEl("button", { text: "🗑", cls: "pa-icon-btn" });
+      del.setAttr("aria-label", "Delete this meal log");
+      del.onclick = () => new ConfirmModal(this.ctx.app, `Delete this ${meal ? meal.name : "meal"} log (${l.totalCal} cal)?`, async () => {
+        await this.ctx.store.deleteMealLog(l);
+        this.ctx.refresh();
+      }).open();
       l.items.forEach((it) => card.createDiv({ cls: "pa-muted", text: `${it.name} — ${it.qty}${it.unit} (${it.cal} cal)` }));
       card.createDiv({ cls: "pa-macro-total", text: `Total: ${l.totalCal} cal` });
     });

@@ -177,7 +177,9 @@ export class HabitTrackerModule {
     habits.forEach((h) => this.renderCustomHabit(grid, h, today));
   }
 
-  private heatmap(card: HTMLElement, cellColor: (ds: string) => string | null, today: string): void {
+  /** `onClickDay`, when given, makes every cell clickable so past days can be edited
+   *  retroactively (e.g. mark/unmark a "do" habit, or toggle a relapse day for "quit"). */
+  private heatmap(card: HTMLElement, cellColor: (ds: string) => string | null, today: string, onClickDay?: (ds: string) => void | Promise<void>): void {
     const hm = card.createDiv({ cls: "pa-heatmap" });
     const base = new Date(today + "T00:00:00");
     for (let j = HEATMAP_DAYS - 1; j >= 0; j--) {
@@ -188,6 +190,10 @@ export class HabitTrackerModule {
       cell.setAttr("title", ds);
       const c = cellColor(ds);
       if (c) cell.style.background = c;
+      if (onClickDay) {
+        cell.addClass("pa-clickable");
+        cell.onclick = () => { void onClickDay(ds); };
+      }
     }
   }
 
@@ -260,7 +266,18 @@ export class HabitTrackerModule {
         this.ctx.refresh();
       }).open();
 
-    this.heatmap(card, cellColor, today);
+    card.createDiv({ cls: "pa-muted pa-habit-hint", text: isQuit ? "Tap a day to toggle a relapse." : "Tap a day to mark/unmark it." });
+    this.heatmap(card, cellColor, today, async (ds) => {
+      if (ds > today) return; // no editing the future
+      if (isQuit) {
+        // Toggling a relapse day recomputes lastReset from the remaining relapse days,
+        // so the streak stays correct even when editing a day other than today.
+        await this.ctx.store.toggleHabitRelapse(h, ds);
+      } else {
+        await this.ctx.store.toggleHabit(h, ds);
+      }
+      this.ctx.refresh();
+    });
   }
 
   // ---- Study progress ----

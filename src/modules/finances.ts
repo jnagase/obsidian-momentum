@@ -63,12 +63,142 @@ export class FinancesModule {
     const txs = this.ctx.store.loadTransactions();
     this.renderHeader(root, txs);
     this.renderStats(root, txs);
+    this.renderNetWorth(root, txs);
     const cols = root.createDiv({ cls: "pa-two-col" });
     this.renderBreakdown(cols, txs);
     this.renderTrend(cols, txs);
     this.renderRecurring(root);
     this.renderAddBar(root);
     this.renderLedger(root, txs);
+  }
+
+  /** All distinct "YYYY-MM" month keys with at least one transaction, oldest first. */
+  private monthKeysWithTx(txs: Transaction[]): string[] {
+    const keys = new Set(txs.map((t) => t.date.slice(0, 7)).filter((k) => k.length === 7));
+    return Array.from(keys).sort();
+  }
+
+  /** Running balance up to and including the given month, starting from the configured
+   *  starting balance. Cheap to compute from scratch: transactions are already in memory
+   *  and this runs once per render, same cost class as the existing 6-month trend. */
+  private cumulativeThrough(txs: Transaction[], monthKeyInclusive: string): number {
+    const start = this.ctx.config.startingBalance || 0;
+    const upTo = txs.filter((t) => t.date.slice(0, 7) <= monthKeyInclusive);
+    return start + this.sumByType(upTo, "income") - this.sumByType(upTo, "expense");
+  }
+
+  /** Cap the number of months shown on the net-worth chart so the x-axis stays readable
+   *  as history grows (labels get overlapping/illegible well before ~12 points). The
+   *  headline total is unaffected — it's always computed from the full, uncapped history. */
+  private static readonly NET_WORTH_CHART_MONTHS = 12;
+
+  // ---- Net worth: running balance since the starting balance, all-time ----
+  private renderNetWorth(root: HTMLElement, txs: Transaction[]): void {
+    const monthKeys = this.monthKeysWithTx(txs);
+    const nowKey = `${this.calYear}-${String(this.calMonth + 1).padStart(2, "0")}`;
+    // Always include the current month so the headline number reflects "as of today"
+    // even before any transaction has been logged this month.
+    const allKeys = Array.from(new Set([...monthKeys, nowKey])).sort();
+    const total = this.cumulativeThrough(txs, allKeys[allKeys.length - 1]);
+    // Chart only ever shows the most recent N months; the headline `total` above is
+    // computed from the full history regardless of this cap.
+    const chartKeys = allKeys.slice(-FinancesModule.NET_WORTH_CHART_MONTHS);
+
+    const card = root.createDiv({ cls: "pa-panel" });
+    const head = card.createDiv({ cls: "pa-section-head" });
+    head.createEl("h3", { text: "🏦 Net worth — accumulated since you started tracking", cls: "pa-panel-title" });
+    const gear = head.createEl("button", { text: "⚙️", cls: "pa-icon-btn" });
+    gear.setAttr("aria-label", "Set starting balance");
+    gear.onclick = () => this.openStartingBalanceModal();
+
+    const row = card.createDiv({ cls: "pa-stats-row" });
+    const c = row.createDiv({ cls: "pa-stat" });
+    const v = c.createDiv({ text: this.fmt(total), cls: "pa-stat-value" });
+    v.style.color = total >= 0 ? "#16a34a" : "#ef4444";
+    c.createDiv({ text: total >= 0 ? "💰 SAVED SO FAR" : "📉 IN THE RED", cls: "pa-stat-label" });
+
+    if (this.ctx.config.startingBalance) {
+      card.createDiv({ cls: "pa-muted", text: `Includes a starting balance of ${this.fmt(this.ctx.config.startingBalance)}.` });
+    }
+
+    if (chartKeys.length < 2) {
+      card.createEl("p", { cls: "pa-muted", text: "Log transactions across a couple of months to see the trend." });
+      return;
+    }
+
+    // Chart + small stacked yearly donuts side by side, inside the same card.
+    const body = card.createDiv({ cls: "pa-networth-body" });
+    const chartCol = body.createDiv({ cls: "pa-networth-chart" });
+    const labels = chartKeys.map((k) => `${MONTHS[Number(k.slice(5, 7)) - 1]} ${k.slice(2, 4)}`);
+    const values = chartKeys.map((k) => Math.round(this.cumulativeThrough(txs, k)));
+    drawLineChart(chartCol, labels, [{ name: "Balance", color: total >= 0 ? "#16a34a" : "#ef4444", values }], { height: 220, format: (n) => this.fmt(n) });
+    if (allKeys.length > chartKeys.length) {
+      chartCol.createDiv({ cls: "pa-muted", text: `Showing the last ${FinancesModule.NET_WORTH_CHART_MONTHS} months.` });
+    }
+    this.renderYearlyMini(body.createDiv({ cls: "pa-networth-yearly" }), txs);
+  }
+
+  // ---- Yearly breakdown: how past years closed (net savings per year) + current year so far ----
+  // Rendered small and stacked, alongside the net-worth chart (not full-size panels).
+  private renderYearlyMini(root: HTMLElement, txs: Transaction[]): void {
+    const currentYear = this.calYear;
+    const byYear = new Map<string, { income: number; expense: number }>();
+    txs.forEach((t) => {
+      const y = t.date.slice(0, 4);
+      if (y.length !== 4) return;
+      const acc = byYear.get(y) || { income: 0, expense: 0 };
+      if (t.type === "income") acc.income += t.amount; else acc.expense += t.amount;
+      byYear.set(y, acc);
+    });
+
+    const DONUT_SIZE = 100;
+
+    // Past years — each closed year's own net (income - expenses for that calendar year).
+    const pastCard = root.createDiv({ cls: "pa-networth-mini" });
+    pastCard.createEl("h4", { text: "📅 Past years", cls: "pa-panel-title" });
+    const pastYears = Array.from(byYear.keys()).filter((y) => Number(y) < currentYear).sort();
+    if (!pastYears.length) {
+      pastCard.createDiv({ cls: "pa-muted", text: "No closed years yet." });
+    } else {
+      const segs = pastYears.map((y, i) => {
+        const acc = byYear.get(y)!;
+        return { label: y, value: Math.round(acc.income - acc.expense), color: CAT_COLORS[i % CAT_COLORS.length] };
+      });
+      drawDonut(pastCard, segs, DONUT_SIZE, (n) => this.fmt(n), (n) => this.fmtShort(n));
+    }
+
+    // Current year so far — Income vs Expenses, center shows this year's net.
+    const curCard = root.createDiv({ cls: "pa-networth-mini" });
+    curCard.createEl("h4", { text: `📆 ${currentYear} so far`, cls: "pa-panel-title" });
+    const cur = byYear.get(String(currentYear)) || { income: 0, expense: 0 };
+    if (!cur.income && !cur.expense) {
+      curCard.createDiv({ cls: "pa-muted", text: "No transactions yet." });
+    } else {
+      const net = cur.income - cur.expense;
+      const segs = [
+        { label: "Income", value: Math.round(cur.income), color: "#16a34a" },
+        { label: "Expenses", value: Math.round(cur.expense), color: "#ef4444" },
+      ];
+      drawDonut(curCard, segs, DONUT_SIZE, (n) => this.fmt(n), () => this.fmt(net));
+    }
+  }
+
+  private openStartingBalanceModal(): void {
+    const cfg = this.ctx.config;
+    const fields: FieldSpec[] = [
+      {
+        key: "startingBalance",
+        label: `Balance before your first tracked transaction (${this.cur()})`,
+        type: "number",
+        value: cfg.startingBalance || 0,
+      },
+    ];
+    new FormModal(this.ctx.app, "Starting balance", fields, async (v) => {
+      cfg.startingBalance = parseFloat(v.startingBalance) || 0;
+      await this.ctx.store.saveConfig(cfg);
+      this.ctx.refresh();
+      toast("Starting balance saved");
+    }, "Save").open();
   }
 
   // ---- Recurring costs: the month composed of weeks; apply a week or the whole month ----
@@ -364,7 +494,7 @@ export class FinancesModule {
     drawLineChart(card, labels, [
       { name: "Income", color: "#16a34a", values: inc },
       { name: "Expenses", color: "#ef4444", values: exp },
-    ], { height: 220 });
+    ], { height: 220, format: (n) => this.fmt(n) });
   }
 
   // ---- Add a transaction (supports past dates via the date field) ----

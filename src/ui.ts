@@ -100,6 +100,9 @@ export interface FieldSpec {
   value?: string | number | boolean;
   options?: Array<{ value: string; label: string }>;
   placeholder?: string;
+  /** Optional: field is only shown while this returns true for the current form values.
+   *  Omit for fields that should always be visible (default, unchanged behavior). */
+  visibleWhen?: (values: Record<string, string>) => boolean;
 }
 
 /** Generic form modal that resolves to a map of field values (or null if cancelled). */
@@ -109,6 +112,7 @@ export class FormModal extends Modal {
   private submitLabel: string;
   private onSubmit: (values: Record<string, string>) => void | Promise<void>;
   private values: Record<string, string> = {};
+  private fieldEls: Array<{ field: FieldSpec; el: HTMLElement }> = [];
 
   constructor(
     app: App,
@@ -130,12 +134,15 @@ export class FormModal extends Modal {
     contentEl.empty();
     contentEl.createEl("h3", { text: this.title });
 
+    this.fieldEls = [];
     this.fields.forEach((f) => {
       const setting = new Setting(contentEl).setName(f.label);
+      this.fieldEls.push({ field: f, el: setting.settingEl });
+      const onFieldChange = (v: string) => { this.values[f.key] = v; this.refreshVisibility(); };
       switch (f.type) {
         case "textarea":
           setting.addTextArea((t) => {
-            t.setValue(this.values[f.key]).onChange((v) => (this.values[f.key] = v));
+            t.setValue(this.values[f.key]).onChange(onFieldChange);
             if (f.placeholder) t.setPlaceholder(f.placeholder);
             t.inputEl.rows = 4;
             t.inputEl.addClass("pa-textarea-full");
@@ -144,19 +151,19 @@ export class FormModal extends Modal {
         case "number":
           setting.addText((t) => {
             t.inputEl.type = "number";
-            t.setValue(this.values[f.key]).onChange((v) => (this.values[f.key] = v));
+            t.setValue(this.values[f.key]).onChange(onFieldChange);
           });
           break;
         case "dropdown":
           setting.addDropdown((d) => {
             (f.options || []).forEach((o) => { d.addOption(o.value, o.label); });
             d.setValue(this.values[f.key] || (f.options?.[0]?.value ?? ""))
-              .onChange((v) => (this.values[f.key] = v));
+              .onChange(onFieldChange);
           });
           break;
         case "toggle":
           setting.addToggle((tg) => {
-            tg.setValue(this.values[f.key] === "true").onChange((v) => (this.values[f.key] = String(v)));
+            tg.setValue(this.values[f.key] === "true").onChange((v) => onFieldChange(String(v)));
           });
           break;
         case "emoji": {
@@ -178,7 +185,7 @@ export class FormModal extends Modal {
             EMOJI_DATA.filter((d) => !ql || d.k.includes(ql) || d.e === ql).forEach((d) => {
               const b = grid.createEl("button", { text: d.e, cls: "pa-emoji-btn" });
               b.type = "button";
-              b.onclick = () => { this.values[f.key] = d.e; setTrigger(); setPop(false); };
+              b.onclick = () => { onFieldChange(d.e); setTrigger(); setPop(false); };
             });
           };
           renderGrid("");
@@ -191,11 +198,12 @@ export class FormModal extends Modal {
         }
         default:
           setting.addText((t) => {
-            t.setValue(this.values[f.key]).onChange((v) => (this.values[f.key] = v));
+            t.setValue(this.values[f.key]).onChange(onFieldChange);
             if (f.placeholder) t.setPlaceholder(f.placeholder);
           });
       }
     });
+    this.refreshVisibility();
 
     new Setting(contentEl)
       .addButton((b) => b.setButtonText("Cancel").onClick(() => this.close()))
@@ -211,6 +219,16 @@ export class FormModal extends Modal {
       this.modalEl.addClass("pa-modal-overflow-visible");
       this.contentEl.addClass("pa-modal-overflow-visible");
     }
+  }
+
+  /** Re-evaluates every field's `visibleWhen` against the current values and toggles its
+   *  Setting row's visibility accordingly. No full re-render, no lost focus/cursor in
+   *  other inputs — fields with no `visibleWhen` are always visible (unchanged behavior). */
+  private refreshVisibility(): void {
+    this.fieldEls.forEach(({ field, el }) => {
+      const visible = !field.visibleWhen || field.visibleWhen(this.values);
+      el.toggleClass("pa-hidden", !visible);
+    });
   }
 
   onClose(): void { this.contentEl.empty(); }

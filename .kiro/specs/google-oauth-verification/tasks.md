@@ -638,7 +638,7 @@ crítico.
 - [x] 11. Checkpoint — release publicado
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 12. Fase 8 — Artefatos de submissão e vídeo demonstrativo
+- [x] 12. Fase 8 — Artefatos de submissão e vídeo demonstrativo
 
   - [x] 12.1 🤖 **CÓDIGO** Escrever `docs/oauth-verification/scope-justification.md`
     - Texto único em **inglês**, **≤ 4.000 caracteres**, cinco blocos:
@@ -689,14 +689,14 @@ crítico.
       Use; `length <= 4000`.
     - _Requirements: 8.1, 8.2, 8.4, 8.5_
 
-  - [ ] 12.4 👤 **MANUAL** Gravar e publicar o Demo_Video
+  - [x] 12.4 👤 **MANUAL** Gravar e publicar o Demo_Video
     - Executar o roteiro de 12.2 com a **conta Google de teste**, sobre a versão publicada em 10.17.
     - Publicar no YouTube como público ou unlisted, sem restrição de idade, acessível sem login.
     - Registrar no checklist: URL do vídeo, data de publicação, a conta de teste utilizada e o
       **consumo de 1 vaga** do limite vitalício de 100 usuários.
     - _Requirements: 9.1, 9.10_
 
-  - [ ] 12.5 👤 **MANUAL** Revisão humana do vídeo e do idioma das páginas
+  - [x] 12.5 👤 **MANUAL** Revisão humana do vídeo e do idioma das páginas
     - Revisar o vídeo **quadro a quadro**: nenhum dado pessoal real de terceiros (nome, email,
       telefone, endereço), incluindo abas do navegador, notificações do sistema e outras notas do
       vault; nome do app idêntico ao da Consent_Screen; texto dos critérios 3, 4 e 6 legível com o

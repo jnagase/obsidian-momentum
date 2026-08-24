@@ -144,17 +144,17 @@ Tracking document for the verification of project `obsidian-tasks-499613`.
 
 | ID | Critério (resumo) | Estado | Evidência | Última mudança |
 | --- | --- | --- | --- | --- |
-| 9.1 | YouTube público/unlisted, URL única e estável até a decisão | não iniciado | URL do vídeo | — |
-| 9.2 | Início nas settings do plugin, contínuo até o consent | não iniciado | roteiro tomada 1 | — |
-| 9.3 | Consent screen com nome do app e lista completa de permissões | não iniciado | roteiro tomada 1 | — |
-| 9.4 | Barra de endereço com `client_id` e `redirect_uri` legíveis | não iniciado | roteiro tomada 1 | — |
-| 9.5 | Retorno ao Obsidian pelo deep link, sem corte desde o consent | não iniciado | roteiro tomada 1 | — |
-| 9.6 | Uso do escopo nas duas direções, cada uma em tomada contínua | não iniciado | roteiro tomadas 2 e 3 | — |
-| 9.7 | Narração ou legenda própria em inglês, sem legenda automática | não iniciado | roteiro | — |
-| 9.8 | Conta de teste e dados fictícios, sem dado pessoal real em quadro | não iniciado | revisão humana (tarefa 12.5) | — |
-| 9.9 | 2 a 10 min, ≥ 1280×720, texto legível em pausa | não iniciado | revisão humana | — |
-| 9.10 | Registra URL, data, conta de teste e o consumo de 1 vaga | não iniciado | [Contador de vagas](#contador-de-vagas) | — |
-| 9.11 | Dado pessoal ou nome divergente bloqueia a submissão | não iniciado | revisão humana | — |
+| 9.1 | YouTube público/unlisted, URL única e estável até a decisão | concluído | `https://youtu.be/vsYiNzASQcA` — publicado 2026-08-21, **Unlisted** | 2026-08-21 |
+| 9.2 | Início nas settings do plugin, contínuo até o consent | concluído | confirmado pelo autor: sem cortes | 2026-08-21 |
+| 9.3 | Consent screen com nome do app e lista completa de permissões | concluído | confirmado pelo autor | 2026-08-21 |
+| 9.4 | Barra de endereço com `client_id` e `redirect_uri` legíveis | concluído | confirmado pelo autor, pausando o vídeo no trecho da barra de endereço expandida | 2026-08-21 |
+| 9.5 | Retorno ao Obsidian pelo deep link, sem corte desde o consent | concluído | confirmado pelo autor: "sem cortes" | 2026-08-21 |
+| 9.6 | Uso do escopo nas duas direções, cada uma em tomada contínua | concluído | confirmado pelo autor | 2026-08-21 |
+| 9.7 | Narração ou legenda própria em inglês, sem legenda automática | concluído | narração ao vivo em inglês, feita pelo próprio autor (não legenda automática do YouTube) | 2026-08-21 |
+| 9.8 | Conta de teste e dados fictícios, sem dado pessoal real em quadro | concluído | Aceito por decisão do autor com desvio documentado — ver [Exceções e desvios](#exceções-e-desvios) (conta pessoal em vez de conta de teste dedicada). Nenhum outro dado pessoal (abas, notificações, outras notas) em quadro, conforme confirmado pelo autor | 2026-08-21 |
+| 9.9 | 2 a 10 min, ≥ 1280×720, texto legível em pausa | concluído | 4:40 min, dentro da janela; resolução e legibilidade confirmadas pelo autor | 2026-08-21 |
+| 9.10 | Registra URL, data, conta de teste e o consumo de 1 vaga | concluído | URL `https://youtu.be/vsYiNzASQcA`, publicado 2026-08-21, conta `jaime.nagase@gmail.com` (pessoal, não dedicada — ver 9.8); vaga já contava antes da gravação (era a mesma conta usada nos testes anteriores de conexão) — ver [Contador de vagas](#contador-de-vagas) | 2026-08-21 |
+| 9.11 | Dado pessoal ou nome divergente bloqueia a submissão | concluído | Nenhuma divergência de nome do app. O email pessoal em quadro (9.8) é um desvio aceito e documentado, não uma falha não tratada; risco assumido conscientemente — se o Google pedir correção por esse motivo durante o review, a resposta é regravar a Tomada 1 com outra conta e republicar na mesma URL | 2026-08-21 |
 
 ---
 
@@ -163,20 +163,20 @@ Tracking document for the verification of project `obsidian-tasks-499613`.
 A submissão **não sai** enquanto houver item em estado diferente de `concluído`.
 `test/checklist.property.test.ts` calcula a lista a partir deste arquivo.
 
-**Bloqueadores no momento** (resumo por fase) — atualizado 2026-08-21, após reconferir todo o
-código e a plataforma das Fases 1-7:
+**Bloqueadores no momento** (resumo por fase) — atualizado 2026-08-21, após gravar e publicar o
+Demo_Video:
 
 - **Fase 7 — release**: 8.7 (falta colar a justificativa no Verification Center e registrar o
   hash — ação que só faz sentido no momento da submissão, tarefa 13.3)
-- **Fase 8 — vídeo**: 9.1 a 9.11 (nada gravado ainda; único bloco de trabalho real restante fora
-  do processo de review)
 - **Processo (só se aplica durante o review, depois do envio)**: 1.6, 1.8, 1.9, 2.9, 3.16, 5.3,
   5.6, 5.7, 5.8, 8.8
 - **Fora do escopo desta submissão**: 7.7 (encerrar o legacy)
 
-Todo o resto (Fases 1-6, gates I1-I5, release da Fase 7 exceto 8.7) está `concluído` e verificado:
-código com 127/127 testes passando (`npm test`), lint limpo, build limpo, e os dois hosts de
-produção reconferidos por `curl` em 2026-08-21 (ver 1.2 acima).
+Fases 1-8 completas: código (127/127 testes), lint e build limpos, os dois hosts de produção
+reconferidos por `curl` (1.2), e o Demo_Video gravado, publicado e revisado
+(`https://youtu.be/vsYiNzASQcA`, Unlisted, 4:40 min). Único desvio conhecido: a Tomada 1 usa a
+conta Google pessoal do autor em vez de uma conta de teste dedicada — ver
+[Exceções e desvios](#exceções-e-desvios). Falta apenas a Fase 9 (submissão em si).
 
 ## Registro de verificação de domínio
 
@@ -194,6 +194,7 @@ Cap de **100 contas** para app não verificado, válido para toda a vida do proj
 | Data | Contas que autorizaram | Vagas restantes | Observação |
 | --- | --- | --- | --- |
 | 2026-08-15 | 1 | 99 | Estado observado na Audience antes da migração |
+| 2026-08-21 | 1 | 99 | Vídeo demonstrativo gravado com a mesma conta pessoal já contabilizada (I1-I4 usaram a mesma conta); nenhuma vaga nova consumida por esta gravação |
 
 Atualizar a cada envio de submissão e a cada resposta a pedido do Google. A conta de teste do
 vídeo consome 1 vaga.
@@ -214,3 +215,4 @@ Pedido de informação: registrar data de recebimento, **texto integral** e praz
 | Requirement 1, critério 7 | O `workers.dev` era redirect URI registrado, mas não pode entrar em "Authorized domains" por ser sufixo público | **Resolvido por design.** O redirect canônico fixo faz o Google redirecionar sempre para o domínio próprio, então a URL `workers.dev` deixa de ser exercida e sai do OAuth client na Fase 6. Nenhuma exceção a declarar ao Google. Evidência: Property 1, Property 2, tarefa 9.1 |
 | Requirement 7, critério 7 | Encerramento do legacy origin exige aviso de 90 dias | Fora do escopo desta submissão. O legacy permanece no ar indefinidamente |
 | Requirement 5, critério 4 | Logo na consent screen | Não enviado (D4): dispararia brand review em paralelo e alongaria o prazo |
+| Requirement 9, critério 8 | Vídeo demonstrativo gravado com a conta Google pessoal do autor (`jaime.nagase@gmail.com`), não uma conta de teste dedicada — o email aparece na tela de consent na Tomada 1 | **Aceito por decisão do autor.** Vídeo publicado como Unlisted (não indexado, só acessível por link), reduzindo a exposição. Se o Google levantar isso durante o review, a correção é regravar só a Tomada 1 com uma conta secundária e republicar na mesma URL — as tomadas 2-4 não precisam ser refeitas |

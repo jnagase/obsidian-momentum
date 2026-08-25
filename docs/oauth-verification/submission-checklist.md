@@ -67,7 +67,7 @@ Tracking document for the verification of project `obsidian-tasks-499613`.
 | 3.13 | README linka a política na mesma URL da Consent Screen | concluído | `test/site.content.test.ts` | 2026-08-15 |
 | 3.14 | Declarações em inglês | concluído | revisão humana + `lang="en"` | 2026-08-15 |
 | 3.15 | Mudança de comportamento atualiza a política no mesmo release, com nova data | concluído | `site/privacy.html` atualizado para v2 (revogação real), `Last updated: 2026-08-19`, publica no mesmo push do release | 2026-08-19 |
-| 3.16 | Erro/divergência na política bloqueia a submissão, com URL e comportamento registrados | não iniciado | este arquivo + Property 13 | — |
+| 3.16 | Erro/divergência na política bloqueia a submissão, com URL e comportamento registrados | concluído | Google recusou em 2026-08-25: "Your privacy policy does not specify any data protection mechanisms for sensitive data." Corrigido no mesmo dia adicionando a seção "Security measures" em `site/privacy.html` (TLS em trânsito, PKCE, secret só server-side, logging local redigido, broker stateless, tokens confinados ao dispositivo); `Last updated` avançado para 2026-08-25; `test/site.content.test.ts` (127/127) revalidado sem alteração de asserções | 2026-08-25 |
 
 ## Requirement 4 — Revogação e exclusão de acesso pelo plugin
 
@@ -203,7 +203,8 @@ vídeo consome 1 vaga.
 
 | Data | Evento | Conteúdo | Resposta | Data da resposta |
 | --- | --- | --- | --- | --- |
-| 2026-08-21 | Submissão enviada | Verification Questionnaire preenchido (app não é personal/internal/dev-testing/Gmail SMTP; ambos os reconhecimentos marcados) e "Submit for verification" clicado no projeto `obsidian-tasks-499613`. Verification Center passou a mostrar "Your app's data access is under review." Escopo: `https://www.googleapis.com/auth/tasks` (sensível). Vídeo: `https://youtu.be/vsYiNzASQcA` | Aguardando | — |
+| 2026-08-21 | Submissão enviada | Verification Questionnaire preenchido (app não é personal/internal/dev-testing/Gmail SMTP; ambos os reconhecimentos marcados) e "Submit for verification" clicado no projeto `obsidian-tasks-499613`. Verification Center passou a mostrar "Your app's data access is under review." Escopo: `https://www.googleapis.com/auth/tasks` (sensível). Vídeo: `https://youtu.be/vsYiNzASQcA` | Recusa recebida 2026-08-25 (ver linha abaixo) | 2026-08-25 |
+| 2026-08-25 | Pedido de correção (email "Third Party Data Safety Team") | "Your privacy policy does not specify any data protection mechanisms for sensitive data." Ação pedida: link atualizado da política com divulgação de proteção de dados, resubmetido no Cloud Console. Sem prazo numérico informado no email; instrução era responder ao email confirmando a correção | Corrigido no mesmo dia: nova seção "Security measures" em `site/privacy.html` (TLS em trânsito para `tasks.googleapis.com` e para o broker; PKCE com `code_challenge`/`code_verifier` e `state`; client secret só como env var no Worker, nunca no bundle; log local de auth com `redactSecrets` antes de gravar; broker stateless sem base de dados; tokens só no `data.json` local, sem cópia em servidor). `Last updated` → 2026-08-25. `npm test`: 127/127 verde, incluindo `test/site.content.test.ts` sem alteração de asserções (a seção nova não remove nenhuma declaração exigida). Próximo passo manual: publicar `site/` no Cloudflare Pages (o deploy é automático no push a `main`) e responder ao email confirmando a correção, depois marcar aqui a data da resposta | 2026-08-25 |
 
 Pedido de informação: registrar data de recebimento, **texto integral** e prazo informado, em até
 1 dia útil. Recusa: registrar motivo, critério afetado (marcado `bloqueado`) e item de correção.

@@ -48,6 +48,35 @@
   <p>They stay there until you disconnect Google in the plugin or delete that file. They are
   <strong>not retained in any system controlled by the author</strong>.</p>
 
+  <h2>Security measures</h2>
+  <p>Because the data involved includes your Google Tasks content and OAuth credentials, the
+  following protections apply at every stage:</p>
+  <ul>
+    <li><strong>Encryption in transit.</strong> Every request — from your device to
+    <code>tasks.googleapis.com</code>, and from your device to the OAuth broker — travels over
+    HTTPS (TLS). Nothing is ever sent in plain text.</li>
+    <li><strong>PKCE-protected sign-in.</strong> Each sign-in generates a random code verifier and
+    its SHA-256 challenge on your device (RFC 7636, Proof Key for Code Exchange), together with a
+    random state value checked on return. This means a Google authorization code intercepted in
+    transit cannot be redeemed by anyone other than the device that started the sign-in.</li>
+    <li><strong>Client secret kept server-side only.</strong> The confidential OAuth client secret
+    is never shipped inside the plugin. It exists only as an environment secret on the OAuth
+    broker and is never included in any response, redirect, deep link or log the broker
+    produces.</li>
+    <li><strong>Local, redacted logging.</strong> The plugin keeps an optional local debug log
+    inside your vault to help you troubleshoot sign-in issues. Before any line is written, access
+    tokens, refresh tokens and any secret-bearing parameter are automatically replaced with a
+    redacted placeholder, so a token cannot end up recorded even by accident.</li>
+    <li><strong>No server-side copy to protect.</strong> The OAuth broker is stateless: it holds no
+    database and stores nothing between requests, so there is no server-side copy of your tokens
+    or task content that could be exposed in a breach of infrastructure operated by the
+    author.</li>
+    <li><strong>Tokens confined to your device.</strong> Your Google access and refresh tokens are
+    written only to the plugin's local configuration file on your own device, protected by your
+    operating system's normal file permissions, and are never transmitted to or duplicated on any
+    server controlled by the author.</li>
+  </ul>
+
   <h2>Data we read and write</h2>
   <p>When the sync runs, the plugin reads and writes exactly the following fields of your Google
   Tasks data, and nothing more:</p>
@@ -114,7 +143,7 @@
   <p>Questions about this policy or about your data:
   <a href="mailto:jaime.nagase@gmail.com">jaime.nagase@gmail.com</a>.</p>
 
-  <p class="updated">Last updated: 2026-08-19</p>
+  <p class="updated">Last updated: 2026-08-25</p>
 
 </main>
 </body>

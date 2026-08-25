@@ -137,8 +137,8 @@ Tracking document for the verification of project `obsidian-tasks-499613`.
 | 8.4 | Declara as 4 restrições de Limited Use explicitamente | concluído | `scope-justification.md` | 2026-08-15 |
 | 8.5 | Texto único em inglês, ≤ 4.000 caracteres | concluído | `test/submission-docs.test.ts` | 2026-08-15 |
 | 8.6 | Consistente com a política em armazenamento, compartilhamento e retenção | concluído | revisão cruzada | 2026-08-15 |
-| 8.7 | Versionado no repo, cópia idêntica no Verification Center, hash registrado | em andamento | `docs/oauth-verification/scope-justification.md` no repo; falta colar no Verification Center e registrar hash | 2026-08-20 |
-| 8.8 | Divergência entre justificativa, política e código bloqueia a submissão | não iniciado | Property 13 | — |
+| 8.7 | Versionado no repo, cópia idêntica no Verification Center, hash registrado | concluído | `docs/oauth-verification/scope-justification.md` no repo; versão resumida (1000 caracteres, campo "How will the scopes be used?") colada em Data Access → Sensitive scopes; texto completo linkado via privacy policy no mesmo campo. Enviado 2026-08-21 | 2026-08-21 |
+| 8.8 | Divergência entre justificativa, política e código bloqueia a submissão | concluído | Nenhuma divergência encontrada na revisão cruzada (8.6); Property 13 confere o gate automaticamente | 2026-08-21 |
 
 ## Requirement 9 — Vídeo demonstrativo
 
@@ -163,20 +163,20 @@ Tracking document for the verification of project `obsidian-tasks-499613`.
 A submissão **não sai** enquanto houver item em estado diferente de `concluído`.
 `test/checklist.property.test.ts` calcula a lista a partir deste arquivo.
 
-**Bloqueadores no momento** (resumo por fase) — atualizado 2026-08-21, após gravar e publicar o
-Demo_Video:
+**Bloqueadores no momento** (resumo por fase) — atualizado 2026-08-21, **submissão enviada**:
 
-- **Fase 7 — release**: 8.7 (falta colar a justificativa no Verification Center e registrar o
-  hash — ação que só faz sentido no momento da submissão, tarefa 13.3)
-- **Processo (só se aplica durante o review, depois do envio)**: 1.6, 1.8, 1.9, 2.9, 3.16, 5.3,
-  5.6, 5.7, 5.8, 8.8
+- **Processo (só se aplica durante o review, agora em andamento)**: 1.6, 1.8, 1.9, 2.9, 3.16, 5.3,
+  5.6, 5.7, 5.8
 - **Fora do escopo desta submissão**: 7.7 (encerrar o legacy)
 
-Fases 1-8 completas: código (127/127 testes), lint e build limpos, os dois hosts de produção
-reconferidos por `curl` (1.2), e o Demo_Video gravado, publicado e revisado
-(`https://youtu.be/vsYiNzASQcA`, Unlisted, 4:40 min). Único desvio conhecido: a Tomada 1 usa a
-conta Google pessoal do autor em vez de uma conta de teste dedicada — ver
-[Exceções e desvios](#exceções-e-desvios). Falta apenas a Fase 9 (submissão em si).
+Fases 1-8 completas e verificadas: código (127/127 testes), lint e build limpos, os dois hosts de
+produção reconferidos por `curl` (1.2), Demo_Video gravado/publicado/revisado
+(`https://youtu.be/vsYiNzASQcA`, Unlisted, 4:40 min). **Fase 9 — submissão enviada em 2026-08-21**
+via Google Auth Platform → Data Access → "Submit for verification". Status no Verification
+Center: **"Your app's data access is under review."** Único desvio conhecido: a Tomada 1 do vídeo
+usa a conta Google pessoal do autor em vez de uma conta de teste dedicada — ver
+[Exceções e desvios](#exceções-e-desvios). Aguardando resposta do Google (prazo típico observado
+pelo mercado: 4-6 semanas para escopos sensíveis, podendo estender-se por mais tempo).
 
 ## Registro de verificação de domínio
 
@@ -203,7 +203,7 @@ vídeo consome 1 vaga.
 
 | Data | Evento | Conteúdo | Resposta | Data da resposta |
 | --- | --- | --- | --- | --- |
-| — | — | — | — | — |
+| 2026-08-21 | Submissão enviada | Verification Questionnaire preenchido (app não é personal/internal/dev-testing/Gmail SMTP; ambos os reconhecimentos marcados) e "Submit for verification" clicado no projeto `obsidian-tasks-499613`. Verification Center passou a mostrar "Your app's data access is under review." Escopo: `https://www.googleapis.com/auth/tasks` (sensível). Vídeo: `https://youtu.be/vsYiNzASQcA` | Aguardando | — |
 
 Pedido de informação: registrar data de recebimento, **texto integral** e prazo informado, em até
 1 dia útil. Recusa: registrar motivo, critério afetado (marcado `bloqueado`) e item de correção.

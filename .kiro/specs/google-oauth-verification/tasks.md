@@ -708,7 +708,7 @@ crítico.
 
 - [ ] 13. Fase 9 — Submissão e acompanhamento do review
 
-  - [ ] 13.1 👤 **MANUAL** Rodar os smoke checks finais e preencher o checklist
+  - [x] 13.1 👤 **MANUAL** Rodar os smoke checks finais e preencher o checklist
     - Registrar, com print ou saída de comando como evidência: domínio ativo e data de expiração
       (WHOIS/RDAP); certificados do apex e de `auth.` válidos com cadeia completa; propriedade
       verificada no Search Console **com papel Owner**; todos os campos da Consent_Screen; os
@@ -719,14 +719,14 @@ crítico.
     - Atualizar o estado de cada linha do checklist e a data da última mudança.
     - _Requirements: 1.1, 1.2, 1.3, 1.8, 2.1, 3.1, 5.1, 5.2, 5.3, 5.8, 10.1, 10.9_
 
-  - [ ] 13.2 👤 **MANUAL** 🚦 **GATE Property 13** — verificar que o gate de submissão está vazio
+  - [x] 13.2 👤 **MANUAL** 🚦 **GATE Property 13** — verificar que o gate de submissão está vazio
     - Rodar `test/checklist.property.test.ts` e o teste de cobertura contra o checklist preenchido.
     - Condição única para liberar o envio: **`blockingItems` vazio** — todos os itens no estado
       `concluído`. Havendo qualquer item em outro estado, **não enviar**, e identificar no checklist
       os pendentes ou bloqueados.
     - _Requirements: 3.16, 8.8, 9.11, 10.2, 10.8_
 
-  - [ ] 13.3 👤 **MANUAL** Enviar a Verification_Submission
+  - [x] 13.3 👤 **MANUAL** Enviar a Verification_Submission
     - Verification Center do projeto `obsidian-tasks-499613`. Colar no campo de justificativa uma
       cópia **idêntica** ao `scope-justification.md`, informar a URL do vídeo e os links das duas
       páginas.

@@ -312,6 +312,37 @@ export class PADataStore {
     await this.writeIgnoredBoards([...set]);
   }
 
+  // ── Pending Google deletions (tombstones) ─────────────────────────────────
+  // A task deleted locally while still linked to Google Tasks (had a google_id) is recorded
+  // here at delete time. Without this, the next sync sees the Google item still alive, finds
+  // no local note referencing it, and re-pulls it as a "new" task — resurrecting a card the
+  // user just deleted. The sync deletes the Google item on its next run and clears the
+  // tombstone once that's confirmed (success, or the item is already gone).
+  private pendingDeleteFile = "Config/pending-google-deletes.md";
+  loadPendingGoogleDeletes(): Array<{ id: string; list: string }> {
+    const f = this.fileAt(this.pendingDeleteFile);
+    return f ? coerce<Array<{ id: string; list: string }>>(this.frontmatter(f).deletes, []) : [];
+  }
+  private async writePendingGoogleDeletes(items: Array<{ id: string; list: string }>): Promise<void> {
+    await this.writeFile(this.pendingDeleteFile, this.buildDoc(
+      { type: "pending-google-deletes", deletes: items },
+      "# Pending Google deletions\n\nTasks deleted locally while linked to Google Tasks, awaiting deletion on Google's side so the next sync doesn't pull them back.\n",
+    ));
+  }
+  async addPendingGoogleDelete(id: string, list: string): Promise<void> {
+    if (!id) return;
+    const items = this.loadPendingGoogleDeletes();
+    if (items.some((x) => x.id === id)) return;
+    items.push({ id, list });
+    await this.writePendingGoogleDeletes(items);
+  }
+  async removePendingGoogleDelete(id: string): Promise<void> {
+    const items = this.loadPendingGoogleDeletes();
+    const next = items.filter((x) => x.id !== id);
+    if (next.length === items.length) return;
+    await this.writePendingGoogleDeletes(next);
+  }
+
   /** Ensure a board's folder exists so an empty board still shows in the explorer/tabs. */
   async ensureBoardFolder(name: string): Promise<void> {
     const full = this.full(this.taskBoardFolder(name));
@@ -806,6 +837,10 @@ export class PADataStore {
   }
 
   async deleteTask(task: Task): Promise<void> {
+    // Record the tombstone BEFORE removing the file: once the note is gone there is no
+    // other trace that this Google-linked task was deleted on purpose (see "Pending Google
+    // deletions" above) — without it, the next sync would resurrect it from Google.
+    if (task.googleId) await this.addPendingGoogleDelete(task.googleId, task.googleList || "");
     const f = this.app.vault.getAbstractFileByPath(task.path);
     if (f instanceof TFile) await this.removeFile(f);
   }

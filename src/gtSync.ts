@@ -17,6 +17,15 @@
  *    pending writes unless explicitly confirmed (manual "Sync now"), so a widget storm
  *    or a bug can't fan out across Google.
  *  - No deletion here (Phase 2): a task missing on one side is left alone, never removed.
+ *
+ * Phase 2 (deletion propagation):
+ *  - A note deleted locally while still linked to Google Tasks leaves a tombstone
+ *    (PADataStore.addPendingGoogleDelete, written at delete time — see deleteTask). Every
+ *    sync run processes these tombstones FIRST and unconditionally (processPendingGoogleDeletes):
+ *    it deletes the item on Google (or confirms it's already gone) and only then clears the
+ *    tombstone. Any id still pending is also excluded from the pull step for that same run,
+ *    so a task can never be resurrected by the very sync that's deleting it, nor by a later
+ *    run if the deletion attempt failed (e.g. offline) and the tombstone is still there.
  */
 
 import { PADataStore } from "./data";
@@ -160,6 +169,14 @@ export class GTSyncService {
     try { defaultListId = (await getDefaultTaskList(at)).id ?? ""; }
     catch (e) { result.errors.push(`Default list: ${String(e)}`); }
 
+    // Pending Google deletions: tasks deleted locally while still linked to Google Tasks
+    // (see PADataStore.deleteTask). This propagates an already-final local action — the
+    // file is already gone — so it runs unconditionally, unlike the inferred mass-deletion
+    // guard below. Doing this BEFORE planning pulls means a task can never be resurrected
+    // by the same sync run that's supposed to be deleting it.
+    await this.processPendingGoogleDeletes(at, result);
+    const pendingDeleteIds = new Set(this.store.loadPendingGoogleDeletes().map((p) => p.id));
+
     const boards = this.store.loadBoards();
     const tasks = this.store.loadTasks();
     const cfg = await this.store.loadConfig();
@@ -280,10 +297,11 @@ export class GTSyncService {
         }
       }
 
-      // Pull: unlinked remote tasks with no local match → create local (skip completed/blank).
+      // Pull: unlinked remote tasks with no local match → create local (skip completed/blank,
+      // and skip anything still pending deletion on Google — see processPendingGoogleDeletes).
       const board = listIdToBoard.get(listId) ?? "My Tasks";
       for (const gt of gtTasks) {
-        if (!gt.id || usedGtIds.has(gt.id) || linkedIds.has(gt.id)) continue;
+        if (!gt.id || usedGtIds.has(gt.id) || linkedIds.has(gt.id) || pendingDeleteIds.has(gt.id)) continue;
         if (gt.status === "completed" || isBlankTitle(gt.title)) continue;
         ops.push({ kind: "pullCreate", board, listId, gt });
       }
@@ -492,6 +510,37 @@ export class GTSyncService {
       if (!ignored.has(l.title) || l.id === defaultListId) continue;
       try { await deleteTaskList(at, l.id); result.deleted++; }
       catch (e) { result.errors.push(`Delete list "${l.title}": ${String(e)}`); }
+    }
+  }
+
+  /**
+   * Delete on Google every task recorded as "deleted locally" (see PADataStore.deleteTask /
+   * addPendingGoogleDelete). Unlike reconcileDeletions' inferred branch A, this is an
+   * explicit, already-final local action (the note is already gone), so there's no mass-
+   * deletion guard here — just retry-safe cleanup. An item already gone on Google (404/410)
+   * counts as success. A tombstone is only cleared once Google confirms the deletion (or
+   * confirms it's already gone), so a transient failure (e.g. no network) leaves it in place
+   * for the next sync to retry, and the pull step keeps shielding it from resurrection.
+   */
+  private async processPendingGoogleDeletes(at: string, result: GTSyncResult): Promise<void> {
+    const items = this.store.loadPendingGoogleDeletes();
+    for (const { id, list } of items) {
+      if (!list) { result.errors.push(`Pending Google delete ${id}: no list recorded, skipped.`); continue; }
+      try {
+        await deleteTask(at, list, id);
+        this.baselines.remove(id);
+        await this.store.removePendingGoogleDelete(id);
+        result.deleted++;
+        result.notes.push(`Deleted Google task ${id} (note was deleted locally).`);
+      } catch (e) {
+        if (isGoneErr(e)) {
+          this.baselines.remove(id);
+          await this.store.removePendingGoogleDelete(id);
+          result.notes.push(`Google task ${id} was already gone (note was deleted locally).`);
+        } else {
+          result.errors.push(`Pending Google delete ${id}: ${String(e)}`);
+        }
+      }
     }
   }
 

@@ -5,12 +5,11 @@ import { PANavView, VIEW_TYPE_PA_NAV } from "./nav";
 import { PASideView, VIEW_TYPE_PA_SIDE, momentumNoteType } from "./side";
 import { WhatsNewModal, CHANGELOG, cmpVersion } from "./whatsnew";
 import { CustomPage } from "./types";
-import { FormModal, ConfirmModal, StepsModal, FieldSpec } from "./ui";
+import { FormModal, ConfirmModal, FieldSpec } from "./ui";
 import {
   GoogleToken, authorizeGoogle, completeGoogleAuth, GOOGLE_PROTOCOL_ACTION,
   GoogleAuthExpiredError, revokeGoogleToken, redactSecrets, isUserCapError,
 } from "./googletasks";
-import { SITE_HOST } from "./appdomain";
 import { GTSyncService } from "./gtSync";
 interface PASettings {
   dataRoot: string;
@@ -795,36 +794,6 @@ export default class MomentumPlugin extends Plugin implements PAHost {
     return { log, flush };
   }
 
-  /**
-   * Shows a one-time-per-click explainer before opening Google's consent flow, so the
-   * "Google hasn't verified this app" screen doesn't read as a scam or a broken plugin.
-   * That screen is unavoidable while the OAuth verification is pending (it depends on
-   * Google's review, not on anything the plugin does) — the least we can do is tell the
-   * user exactly which two clicks get them past it, and why they're safe.
-   */
-  explainGoogleVerificationWarning(onContinue: () => void): void {
-    new StepsModal(this.app, {
-      title: "Before you connect: a Google warning screen",
-      intro:
-        "Momentum Life's Google sign-in is still pending Google's app verification, so " +
-        "Google shows a warning before you can continue. This is expected — it's not an " +
-        "error, and it isn't specific to this update.",
-      steps: [
-        "Click \"Connect Google account\" below. Google opens in your browser.",
-        "If you see a red screen titled \"Google hasn't verified this app\", click " +
-          "\"Advanced\" (small link, bottom left).",
-        `Click the link that appears, "Go to ${SITE_HOST} (unsafe)".`,
-        "Choose your Google account and approve the Google tasks permission.",
-      ],
-      note:
-        "Why it's safe to continue: Momentum Life is open source " +
-        "(github.com/jnagase/obsidian-momentum), and this screen only means Google's review " +
-        "of the app is still pending — not that anything is wrong with the request. The " +
-        "permission asks for Google tasks access only, never your email, files or contacts.",
-      primary: { label: "Connect Google account", onClick: onContinue },
-    }).open();
-  }
-
   async connectGoogleTasks(): Promise<void> {
     const { log, flush } = this.authLogger();
     try {
@@ -1098,9 +1067,7 @@ class PASettingTab extends PluginSettingTab {
             });
           } else {
             b.setButtonText("Connect Google account").setCta().onClick(() => {
-              this.plugin.explainGoogleVerificationWarning(() => {
-                void this.plugin.connectGoogleTasks().then(() => rerender());
-              });
+              void this.plugin.connectGoogleTasks().then(() => rerender());
             });
           }
         });

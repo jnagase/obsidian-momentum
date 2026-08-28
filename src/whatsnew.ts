@@ -6,6 +6,17 @@ export interface ChangeEntry { version: string; sections: ChangeSection[]; }
 /** Release notes shown in the "What's new" dialog, newest first. */
 export const CHANGELOG: ChangeEntry[] = [
   {
+    version: "0.6.2",
+    sections: [
+      {
+        title: "Fixed",
+        items: [
+          "Google Tasks sync no longer resurrects tasks you deleted on the other side — a deletion is now remembered so it doesn't get pulled back in on the next sync.",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.6.1",
     sections: [
       {

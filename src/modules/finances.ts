@@ -1,10 +1,15 @@
 import { PAContext } from "../context";
-import { RecurringItem, Transaction } from "../types";
+import { RecurringItem, Transaction, SavingsBucket } from "../types";
 import { ConfirmModal, FieldSpec, FormModal, toast, appendSidebarBtn } from "../ui";
 import { todayLocal } from "../util";
 import { drawRing, drawDonut, drawLineChart } from "../charts";
 
 const CAT_COLORS = ["#7c3aed", "#f59e0b", "#16a34a", "#3b82f6", "#ec4899", "#0ea5e9", "#ef4444", "#10b981", "#a855f7", "#eab308"];
+// Market-standard convention: the Emergency fund reads as "safety" (blue); custom
+// buckets (e.g. Investments) cycle through a separate palette starting with "growth"
+// green, so a bucket named "Investments" never accidentally lands on the reserve's blue.
+const RESERVE_COLOR = "#3b82f6";
+const BUCKET_COLORS = ["#16a34a", "#f59e0b", "#8b5cf6", "#ec4899", "#0ea5e9", "#eab308"];
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
@@ -64,9 +69,8 @@ export class FinancesModule {
     this.renderHeader(root, txs);
     this.renderStats(root, txs);
     this.renderNetWorth(root, txs);
-    const cols = root.createDiv({ cls: "pa-two-col" });
-    this.renderBreakdown(cols, txs);
-    this.renderTrend(cols, txs);
+    this.renderSavings(root, txs);
+    this.renderBreakdown(root, txs);
     this.renderRecurring(root);
     this.renderAddBar(root);
     this.renderLedger(root, txs);
@@ -78,6 +82,24 @@ export class FinancesModule {
     return Array.from(keys).sort();
   }
 
+  /** "YYYY-MM" key for the calendar month `n` months before `key` (n=0 returns `key`). */
+  private monthKeyBack(key: string, n: number): string {
+    const [y, m] = key.split("-").map(Number);
+    const d = new Date(y, m - 1 - n, 1);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  }
+
+  /** A fixed-length window of consecutive month keys ending at `endKey` (inclusive),
+   *  regardless of which months actually have transactions. Keeps the net-worth chart's
+   *  x-axis stable as history grows or gets backfilled, instead of only ever showing
+   *  the months that happen to have data — and it slides forward automatically as real
+   *  time passes, since `endKey` is always the current month. */
+  private fixedMonthWindow(endKey: string, count: number): string[] {
+    const out: string[] = [];
+    for (let i = count - 1; i >= 0; i--) out.push(this.monthKeyBack(endKey, i));
+    return out;
+  }
+
   /** Running balance up to and including the given month, starting from the configured
    *  starting balance. Cheap to compute from scratch: transactions are already in memory
    *  and this runs once per render, same cost class as the existing 6-month trend. */
@@ -87,10 +109,12 @@ export class FinancesModule {
     return start + this.sumByType(upTo, "income") - this.sumByType(upTo, "expense");
   }
 
-  /** Cap the number of months shown on the net-worth chart so the x-axis stays readable
-   *  as history grows (labels get overlapping/illegible well before ~12 points). The
+  /** Fixed width of the net-worth chart's x-axis: always the current month plus the
+   *  12 before it (13 points total). Unlike only plotting months that have data, this
+   *  keeps the axis stable as history is backfilled or has gaps — and it slides forward
+   *  on its own every calendar month, since the window always ends at "now". The
    *  headline total is unaffected — it's always computed from the full, uncapped history. */
-  private static readonly NET_WORTH_CHART_MONTHS = 12;
+  private static readonly NET_WORTH_CHART_MONTHS = 13;
 
   // ---- Net worth: running balance since the starting balance, all-time ----
   private renderNetWorth(root: HTMLElement, txs: Transaction[]): void {
@@ -100,9 +124,8 @@ export class FinancesModule {
     // even before any transaction has been logged this month.
     const allKeys = Array.from(new Set([...monthKeys, nowKey])).sort();
     const total = this.cumulativeThrough(txs, allKeys[allKeys.length - 1]);
-    // Chart only ever shows the most recent N months; the headline `total` above is
-    // computed from the full history regardless of this cap.
-    const chartKeys = allKeys.slice(-FinancesModule.NET_WORTH_CHART_MONTHS);
+    // Fixed 13-month window ending at the current month — see NET_WORTH_CHART_MONTHS.
+    const chartKeys = this.fixedMonthWindow(nowKey, FinancesModule.NET_WORTH_CHART_MONTHS);
 
     const card = root.createDiv({ cls: "pa-panel" });
     const head = card.createDiv({ cls: "pa-section-head" });
@@ -111,35 +134,49 @@ export class FinancesModule {
     gear.setAttr("aria-label", "Set starting balance");
     gear.onclick = () => this.openStartingBalanceModal();
 
-    const row = card.createDiv({ cls: "pa-stats-row" });
+    // Top row: the SAVED SO FAR stat next to the two small donuts (current year so far,
+    // Savings breakdown) — all together at the top of the card, above the full-width
+    // trend chart below.
+    const topRow = card.createDiv({ cls: "pa-networth-top" });
+    const row = topRow.createDiv({ cls: "pa-stats-row pa-networth-stat" });
     const c = row.createDiv({ cls: "pa-stat" });
     const v = c.createDiv({ text: this.fmt(total), cls: "pa-stat-value" });
     v.style.color = total >= 0 ? "#16a34a" : "#ef4444";
     c.createDiv({ text: total >= 0 ? "💰 SAVED SO FAR" : "📉 IN THE RED", cls: "pa-stat-label" });
-
     if (this.ctx.config.startingBalance) {
-      card.createDiv({ cls: "pa-muted", text: `Includes a starting balance of ${this.fmt(this.ctx.config.startingBalance)}.` });
+      row.createDiv({ cls: "pa-muted", text: `Includes a starting balance of ${this.fmt(this.ctx.config.startingBalance)}.` });
     }
+    this.renderYearlyMini(topRow.createDiv({ cls: "pa-networth-yearly" }), txs);
 
-    if (chartKeys.length < 2) {
+    // chartKeys is now a fixed-length window (see NET_WORTH_CHART_MONTHS), so its length
+    // alone no longer signals "not enough data yet" — check for any real transaction
+    // history instead.
+    if (!monthKeys.length) {
       card.createEl("p", { cls: "pa-muted", text: "Log transactions across a couple of months to see the trend." });
       return;
     }
 
-    // Chart + small stacked yearly donuts side by side, inside the same card.
-    const body = card.createDiv({ cls: "pa-networth-body" });
-    const chartCol = body.createDiv({ cls: "pa-networth-chart" });
+    // Trend chart, full width, below the top row. Combines the accumulated Balance with
+    // each month's Income/Expenses on the same chart — this used to be two separate line
+    // charts (this one, plus "Income vs expenses" further down) which was one too many;
+    // consolidating here shows both "how the month went" and "the overall trend" at once.
+    const chartCol = card.createDiv({ cls: "pa-networth-chart" });
     const labels = chartKeys.map((k) => `${MONTHS[Number(k.slice(5, 7)) - 1]} ${k.slice(2, 4)}`);
-    const values = chartKeys.map((k) => Math.round(this.cumulativeThrough(txs, k)));
-    drawLineChart(chartCol, labels, [{ name: "Balance", color: total >= 0 ? "#16a34a" : "#ef4444", values }], { height: 220, format: (n) => this.fmt(n) });
-    if (allKeys.length > chartKeys.length) {
-      chartCol.createDiv({ cls: "pa-muted", text: `Showing the last ${FinancesModule.NET_WORTH_CHART_MONTHS} months.` });
+    const balanceValues = chartKeys.map((k) => Math.round(this.cumulativeThrough(txs, k)));
+    const incomeValues = chartKeys.map((k) => Math.round(this.sumByType(txs.filter((t) => t.date.startsWith(k)), "income")));
+    const expenseValues = chartKeys.map((k) => Math.round(this.sumByType(txs.filter((t) => t.date.startsWith(k)), "expense")));
+    drawLineChart(chartCol, labels, [
+      { name: "Balance", color: total >= 0 ? "#16a34a" : "#ef4444", values: balanceValues },
+      { name: "Income", color: "#3b82f6", values: incomeValues },
+      { name: "Expenses", color: "#f59e0b", values: expenseValues },
+    ], { height: 220, format: (n) => this.fmt(n) });
+    if (allKeys.some((k) => k < chartKeys[0])) {
+      chartCol.createDiv({ cls: "pa-muted", text: `Showing the last ${FinancesModule.NET_WORTH_CHART_MONTHS} months. Older history is included in the total above.` });
     }
-    this.renderYearlyMini(body.createDiv({ cls: "pa-networth-yearly" }), txs);
   }
 
-  // ---- Yearly breakdown: how past years closed (net savings per year) + current year so far ----
-  // Rendered small and stacked, alongside the net-worth chart (not full-size panels).
+  // ---- Small donut cards next to the SAVED SO FAR stat: current year so far, and the
+  // Savings breakdown. ----
   private renderYearlyMini(root: HTMLElement, txs: Transaction[]): void {
     const currentYear = this.calYear;
     const byYear = new Map<string, { income: number; expense: number }>();
@@ -153,20 +190,6 @@ export class FinancesModule {
 
     const DONUT_SIZE = 100;
 
-    // Past years — each closed year's own net (income - expenses for that calendar year).
-    const pastCard = root.createDiv({ cls: "pa-networth-mini" });
-    pastCard.createEl("h4", { text: "📅 Past years", cls: "pa-panel-title" });
-    const pastYears = Array.from(byYear.keys()).filter((y) => Number(y) < currentYear).sort();
-    if (!pastYears.length) {
-      pastCard.createDiv({ cls: "pa-muted", text: "No closed years yet." });
-    } else {
-      const segs = pastYears.map((y, i) => {
-        const acc = byYear.get(y)!;
-        return { label: y, value: Math.round(acc.income - acc.expense), color: CAT_COLORS[i % CAT_COLORS.length] };
-      });
-      drawDonut(pastCard, segs, DONUT_SIZE, (n) => this.fmt(n), (n) => this.fmtShort(n));
-    }
-
     // Current year so far — Income vs Expenses, center shows this year's net.
     const curCard = root.createDiv({ cls: "pa-networth-mini" });
     curCard.createEl("h4", { text: `📆 ${currentYear} so far`, cls: "pa-panel-title" });
@@ -179,7 +202,23 @@ export class FinancesModule {
         { label: "Income", value: Math.round(cur.income), color: "#16a34a" },
         { label: "Expenses", value: Math.round(cur.expense), color: "#ef4444" },
       ];
-      drawDonut(curCard, segs, DONUT_SIZE, (n) => this.fmt(n), () => this.fmt(net));
+      // Center text shows the year's NET (income - expenses), not the segment total
+      // (income + expenses) that drawDonut would pass in — hence the closure over `net`
+      // instead of using the callback's argument. Uses fmtShort: the full formatted
+      // amount doesn't fit inside a 100px circle and was overflowing past the edge.
+      drawDonut(curCard, segs, DONUT_SIZE, (n) => this.fmt(n), () => this.fmtShort(net));
+    }
+
+    // Savings breakdown — same segments/colors as the Savings panel below. Only shown
+    // once there's actually something logged; an empty card here just added clutter
+    // next to the always-present "so far" card.
+    const buckets = this.ctx.store.loadSavingsBuckets();
+    const savTotal = buckets.reduce((a, b) => a + this.bucketBalance(b), 0);
+    if (savTotal > 0) {
+      const savCard = root.createDiv({ cls: "pa-networth-mini" });
+      savCard.createEl("h4", { text: "🐷 Savings", cls: "pa-panel-title" });
+      const segs = this.savingsSegments(buckets);
+      drawDonut(savCard, segs, DONUT_SIZE, (n) => this.fmt(n), (n) => this.fmtShort(n));
     }
   }
 
@@ -200,6 +239,160 @@ export class FinancesModule {
       toast("Starting balance saved");
     }, "Save").open();
   }
+
+  // ---- Savings buckets: piggy banks (fixed Emergency fund + user-created ones) ----
+  private bucketBalance(b: SavingsBucket): number {
+    return Math.round(Object.values(b.log).reduce((a, v) => a + v, 0) * 100) / 100;
+  }
+
+  /** Average monthly income over the last 3 months that have any transaction, falling
+   *  back to 0 when there's no income history yet (then the suggested goal is also 0,
+   *  same as leaving it unset). Mirrors the 3-month window already used by the header's
+   *  savings-rate rings, so this stays consistent with the rest of the module. */
+  private avgMonthlyIncome(txs: Transaction[]): number {
+    const now = new Date();
+    let total = 0;
+    let months = 0;
+    for (let m = 0; m < 3; m++) {
+      const d = new Date(now.getFullYear(), now.getMonth() - m, 1);
+      const prefix = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+      const inc = this.sumByType(txs.filter((t) => t.date.startsWith(prefix)), "income");
+      if (inc > 0) { total += inc; months++; }
+    }
+    return months ? total / months : 0;
+  }
+
+  /** Market-standard default: 6 months of income as the Emergency fund target. Only
+   *  used when the user hasn't set an explicit goal on the bucket. */
+  private suggestedReserveGoal(txs: Transaction[]): number {
+    return Math.round(this.avgMonthlyIncome(txs) * 6);
+  }
+
+  /** Donut segments for the savings breakdown — shared between the small card next to
+   *  the net-worth chart and (were it ever needed again) the Savings panel itself. */
+  private savingsSegments(buckets: SavingsBucket[]): Array<{ label: string; value: number; color: string }> {
+    return buckets.map((b, i) => ({
+      label: b.name,
+      value: Math.max(0, this.bucketBalance(b)),
+      color: b.kind === "reserve" ? RESERVE_COLOR : BUCKET_COLORS[i % BUCKET_COLORS.length],
+    }));
+  }
+
+  private renderSavings(root: HTMLElement, txs: Transaction[]): void {
+    const buckets = this.ctx.store.loadSavingsBuckets();
+    const card = root.createDiv({ cls: "pa-panel" });
+    const head = card.createDiv({ cls: "pa-section-head" });
+    head.createEl("h3", { text: "🐷 Savings — money set aside, by goal", cls: "pa-panel-title" });
+    const addBtn = head.createEl("button", { text: "+ new bucket", cls: "pa-mini-btn" });
+    addBtn.onclick = () => this.openBucketModal();
+
+    const list = card.createDiv({ cls: "pa-savings-list" });
+    buckets.forEach((b, i) => {
+      const bal = this.bucketBalance(b);
+      const color = b.kind === "reserve" ? RESERVE_COLOR : BUCKET_COLORS[i % BUCKET_COLORS.length];
+      const goal = b.goal ?? (b.kind === "reserve" ? this.suggestedReserveGoal(txs) : 0);
+      const isSuggested = b.kind === "reserve" && b.goal == null && goal > 0;
+
+      const row = list.createDiv({ cls: "pa-savings-item" });
+      const top = row.createDiv({ cls: "pa-savings-item-top" });
+      const dot = top.createSpan({ cls: "pa-legend-dot" });
+      dot.style.background = color;
+      top.createSpan({ text: b.name, cls: "pa-savings-item-name" });
+      top.createSpan({ text: this.fmt(bal), cls: "pa-savings-item-bal" });
+
+      if (goal > 0) {
+        const pct = Math.min(100, Math.round((bal / goal) * 100));
+        const labelRow = row.createDiv({ cls: "pa-progress-label" });
+        labelRow.createSpan({ text: `Goal: ${this.fmt(goal)}${isSuggested ? " (suggested — 6mo income)" : ""}` });
+        labelRow.createSpan({ text: `${pct}%`, cls: "pa-muted" });
+        const bar = row.createDiv({ cls: "pa-progress-track" });
+        const fill = bar.createDiv({ cls: "pa-progress-fill" });
+        fill.style.width = pct + "%";
+        fill.style.background = color;
+      }
+
+      const actions = row.createDiv({ cls: "pa-savings-item-actions" });
+      const add = actions.createEl("button", { text: "+ contribution", cls: "pa-mini-btn" });
+      add.onclick = () => this.openContributionModal(b);
+      const edit = actions.createEl("button", { text: "✏️ edit", cls: "pa-mini-btn" });
+      edit.setAttr("aria-label", "Edit this bucket's name, balance and/or goal");
+      edit.onclick = () => this.openEditBucketModal(b, bal, txs);
+      if (b.kind !== "reserve") {
+        const del = actions.createEl("button", { text: "🗑", cls: "pa-icon-btn" });
+        del.setAttr("aria-label", "Delete bucket");
+        del.onclick = () => new ConfirmModal(this.ctx.app,
+          `Delete "${b.name}"? Its ${this.fmt(bal)} balance and contribution history will be lost — this only removes the bucket, it never touches your transactions.`,
+          async () => { await this.ctx.store.deleteSavingsBucket(b.id); this.ctx.refresh(); }).open();
+      }
+    });
+  }
+
+  /** "+ new bucket" only — renaming an existing one is now folded into
+   *  openEditBucketModal alongside its balance. */
+  private openBucketModal(): void {
+    const fields: FieldSpec[] = [
+      { key: "name", label: "Bucket name", type: "text", value: "", placeholder: "e.g. Investments, Travel, New car" },
+    ];
+    new FormModal(this.ctx.app, "New savings bucket", fields, async (v) => {
+      const name = (v.name || "").trim();
+      if (!name) { toast("Enter a name for the bucket."); return; }
+      await this.ctx.store.addSavingsBucket(name);
+      this.ctx.refresh();
+      toast("Bucket created");
+    }, "Create").open();
+  }
+
+  /** One combined modal for everything you'd want to fix on an existing bucket: its name
+   *  (skipped for the fixed Emergency fund), its total balance, and its goal — replaces
+   *  what used to be three separate buttons/modals (rename, "set balance", and goal).
+   *  Renaming and the goal write straight through; correcting the balance records the
+   *  difference as one contribution dated today (the balance is always the sum of the
+   *  log, so this is the only way to change it without losing the rest of the
+   *  contribution history). */
+  private openEditBucketModal(bucket: SavingsBucket, currentBalance: number, txs: Transaction[]): void {
+    const suggested = bucket.kind === "reserve" ? this.suggestedReserveGoal(txs) : 0;
+    const fields: FieldSpec[] = [];
+    if (bucket.kind !== "reserve") {
+      fields.push({ key: "name", label: "Bucket name", type: "text", value: bucket.name });
+    }
+    fields.push({ key: "balance", label: `Correct total balance (${this.cur()})`, type: "number", value: currentBalance });
+    fields.push({
+      key: "goal",
+      label: bucket.kind === "reserve"
+        ? `Goal (${this.cur()}) — leave as suggested (6mo income = ${this.fmt(suggested)}) or set your own, 0 to clear`
+        : `Goal (${this.cur()}) — 0 to leave unset`,
+      type: "number",
+      value: bucket.goal ?? suggested,
+    });
+    new FormModal(this.ctx.app, `Edit "${bucket.name}"`, fields, async (v) => {
+      const name = (v.name || "").trim();
+      const goal = parseFloat(v.goal) || 0;
+      const patch: { name?: string; goal?: number | undefined } = { goal: goal > 0 ? goal : undefined };
+      if (bucket.kind !== "reserve" && name && name !== bucket.name) patch.name = name;
+      await this.ctx.store.updateSavingsBucket(bucket.id, patch);
+      const target = parseFloat(v.balance) || 0;
+      const diff = Math.round((target - currentBalance) * 100) / 100;
+      if (diff) await this.ctx.store.addSavingsContribution(bucket.id, diff, todayLocal());
+      this.ctx.refresh();
+      toast("Bucket updated");
+    }, "Save").open();
+  }
+
+  private openContributionModal(bucket: SavingsBucket): void {
+    const fields: FieldSpec[] = [
+      { key: "amount", label: `Amount (${this.cur()}) — negative to withdraw`, type: "number", value: "" },
+      { key: "date", label: "Date", type: "text", value: todayLocal() },
+    ];
+    new FormModal(this.ctx.app, `Add to "${bucket.name}"`, fields, async (v) => {
+      const amount = parseFloat(v.amount) || 0;
+      if (!amount) { toast("Enter a non-zero amount."); return; }
+      const date = /^\d{4}-\d{2}-\d{2}$/.test(v.date) ? v.date : todayLocal();
+      await this.ctx.store.addSavingsContribution(bucket.id, amount, date);
+      this.ctx.refresh();
+      toast(amount > 0 ? "Contribution added" : "Withdrawal recorded");
+    }, "Save").open();
+  }
+
 
   // ---- Recurring costs: the month composed of weeks; apply a week or the whole month ----
   private renderRecurring(root: HTMLElement): void {
@@ -473,28 +666,6 @@ export class FinancesModule {
       .map(([label, value], i) => ({ label, value: Math.round(value), color: CAT_COLORS[i % CAT_COLORS.length] }));
     if (!segs.length) { card.createEl("p", { cls: "pa-muted", text: "No expenses this month yet." }); return; }
     drawDonut(card, segs, 150, (n) => this.fmt(n), (n) => this.fmtShort(n));
-  }
-
-  // ---- Income vs expenses over the last 6 months ----
-  private renderTrend(root: HTMLElement, txs: Transaction[]): void {
-    const card = root.createDiv({ cls: "pa-panel" });
-    card.createEl("h3", { text: "📈 Income vs expenses (6 months)", cls: "pa-panel-title" });
-    const labels: string[] = [];
-    const inc: Array<number | null> = [];
-    const exp: Array<number | null> = [];
-    const base = new Date(this.calYear, this.calMonth, 1);
-    for (let i = 5; i >= 0; i--) {
-      const d = new Date(base.getFullYear(), base.getMonth() - i, 1);
-      const p = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-      const mt = txs.filter((t) => t.date.startsWith(p));
-      labels.push(MONTHS[d.getMonth()]);
-      inc.push(Math.round(this.sumByType(mt, "income")));
-      exp.push(Math.round(this.sumByType(mt, "expense")));
-    }
-    drawLineChart(card, labels, [
-      { name: "Income", color: "#16a34a", values: inc },
-      { name: "Expenses", color: "#ef4444", values: exp },
-    ], { height: 220, format: (n) => this.fmt(n) });
   }
 
   // ---- Add a transaction (supports past dates via the date field) ----

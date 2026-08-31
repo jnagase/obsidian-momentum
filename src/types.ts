@@ -162,6 +162,27 @@ export interface Transaction {
   path: string;
 }
 
+/** A named savings "piggy bank" with an append-only, date-keyed log of contributions
+ *  (and withdrawals, as negative entries). Balance is always derived (sum of `log`),
+ *  never stored separately, so it can never drift out of sync with the log. The
+ *  "Emergency fund" bucket (kind "reserve") is fixed: always present, never deletable,
+ *  never renamable — every other bucket (kind "custom") is fully user-managed. */
+export interface SavingsBucket {
+  id: string;
+  name: string;
+  kind: "reserve" | "custom";
+  /** Optional target balance the user set explicitly. When unset on the "reserve"
+   *  bucket, the UI shows a suggested goal (6× recent average monthly income) computed
+   *  on the fly instead — this field only holds a value once the user overrides it. */
+  goal?: number;
+  /** date (YYYY-MM-DD) -> signed delta amount for that day. Multiple contributions on
+   *  the same date accumulate into one entry (see addSavingsContribution). */
+  log: Record<string, number>;
+}
+
+/** Fixed id of the always-present, never-deletable Emergency fund bucket. */
+export const EMERGENCY_FUND_ID = "emergency-fund";
+
 /** A recurring income/expense template the user can apply to a month in one click. */
 export interface RecurringItem {
   id: string;

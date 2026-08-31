@@ -40,6 +40,10 @@ export interface PAHost {
   editCustomPage(id: string): void;
   /** Delete a custom section by id. */
   removeCustomPage(id: string): void | Promise<void>;
+  /** True when a custom section's target (ribbon icon or command) can no longer be
+   *  found — e.g. the other plugin was uninstalled. Drives a "broken" hint in the nav
+   *  so a dead shortcut doesn't just silently do nothing when clicked. */
+  isCustomPageBroken(id: string): boolean;
   /** Run a Google Tasks sync now (used by the "sync now" button on the tasks page). */
   syncGoogleTasks(silent?: boolean): void | Promise<void>;
   /** True when Google Tasks sync is enabled AND connected. */

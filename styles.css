@@ -8,6 +8,14 @@
 .pa-nav-add{border:1px dashed var(--background-modifier-border);color:var(--text-muted);margin-top:6px;opacity:.85}
 .pa-nav-add::before{content:"＋ "}
 .pa-nav-add:hover{opacity:1;border-color:var(--interactive-accent)}
+.pa-nav-row{display:flex;align-items:center;gap:2px}
+.pa-nav-row-btn{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* Always visible (not hover-revealed): a hover-triggered opacity change could shift
+   what's under the cursor right as the click lands, causing the first click to miss
+   and hit the shortcut button behind it instead of the trash icon. */
+.pa-nav-row-del{opacity:.55;flex-shrink:0}
+.pa-nav-row-del:hover{opacity:1}
+.pa-nav-broken{color:var(--text-error);font-style:italic}
 .pa-main{flex:1;overflow-y:auto;padding:16px}
 .pa-h1{font-size:1.3rem;font-weight:700;margin-bottom:12px}
 .pa-muted{color:var(--text-muted);font-size:.85rem}
@@ -603,15 +611,25 @@ button.pa-link-btn:focus-visible {
 /* FormModal conditional fields (visibleWhen) — fitness-cardio */
 .pa-hidden { display: none !important; }
 
-/* Net worth panel: line chart + small stacked yearly donuts side by side */
-.pa-networth-body{display:flex;gap:14px;align-items:flex-start}
-.pa-networth-chart{flex:1;min-width:0}
-.pa-networth-yearly{display:flex;flex-direction:column;gap:8px;flex:0 0 auto}
+/* Savings panel: bucket cards in a 2-column grid (the donut moved up next to "so far") */
+.pa-savings-list{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:8px}
+.pa-savings-item{border:1px solid var(--background-modifier-border);border-radius:8px;padding:8px 10px}
+.pa-savings-item-top{display:flex;align-items:center;gap:6px;margin-bottom:2px}
+.pa-savings-item-name{font-weight:600;font-size:.85rem;flex:1}
+.pa-savings-item-bal{font-weight:700;font-size:.85rem}
+.pa-savings-item-actions{display:flex;gap:6px;align-items:center;margin-top:6px;flex-wrap:wrap}
+@media(max-width:600px){.pa-savings-list{grid-template-columns:1fr}}
+
+/* Net worth panel: SAVED SO FAR stat + small donuts on top, trend chart full-width below */
+.pa-networth-top{display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap;margin-bottom:10px}
+.pa-networth-stat{flex:1;min-width:160px}
+.pa-networth-chart{width:100%}
+.pa-networth-yearly{display:flex;flex-direction:row;gap:8px;flex:0 0 auto}
 .pa-networth-mini{background:var(--background-primary);border:1px solid var(--background-modifier-border);border-radius:8px;padding:8px}
 .pa-networth-mini .pa-panel-title{margin:0 0 4px;font-size:.78rem;text-align:center}
 .pa-networth-mini .pa-donut-legend{font-size:.62rem;gap:4px}
 .pa-networth-mini .pa-legend-item{font-size:.62rem}
-@media(max-width:900px){.pa-networth-body{flex-direction:column}.pa-networth-yearly{flex-direction:row}}
+@media(max-width:700px){.pa-networth-top{flex-direction:column}.pa-networth-yearly{flex-wrap:wrap}}
 
 /* Line chart hover tooltip */
 .pa-linechart{position:relative}

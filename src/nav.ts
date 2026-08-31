@@ -50,10 +50,13 @@ export class PANavView extends ItemView {
     // legacy folder sections open as a Momentum page.
     (this.host.customPages || []).forEach((p) => {
       const isCommand = !!p.command;
-      const btn = root.createEl("button", {
-        text: `${p.emoji || (isCommand ? "🧩" : "📄")} ${p.label}`,
-        cls: "pa-nav" + (!isCommand && p.id === this.host.currentPage ? " active" : ""),
+      const broken = this.host.isCustomPageBroken(p.id);
+      const row = root.createDiv({ cls: "pa-nav-row" });
+      const btn = row.createEl("button", {
+        text: `${p.emoji || (isCommand ? "🧩" : "📄")} ${p.label}${broken ? " (plugin removed)" : ""}`,
+        cls: "pa-nav pa-nav-row-btn" + (!isCommand && p.id === this.host.currentPage ? " active" : "") + (broken ? " pa-nav-broken" : ""),
       });
+      if (broken) btn.setAttr("title", "This shortcut's plugin isn't installed/enabled anymore. Click the trash icon to remove it.");
       btn.onclick = () => this.host.activateCustomPage(p.id);
       const editDelete = (menu: Menu) => {
         menu.addSeparator();
@@ -72,6 +75,12 @@ export class PANavView extends ItemView {
           openInMenu(evt, p.id, editDelete);
         }
       };
+      // Always-visible trash icon — removing a shortcut no longer requires knowing
+      // about the right-click menu (this was easy to miss, especially for a broken
+      // shortcut left behind after uninstalling the plugin it pointed to).
+      const del = row.createEl("button", { text: "🗑", cls: "pa-icon-btn pa-nav-row-del" });
+      del.setAttr("aria-label", "Remove plugin shortcut");
+      del.onclick = (evt) => { evt.stopPropagation(); void this.host.removeCustomPage(p.id); };
     });
 
     // "+ add plugin" — pin another plugin's view as a nav shortcut.

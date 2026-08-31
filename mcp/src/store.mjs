@@ -512,6 +512,75 @@ export class MomentumStore {
   }
 
   // ============================================================
+  // SAVINGS BUCKETS (Finance/savings.md) — mirrors the plugin's src/data.ts.
+  // Balance is always derived (sum of a bucket's log), never stored separately.
+  // ============================================================
+  async loadSavingsBuckets() {
+    const raw = await this.readRaw("Finance/savings.md");
+    const list = raw ? coerce(this.parse(raw).fm.buckets, []) : [];
+    const buckets = list.map((b) => ({
+      id: str(b.id) || ("s" + Math.random().toString(36).slice(2, 8)),
+      name: str(b.name) || "Savings",
+      kind: str(b.kind) === "reserve" ? "reserve" : "custom",
+      goal: b.goal != null ? num(b.goal) : undefined,
+      log: coerce(b.log, {}),
+    }));
+    if (!buckets.some((b) => b.id === "emergency-fund")) {
+      buckets.unshift({ id: "emergency-fund", name: "Emergency fund", kind: "reserve", log: {} });
+    }
+    return buckets;
+  }
+
+  async _writeSavingsBuckets(buckets) {
+    const cur = (await this.loadConfig()).currency || "$";
+    const balanceOf = (b) => Object.values(b.log).reduce((a, v) => a + v, 0);
+    let body = "# Savings\n\n";
+    for (const b of buckets) {
+      const bal = Math.round(balanceOf(b) * 100) / 100;
+      const goal = b.goal ? ` (goal: ${cur}${b.goal})` : "";
+      body += `## ${b.name}${goal}\n${cur}${bal}\n\n`;
+    }
+    await this.writeRel("Finance/savings.md", this.buildDoc({ type: "savings-config", buckets }, body));
+  }
+
+  async addSavingsBucket(name, goal) {
+    const buckets = await this.loadSavingsBuckets();
+    const id = "s" + Date.now();
+    buckets.push({ id, name: (name || "Savings").trim() || "Savings", kind: "custom", goal, log: {} });
+    await this._writeSavingsBuckets(buckets);
+    return { id };
+  }
+
+  async updateSavingsBucket(id, { name, goal } = {}) {
+    const buckets = await this.loadSavingsBuckets();
+    const b = buckets.find((x) => x.id === id);
+    if (!b) throw new Error(`Savings bucket not found: ${id}`);
+    if (name !== undefined && b.kind !== "reserve") b.name = name.trim() || b.name;
+    if (goal !== undefined) b.goal = goal;
+    await this._writeSavingsBuckets(buckets);
+    return { id };
+  }
+
+  async deleteSavingsBucket(id) {
+    if (id === "emergency-fund") return { deleted: false };
+    const buckets = (await this.loadSavingsBuckets()).filter((b) => b.id !== id);
+    await this._writeSavingsBuckets(buckets);
+    return { deleted: true };
+  }
+
+  async addSavingsContribution(id, amount, date) {
+    const buckets = await this.loadSavingsBuckets();
+    const b = buckets.find((x) => x.id === id);
+    if (!b) throw new Error(`Savings bucket not found: ${id}`);
+    const amt = num(amount);
+    if (!amt) return { id, balance: Object.values(b.log).reduce((a, v) => a + v, 0) };
+    const d = (date || todayLocal()).slice(0, 10);
+    b.log[d] = Math.round(((b.log[d] || 0) + amt) * 100) / 100;
+    await this._writeSavingsBuckets(buckets);
+    return { id, balance: Object.values(b.log).reduce((a, v) => a + v, 0) };
+  }
+
+  // ============================================================
   // NUTRITION
   // ============================================================
   async loadMeals() {

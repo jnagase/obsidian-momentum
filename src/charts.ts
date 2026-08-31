@@ -11,6 +11,28 @@ function svgEl<K extends keyof SVGElementTagNameMap>(
   return el;
 }
 
+/** Round a step size up to a "nice" 1/2/5 × 10^n value (the standard axis-tick algorithm),
+ *  so gridlines land on numbers like 5000/10000/25000 instead of arbitrary ones. */
+function niceStep(rough: number): number {
+  if (rough <= 0) return 1;
+  const mag = Math.pow(10, Math.floor(Math.log10(rough)));
+  const norm = rough / mag;
+  const nice = norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10;
+  return nice * mag;
+}
+
+/** Round-number gridline values spanning [min, max], using roughly `targetCount` steps
+ *  (e.g. 0/15000/30000/45000/60000 instead of the raw min/max split into equal chunks). */
+function niceTicks(min: number, max: number, targetCount: number): number[] {
+  if (max <= min) return [min];
+  const step = niceStep((max - min) / targetCount);
+  const start = Math.floor(min / step) * step;
+  const end = Math.ceil(max / step) * step;
+  const ticks: number[] = [];
+  for (let v = start; v <= end + step / 2; v += step) ticks.push(Math.round(v));
+  return ticks;
+}
+
 /** A circular progress ring with a centered percentage and an optional label. */
 export function drawRing(
   parent: HTMLElement,
@@ -206,6 +228,13 @@ export function drawLineChart(
   if (!isFinite(min)) min = 0;
   min = Math.min(min, 0);
   if (max <= min) max = min + 1;
+  // Expand the plotted range to match the rounded gridline extents (computed below), so
+  // the axis and the plotted lines stay in the same coordinate space — otherwise a value
+  // could fall outside [min, max] once the ticks round outward past the raw data range.
+  const ticks = niceTicks(min, max, 4);
+  min = Math.min(min, ticks[0]);
+  max = Math.max(max, ticks[ticks.length - 1]);
+  if (max <= min) max = min + 1;
 
   const plotW = w - padL - padR;
   const plotH = height - padT - padB;
@@ -217,15 +246,15 @@ export function drawLineChart(
   // tooltip positions computed in viewBox units map 1:1 onto the rendered pixel box.
   svg.setAttribute("preserveAspectRatio", "none");
 
-  // Y gridlines + labels (4 steps)
-  for (let g = 0; g <= 4; g++) {
-    const val = min + ((max - min) * g) / 4;
+  // Y gridlines + labels, snapped to "nice" round numbers (e.g. 60000/45000/30000/15000/0
+  // instead of raw values like 60474/45356/...) so the axis reads at a glance.
+  ticks.forEach((val) => {
     const y = yAt(val);
     svg.appendChild(svgEl("line", { x1: padL, y1: y, x2: w - padR, y2: y, stroke: "var(--background-modifier-border)", "stroke-width": 1 }));
     const lab = svgEl("text", { x: padL - 4, y, "text-anchor": "end", "dominant-baseline": "central", "font-size": 9, fill: "var(--text-muted)" });
     lab.textContent = String(Math.round(val));
     svg.appendChild(lab);
-  }
+  });
 
   // Goal line
   if (opts.goal != null) {

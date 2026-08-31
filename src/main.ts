@@ -665,6 +665,19 @@ export default class MomentumPlugin extends Plugin implements PAHost {
     }, "Save").open();
   }
 
+  /** True when the shortcut's target no longer exists — e.g. its plugin was uninstalled
+   *  since the shortcut was created. A ribbon shortcut is broken when no ribbon item with
+   *  that id is currently registered; a command shortcut is broken when the command
+   *  can't be found. Legacy folder-page shortcuts (neither ribbon nor command) never
+   *  count as broken here — they just open a Momentum page, which always exists. */
+  isCustomPageBroken(id: string): boolean {
+    const page = this.customPages.find((p) => p.id === id);
+    if (!page) return false;
+    if (page.ribbon) return !this.ribbonItems().some((i) => i.id === page.ribbon);
+    if (page.command) return !(this.commandsApi().listCommands?.() ?? []).some((c) => c.id === page.command);
+    return false;
+  }
+
   /** Delete a custom section (keeps the underlying notes; only removes the nav tab). */
   async removeCustomPage(id: string): Promise<void> {
     const page = this.customPages.find((p) => p.id === id);

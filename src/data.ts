@@ -1,8 +1,8 @@
 import { App, TFile, TFolder, normalizePath } from "obsidian";
 import {
   Board, Task, Note, Habit, Exercise, Workout, WorkoutExercise, Split,
-  StudyCard, Meal, MealItem, MealLog, Transaction, RecurringItem, PAConfig, defaultConfig,
-  ExerciseKind,
+  StudyCard, Meal, MealItem, MealLog, Transaction, RecurringItem, SavingsBucket, EMERGENCY_FUND_ID,
+  PAConfig, defaultConfig, ExerciseKind,
 } from "./types";
 import { todayLocal } from "./util";
 import { monthHubTitle, monthKeyOf, monthName, financeTxTitle, mealLogTitle, workoutTitle, formatAmount, mergeBody } from "./readablenotes";
@@ -1974,6 +1974,79 @@ export class PADataStore {
     const cur = (await this.loadConfig()).currency || "$";
     await this.writeFile("Finance/recurring.md", this.buildDoc({ type: "recurring-config", items }, recurringCostsBody(items, cur)));
   }
+
+  // ============================================================
+  // SAVINGS BUCKETS (Finance/savings.md) — "piggy banks" with a date-keyed
+  // contribution log. Balance is always derived (sum of each bucket's log), never
+  // stored separately, so it can never drift. Mirrors the single-file, frontmatter-
+  // array pattern already used by Finance/recurring.md.
+  // ============================================================
+  private savingsFile = "Finance/savings.md";
+
+  /** The fixed "Emergency fund" bucket, plus any user-created ones, oldest-created first
+   *  (insertion order as stored). The Emergency fund is synthesized with an empty log if
+   *  the file doesn't have one yet, so callers never need to special-case its absence. */
+  loadSavingsBuckets(): SavingsBucket[] {
+    const f = this.fileAt(this.savingsFile);
+    const list = f ? coerce<Array<Record<string, unknown>>>(this.frontmatter(f).buckets, []) : [];
+    const buckets: SavingsBucket[] = list.map((b) => ({
+      id: str(b.id) || ("s" + Math.random().toString(36).slice(2, 8)),
+      name: str(b.name) || "Savings",
+      kind: str(b.kind) === "reserve" ? "reserve" : "custom",
+      goal: b.goal != null ? num(b.goal) : undefined,
+      log: coerce<Record<string, number>>(b.log, {}),
+    }));
+    if (!buckets.some((b) => b.id === EMERGENCY_FUND_ID)) {
+      buckets.unshift({ id: EMERGENCY_FUND_ID, name: "Emergency fund", kind: "reserve", log: {} });
+    }
+    return buckets;
+  }
+
+  private async writeSavingsBuckets(buckets: SavingsBucket[]): Promise<void> {
+    const cur = (await this.loadConfig()).currency || "$";
+    await this.writeFile(this.savingsFile, this.buildDoc(
+      { type: "savings-config", buckets },
+      savingsBody(buckets, cur),
+    ));
+  }
+
+  /** Create a new custom bucket (the Emergency fund always exists implicitly and never
+   *  needs creating). Returns the new bucket's id. */
+  async addSavingsBucket(name: string, goal?: number): Promise<string> {
+    const buckets = this.loadSavingsBuckets();
+    const id = "s" + Date.now();
+    buckets.push({ id, name: name.trim() || "Savings", kind: "custom", goal, log: {} });
+    await this.writeSavingsBuckets(buckets);
+    return id;
+  }
+
+  /** Rename a custom bucket or change its goal. No-op for the Emergency fund's name
+   *  (fixed by design — see SavingsBucket's doc comment) but its goal can still be set. */
+  async updateSavingsBucket(id: string, patch: { name?: string; goal?: number | undefined }): Promise<void> {
+    const buckets = this.loadSavingsBuckets();
+    const b = buckets.find((x) => x.id === id);
+    if (!b) return;
+    if (patch.name !== undefined && b.kind !== "reserve") b.name = patch.name.trim() || b.name;
+    if (patch.goal !== undefined) b.goal = patch.goal;
+    await this.writeSavingsBuckets(buckets);
+  }
+
+  /** Delete a custom bucket. No-op for the Emergency fund (never deletable). */
+  async deleteSavingsBucket(id: string): Promise<void> {
+    if (id === EMERGENCY_FUND_ID) return;
+    const buckets = this.loadSavingsBuckets().filter((b) => b.id !== id);
+    await this.writeSavingsBuckets(buckets);
+  }
+
+  /** Record a contribution (or withdrawal, via a negative amount) to a bucket on a given
+   *  date. Multiple calls on the same date accumulate into one log entry. */
+  async addSavingsContribution(id: string, amount: number, date: string = todayLocal()): Promise<void> {
+    const buckets = this.loadSavingsBuckets();
+    const b = buckets.find((x) => x.id === id);
+    if (!b || !amount) return;
+    b.log[date] = Math.round(((b.log[date] || 0) + amount) * 100) / 100;
+    await this.writeSavingsBuckets(buckets);
+  }
 }
 
 function ymdLocal(d: Date): string {
@@ -1981,6 +2054,18 @@ function ymdLocal(d: Date): string {
 }
 
 const WEEKDAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+/** Human-readable markdown body for the savings buckets file. */
+function savingsBody(buckets: SavingsBucket[], currency: string): string {
+  const balanceOf = (b: SavingsBucket) => Object.values(b.log).reduce((a, v) => a + v, 0);
+  let body = "# Savings\n\n";
+  for (const b of buckets) {
+    const bal = Math.round(balanceOf(b) * 100) / 100;
+    const goal = b.goal ? ` (goal: ${currency}${b.goal})` : "";
+    body += `## ${b.name}${goal}\n${currency}${bal}\n\n`;
+  }
+  return body;
+}
 
 /** Human-readable markdown body for the recurring finance file. */
 function recurringCostsBody(items: RecurringItem[], currency: string): string {

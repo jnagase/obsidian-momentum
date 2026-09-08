@@ -1545,12 +1545,16 @@ export class PADataStore {
     await this.syncMonthHub(this.fitnessHubConfig(), monthKey);
   }
 
-  async updateWorkoutExercises(workout: Workout, exercises: WorkoutExercise[]): Promise<void> {
+  /** Update an already-logged workout's per-exercise data, and/or its overall session
+   *  duration. `duration` is optional so callers that only touch exercises (existing
+   *  behavior) don't need to pass it. */
+  async updateWorkoutExercises(workout: Workout, exercises: WorkoutExercise[], duration?: number): Promise<void> {
     const f = this.app.vault.getAbstractFileByPath(workout.path);
     if (!(f instanceof TFile)) return;
     await this.patchFrontmatter(f, (fm) => {
       fm.exercises = exercises;
       fm.kind = deriveWorkoutKind(exercises);
+      if (duration != null) fm.duration = duration;
       fm.modified = new Date().toISOString();
     });
   }

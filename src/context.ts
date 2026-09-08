@@ -17,7 +17,7 @@ export class PAContext {
   openSidePanel: () => void = () => {};
   /** Run a Google Tasks sync now. Set by the view. */
   syncGoogleTasks?: () => void;
-  /** True when the Google Tasks beta is enabled AND an account is connected. */
+  /** True when Google Tasks sync is enabled AND an account is connected. */
   googleTasksReady?: () => boolean;
   /** Open this plugin's settings tab (used by the "connect Google" walkthrough). */
   openPluginSettings?: () => void;

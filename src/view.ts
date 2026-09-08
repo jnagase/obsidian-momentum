@@ -1,6 +1,7 @@
 import { ItemView, WorkspaceLeaf, debounce } from "obsidian";
 import { PAContext } from "./context";
 import { PADataStore, DATA_ROOT } from "./data";
+import { CockpitModule } from "./modules/cockpit";
 import { HabitTrackerModule } from "./modules/habit-tracker";
 import { TasksModule } from "./modules/tasks";
 import { FitnessModule } from "./modules/fitness";
@@ -14,8 +15,9 @@ import { VIEW_TYPE_PA_SIDE, PASideView } from "./side";
 export const VIEW_TYPE_PA = "personal-assistant-view";
 
 export const PAGES = [
-  { id: "habit-tracker", label: "🎯 Habit Tracker" },
-  { id: "tasks", label: "✅ Tasks & Lists" },
+  { id: "cockpit", label: "🎯 Cockpit Life" },
+  { id: "habit-tracker", label: "🚀 Habit Tracker" },
+  { id: "tasks", label: "✅ Tasks" },
   { id: "fitness", label: "🏋️ Fitness" },
   { id: "nutrition", label: "🥗 Nutrition" },
   { id: "studies", label: "📚 Studies" },
@@ -58,8 +60,9 @@ export class PAView extends ItemView {
   private mainEl: HTMLElement | null = null;
   private pluginName: string;
   /** This view's own page, persisted per-leaf via get/setState. */
-  private page = "habit-tracker";
+  private page = "cockpit";
 
+  private cockpitModule: CockpitModule;
   private habitTrackerModule: HabitTrackerModule;
   private tasksModule: TasksModule;
   private fitnessModule: FitnessModule;
@@ -88,6 +91,7 @@ export class PAView extends ItemView {
     this.ctx.syncGoogleTasks = () => { void host.syncGoogleTasks(false); };
     this.ctx.googleTasksReady = () => host.isGoogleTasksReady();
     this.ctx.openPluginSettings = () => host.openPluginSettings();
+    this.cockpitModule = new CockpitModule(this.ctx);
     this.habitTrackerModule = new HabitTrackerModule(this.ctx);
     this.tasksModule = new TasksModule(this.ctx);
     this.fitnessModule = new FitnessModule(this.ctx);
@@ -110,7 +114,7 @@ export class PAView extends ItemView {
 
   async setState(state: unknown, result: unknown): Promise<void> {
     const s = (state ?? {}) as { page?: string };
-    this.page = s.page ?? this.page ?? "habit-tracker";
+    this.page = s.page ?? this.page ?? "cockpit";
     await super.setState(state, result as never);
     this.renderPage();
     // Update the tab title after a short delay so Obsidian's DOM is ready.
@@ -131,18 +135,43 @@ export class PAView extends ItemView {
     this.mainEl = root.createDiv({ cls: "pa-page" });
     this.renderPage();
 
-    const refresh = debounce(() => this.renderPage(), 400, true);
+    const refresh = debounce(() => this.renderSafely(), 400, true);
     this.registerEvent(
       this.app.metadataCache.on("changed", (file) => {
         if (!file.path.startsWith(DATA_ROOT + "/")) return;
         // Currency/targets live in the config file — reload it so the change shows immediately.
         if (file.path === `${DATA_ROOT}/Config/settings.md`) {
-          void this.ctx.reloadConfig().then(() => this.renderPage());
+          void this.ctx.reloadConfig().then(() => this.renderSafely());
         } else {
           refresh();
         }
       })
     );
+  }
+
+  /** True while the user is actively typing in a text field inside this view (e.g. the
+   *  Nutrition "add a food" search box). Background data changes (Google Tasks sync,
+   *  the periodic folder-maintenance sweep, another leaf's edit, …) fire the
+   *  metadataCache "changed" event constantly and used to call renderPage() unconditionally
+   *  — which does root.empty() and rebuilds the whole page, destroying and recreating the
+   *  focused input. On desktop that's just a lost text-cursor blink; on mobile, replacing
+   *  the focused element closes the on-screen keyboard mid-typing (reported while
+   *  searching for a food). Skipping the auto-refresh while typing avoids this without
+   *  giving up the auto-refresh entirely — it simply resumes on the next data change once
+   *  focus moves away from an input. */
+  private isTypingInField(): boolean {
+    const active = this.mainEl?.ownerDocument.activeElement;
+    if (!active || !this.mainEl?.contains(active)) return false;
+    const tag = active.tagName;
+    return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+  }
+
+  /** renderPage(), unless the user is mid-typing in this view's own content (see
+   *  isTypingInField) — used by the background auto-refresh paths, never by actions the
+   *  user just took directly (those still call renderPage()/refresh() straight away). */
+  private renderSafely(): void {
+    if (this.isTypingInField()) return;
+    this.renderPage();
   }
 
   async onClose(): Promise<void> {
@@ -170,6 +199,7 @@ export class PAView extends ItemView {
     main.empty();
 
     switch (this.page) {
+      case "cockpit": this.cockpitModule.render(main); break;
       case "habit-tracker": this.habitTrackerModule.render(main); break;
       case "tasks": this.tasksModule.render(main); break;
       case "fitness": this.fitnessModule.render(main); break;

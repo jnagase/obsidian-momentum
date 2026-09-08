@@ -1,11 +1,9 @@
 import { PAContext } from "../context";
-import { Board, Habit, StudyCard, Task, Workout } from "../types";
+import { Habit } from "../types";
 import { ConfirmModal, FieldSpec, FormModal, toast, appendSidebarBtn } from "../ui";
-import { daysBetween, todayLocal, ymd } from "../util";
-import { drawDonut, drawRing } from "../charts";
-
-const HEATMAP_WEEKS = 18;
-const HEATMAP_DAYS = HEATMAP_WEEKS * 7;
+import { todayLocal, ymd } from "../util";
+import { habitDoneOn, habitStreak, streakFromDoneFn } from "../habitutil";
+import { drawRing, drawLineChart } from "../charts";
 
 interface SystemHabit {
   label: string;
@@ -13,10 +11,23 @@ interface SystemHabit {
   done: (ds: string) => boolean;
 }
 
-/** The first tab: an overview dashboard fused with the habit heatmaps. */
+/** Trailing window (days) used for the rolling completion-rate line under each habit. */
+const ROLLING_WINDOW = 7;
+
+/** The first tab: an overview dashboard fused with monthly habit trackers (bullet-journal
+ *  style: a dot row for daily completion, a weekly bar chart, and a rolling-rate line —
+ *  all three chart styles per habit, for the selected month). */
 export class HabitTrackerModule {
   private ctx: PAContext;
-  constructor(ctx: PAContext) { this.ctx = ctx; }
+  private calMonth: number;
+  private calYear: number;
+
+  constructor(ctx: PAContext) {
+    this.ctx = ctx;
+    const now = new Date();
+    this.calMonth = now.getMonth();
+    this.calYear = now.getFullYear();
+  }
 
   render(root: HTMLElement): void {
     root.empty();
@@ -28,9 +39,10 @@ export class HabitTrackerModule {
     const workouts = this.ctx.store.loadWorkouts();
     const studyCards = this.ctx.store.loadStudyCards();
     const mealLogs = this.ctx.store.loadMealLogs();
-    const studyBoards = this.ctx.store.loadStudyBoards();
 
-    // Day-indexed lookups
+    // Day-indexed lookups. Built from the FULL history (not scoped to the displayed
+    // month), so navigating months never needs to reload anything — done(ds)/streak
+    // math works for any date.
     const gym = new Set(workouts.map((w) => w.date));
     const mealDays = new Set(mealLogs.map((m) => m.date));
     const mealCal = new Map<string, number>();
@@ -62,21 +74,14 @@ export class HabitTrackerModule {
     };
 
     this.renderHeader(root, today, scoreForDay);
-    this.renderKpis(root, { tasks, workouts, studyCards, mealCal, gym, today, waterToday: waterLog[today] || 0 });
-    this.renderDonuts(root, { workouts, studyCards, tasks, today });
     this.renderHabitConsistency(root, systemHabits, habits, today);
-    this.renderStudyProgress(root, studyBoards, studyCards);
   }
 
-  // ---- Header: title + greeting + 3 consistency rings ----
+  // ---- Header: title + 3 consistency rings (the greeting moved to Cockpit Life) ----
   private renderHeader(root: HTMLElement, today: string, scoreForDay: (ds: string) => { done: number; total: number }): void {
     const head = root.createDiv({ cls: "pa-ht-header" });
     const left = head.createDiv();
-    left.createDiv({ text: "🎯 Habit Tracker", cls: "pa-h1" });
-    const hour = new Date().getHours();
-    const greeting = hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
-    const dateStr = new Date().toLocaleDateString("default", { weekday: "long", day: "numeric", month: "short" });
-    left.createDiv({ text: `${greeting}, Jaime · ${dateStr}`, cls: "pa-muted" });
+    left.createDiv({ text: "🚀 Habit Tracker", cls: "pa-h1" });
     appendSidebarBtn(left, this.ctx.openSidePanel);
 
     const rings = head.createDiv({ cls: "pa-ht-rings" });
@@ -94,77 +99,17 @@ export class HabitTrackerModule {
     }
   }
 
-  // ---- KPI row ----
-  private renderKpis(
-    root: HTMLElement,
-    d: { tasks: Task[]; workouts: Workout[]; studyCards: StudyCard[]; mealCal: Map<string, number>; gym: Set<string>; today: string; waterToday: number }
-  ): void {
-    const ym = d.today.substring(0, 7);
-    const workoutsMonth = d.workouts.filter((w) => w.date.substring(0, 7) === ym).length;
-    const studyDone = d.studyCards.filter((c) => c.status === "done").length;
-    const tasksDone = d.tasks.filter((t) => t.status === "done").length;
-    const todayCal = d.mealCal.get(d.today) || 0;
-
-    const activeDay = (ds: string) => d.gym.has(ds) || d.mealCal.has(ds);
-    let streak = 0;
-    const base = new Date(d.today + "T00:00:00");
-    for (let i = 0; i < 365; i++) {
-      const x = new Date(base);
-      x.setDate(x.getDate() - i);
-      if (activeDay(ymd(x))) streak++;
-      else if (i === 0) continue;
-      else break;
+  /** "YYYY-MM-DD" for every day of the currently selected month, day 1 first. */
+  private monthDates(): string[] {
+    const daysInMonth = new Date(this.calYear, this.calMonth + 1, 0).getDate();
+    const out: string[] = [];
+    for (let d = 1; d <= daysInMonth; d++) {
+      out.push(`${this.calYear}-${String(this.calMonth + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`);
     }
-
-    const row = root.createDiv({ cls: "pa-stats-row pa-kpis" });
-    const kpi = (label: string, value: string) => {
-      const c = row.createDiv({ cls: "pa-stat" });
-      c.createDiv({ text: value, cls: "pa-stat-value" });
-      c.createDiv({ text: label, cls: "pa-stat-label" });
-    };
-    kpi("🔥 Active streak", streak + "d");
-    kpi("🏋️ Workouts (month)", String(workoutsMonth));
-    kpi("🥗 Calories today", String(todayCal));
-    kpi("💧 Water today", `${d.waterToday.toFixed(1)}L`);
-    kpi("📚 Studies done", `${studyDone}/${d.studyCards.length}`);
-    kpi("✅ Tasks done", `${tasksDone}/${d.tasks.length}`);
+    return out;
   }
 
-  // ---- 3 donut charts ----
-  private renderDonuts(
-    root: HTMLElement,
-    d: { workouts: Workout[]; studyCards: StudyCard[]; tasks: Task[]; today: string }
-  ): void {
-    const palette = ["#7c3aed", "#16a34a", "#f59e0b", "#3b82f6", "#ef4444", "#10b981"];
-    const row = root.createDiv({ cls: "pa-donuts-row" });
-
-    // Workouts by type (month)
-    const ym = d.today.substring(0, 7);
-    const bySplit = new Map<string, number>();
-    d.workouts.forEach((w) => { if (w.date.substring(0, 7) === ym) bySplit.set(w.split, (bySplit.get(w.split) || 0) + 1); });
-    this.donutPanel(row, "🏋️ Workouts by type (month)",
-      Array.from(bySplit.entries()).map(([k, v], i) => ({ label: "Workout " + k, value: v, color: palette[i % palette.length] })));
-
-    // Studies by status
-    const byStatus = new Map<string, number>();
-    d.studyCards.forEach((c) => { const s = c.status || "backlog"; byStatus.set(s, (byStatus.get(s) || 0) + 1); });
-    this.donutPanel(row, "📚 Studies by status",
-      Array.from(byStatus.entries()).map(([k, v], i) => ({ label: k, value: v, color: palette[i % palette.length] })));
-
-    // Tasks by status
-    const byTask = new Map<string, number>();
-    d.tasks.forEach((t) => { const s = t.status || "backlog"; byTask.set(s, (byTask.get(s) || 0) + 1); });
-    this.donutPanel(row, "✅ Tasks by status",
-      Array.from(byTask.entries()).map(([k, v], i) => ({ label: k, value: v, color: palette[i % palette.length] })));
-  }
-
-  private donutPanel(row: HTMLElement, title: string, segments: Array<{ label: string; value: number; color: string }>): void {
-    const panel = row.createDiv({ cls: "pa-panel pa-donut-panel" });
-    panel.createEl("h3", { text: title, cls: "pa-panel-title" });
-    drawDonut(panel, segments);
-  }
-
-  // ---- Habit consistency ----
+  // ---- Habit consistency: month navigator + one tracker per habit ----
   private renderHabitConsistency(root: HTMLElement, systemHabits: SystemHabit[], habits: Habit[], today: string): void {
     const panel = root.createDiv({ cls: "pa-panel" });
     const head = panel.createDiv({ cls: "pa-section-head" });
@@ -172,53 +117,106 @@ export class HabitTrackerModule {
     const add = head.createEl("button", { text: "+ new habit", cls: "pa-btn" });
     add.onclick = () => this.openHabitModal();
 
+    const nav = panel.createDiv({ cls: "pa-cal-head" });
+    const prev = nav.createEl("button", { text: "←", cls: "pa-icon-btn" });
+    nav.createSpan({ text: new Date(this.calYear, this.calMonth, 1).toLocaleString("default", { month: "long", year: "numeric" }), cls: "pa-cal-title" });
+    const next = nav.createEl("button", { text: "→", cls: "pa-icon-btn" });
+    prev.onclick = () => { this.calMonth--; if (this.calMonth < 0) { this.calMonth = 11; this.calYear--; } this.ctx.refresh(); };
+    next.onclick = () => { this.calMonth++; if (this.calMonth > 11) { this.calMonth = 0; this.calYear++; } this.ctx.refresh(); };
+
+    const dates = this.monthDates();
     const grid = panel.createDiv({ cls: "pa-habits-grid" });
-    systemHabits.forEach((h) => this.renderSystemHabit(grid, h, today));
-    habits.forEach((h) => this.renderCustomHabit(grid, h, today));
+    systemHabits.forEach((h) => this.renderSystemHabit(grid, h, dates, today));
+    habits.forEach((h) => this.renderCustomHabit(grid, h, dates, today));
   }
 
-  /** `onClickDay`, when given, makes every cell clickable so past days can be edited
-   *  retroactively (e.g. mark/unmark a "do" habit, or toggle a relapse day for "quit"). */
-  private heatmap(card: HTMLElement, cellColor: (ds: string) => string | null, today: string, onClickDay?: (ds: string) => void | Promise<void>): void {
-    const hm = card.createDiv({ cls: "pa-heatmap" });
-    const base = new Date(today + "T00:00:00");
-    for (let j = HEATMAP_DAYS - 1; j >= 0; j--) {
-      const x = new Date(base);
-      x.setDate(x.getDate() - j);
-      const ds = ymd(x);
+  /** Single-row dot tracker for the given dates (bullet-journal "habit grid" style):
+   *  one circle per day, filled when `cellColor` returns a color. `onClickDay`, when
+   *  given, makes every past/today cell clickable so a day can be edited retroactively. */
+  private dotsRow(card: HTMLElement, dates: string[], cellColor: (ds: string) => string | null, today: string, onClickDay?: (ds: string) => void | Promise<void>): void {
+    const hm = card.createDiv({ cls: "pa-month-dots" });
+    dates.forEach((ds) => {
       const cell = hm.createDiv({ cls: "pa-hm-cell" });
       cell.setAttr("title", ds);
       const c = cellColor(ds);
       if (c) cell.style.background = c;
-      if (onClickDay) {
+      if (onClickDay && ds <= today) {
         cell.addClass("pa-clickable");
         cell.onclick = () => { void onClickDay(ds); };
       }
+    });
+  }
+
+  /** Weekly consistency (bullet-journal "mood bars" style, adapted): one HORIZONTAL
+   *  progress bar per week of the selected month, filled by the fraction of days done
+   *  that week. A vertical bar chart (drawBars) looks stretched/sparse with only 4-5
+   *  categories spread across a full card width — a compact horizontal-bar list (same
+   *  visual language as the Cockpit's "Completion by board") reads much better at this
+   *  small a category count. */
+  private weeklyBars(card: HTMLElement, dates: string[], doneFn: (ds: string) => boolean, color: string): void {
+    const rows = card.createDiv({ cls: "pa-cockpit-hbars pa-habit-weekbars" });
+    for (let i = 0; i < dates.length; i += 7) {
+      const chunk = dates.slice(i, i + 7);
+      const count = chunk.filter((ds) => doneFn(ds)).length;
+      const first = Number(chunk[0].slice(8, 10));
+      const last = Number(chunk[chunk.length - 1].slice(8, 10));
+      const label = first === last ? `${first}` : `${first}-${last}`;
+      const pct = Math.round((count / chunk.length) * 100);
+
+      const row = rows.createDiv({ cls: "pa-cockpit-hbar-row" });
+      const labelRow = row.createDiv({ cls: "pa-progress-label" });
+      labelRow.createSpan({ text: label });
+      labelRow.createSpan({ text: `${count}/${chunk.length}`, cls: "pa-muted" });
+      const track = row.createDiv({ cls: "pa-progress-track" });
+      const fill = track.createDiv({ cls: "pa-progress-fill" });
+      fill.style.width = `${pct}%`;
+      fill.style.background = color;
     }
   }
 
-  private renderSystemHabit(grid: HTMLElement, h: SystemHabit, today: string): void {
-    let streak = 0;
-    const base = new Date(today + "T00:00:00");
-    for (let i = 0; i < 365; i++) {
-      const x = new Date(base);
-      x.setDate(x.getDate() - i);
-      if (h.done(ymd(x))) streak++;
-      else if (i === 0) continue;
-      else break;
-    }
+  /** Rolling completion-rate line (bullet-journal "sleep line" style): for each day of
+   *  the month, the % of the trailing ROLLING_WINDOW days that were done — reads back
+   *  before the 1st when needed, since `doneFn` works for any date, not just this month. */
+  private rollingLine(card: HTMLElement, dates: string[], doneFn: (ds: string) => boolean, color: string): void {
+    const values = dates.map((ds) => {
+      const end = new Date(ds + "T00:00:00");
+      let done = 0;
+      for (let i = 0; i < ROLLING_WINDOW; i++) {
+        const d = new Date(end);
+        d.setDate(d.getDate() - i);
+        if (doneFn(ymd(d))) done++;
+      }
+      return Math.round((done / ROLLING_WINDOW) * 100);
+    });
+    // Only label every 5th day (and the last) — 31 labels on one line chart would overlap.
+    const labels = dates.map((ds, i) => {
+      const day = Number(ds.slice(8, 10));
+      return day === 1 || day % 5 === 0 || i === dates.length - 1 ? String(day) : "";
+    });
+    drawLineChart(card, labels, [{ name: "", color, values }], { height: 70, format: (n) => `${n}%` });
+  }
+
+  private renderSystemHabit(grid: HTMLElement, h: SystemHabit, dates: string[], today: string): void {
+    const streak = streakFromDoneFn(h.done, today);
     const card = grid.createDiv({ cls: "pa-habit-card" });
     const top = card.createDiv({ cls: "pa-habit-top" });
     top.createSpan({ text: h.label, cls: "pa-habit-name" });
     top.createSpan({ text: `🔥 ${streak}`, cls: "pa-muted pa-streak" });
-    this.heatmap(card, (ds) => (h.done(ds) ? h.color : null), today);
+    this.dotsRow(card, dates, (ds) => (h.done(ds) ? h.color : null), today);
+    this.weeklyBars(card, dates, h.done, h.color);
+    this.rollingLine(card, dates, h.done, h.color);
   }
 
-  private renderCustomHabit(grid: HTMLElement, h: Habit, today: string): void {
+  private renderCustomHabit(grid: HTMLElement, h: Habit, dates: string[], today: string): void {
     const isQuit = h.habitType === "quit";
     const color = isQuit ? "#ef4444" : "#0ea5e9";
     const cleanColor = "#16a34a";
     const created = h.created || today;
+    // Quit: a "done" day is a CLEAN day (no relapse recorded) within the habit's active
+    // range — so the bar/line/streak math (and the dot color below) all agree on what
+    // counts as a win, same distinction the old heatmap made. Shared with Cockpit via
+    // habitDoneOn() so both views agree on the same habit.
+    const doneFn = (ds: string) => habitDoneOn(h, ds, today);
     // Quit: clean days are green, relapse days (recorded on Reset) are red,
     // so a streak with an interruption stays visible. Do: filled on logged days.
     const cellColor: (ds: string) => string | null = isQuit
@@ -229,20 +227,7 @@ export class HabitTrackerModule {
         }
       : (ds) => (h.log[ds] ? color : null);
 
-    let streak: number;
-    if (isQuit) {
-      streak = daysBetween(h.lastReset || h.created || today, today);
-    } else {
-      streak = 0;
-      const base = new Date(today + "T00:00:00");
-      for (let i = 0; i < 365; i++) {
-        const x = new Date(base);
-        x.setDate(x.getDate() - i);
-        if (h.log[ymd(x)]) streak++;
-        else if (i === 0) continue;
-        else break;
-      }
-    }
+    const streak = habitStreak(h, today);
 
     const card = grid.createDiv({ cls: "pa-habit-card" });
     const top = card.createDiv({ cls: "pa-habit-top" });
@@ -267,8 +252,7 @@ export class HabitTrackerModule {
       }).open();
 
     card.createDiv({ cls: "pa-muted pa-habit-hint", text: isQuit ? "Tap a day to toggle a relapse." : "Tap a day to mark/unmark it." });
-    this.heatmap(card, cellColor, today, async (ds) => {
-      if (ds > today) return; // no editing the future
+    this.dotsRow(card, dates, cellColor, today, async (ds) => {
       if (isQuit) {
         // Toggling a relapse day recomputes lastReset from the remaining relapse days,
         // so the streak stays correct even when editing a day other than today.
@@ -278,28 +262,8 @@ export class HabitTrackerModule {
       }
       this.ctx.refresh();
     });
-  }
-
-  // ---- Study progress ----
-  private renderStudyProgress(root: HTMLElement, boards: Board[], cards: StudyCard[]): void {
-    if (!boards.length) return;
-    const panel = root.createDiv({ cls: "pa-panel" });
-    panel.createEl("h3", { text: "📚 Study progress", cls: "pa-panel-title" });
-    boards.forEach((b) => {
-      const topicCards = cards.filter((c) => c.topic === b.name);
-      const done = topicCards.filter((c) => c.status === "done").length;
-      const total = topicCards.length;
-      const pct = total ? Math.round((done / total) * 100) : 0;
-      const color = pct >= 70 ? "#16a34a" : pct >= 30 ? "#d97706" : "var(--interactive-accent)";
-
-      const labelRow = panel.createDiv({ cls: "pa-progress-label" });
-      labelRow.createSpan({ text: `${b.emoji || ""} ${b.name}`.trim() });
-      labelRow.createSpan({ text: `${pct}% (${done}/${total})`, cls: "pa-muted" });
-      const bar = panel.createDiv({ cls: "pa-progress-track" });
-      const fill = bar.createDiv({ cls: "pa-progress-fill" });
-      fill.style.width = pct + "%";
-      fill.style.background = color;
-    });
+    this.weeklyBars(card, dates, doneFn, color);
+    this.rollingLine(card, dates, doneFn, color);
   }
 
   // ---- New habit modal ----

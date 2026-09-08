@@ -2,33 +2,114 @@
 
 [![Buy me a coffee](https://img.shields.io/badge/Buy%20me%20a%20coffee-support-yellow?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/jnagase)
 
-All-in-one life dashboard for Obsidian: **Habits, Tasks, Fitness, Nutrition and
-Studies** rendered directly from your vault's Markdown files. Everything is
-stored as plain Markdown under a single folder, so your data stays yours.
+All-in-one life dashboard for Obsidian: **habits, tasks, fitness, nutrition, studies and
+finances** rendered directly from your vault's Markdown files. Everything is stored as
+plain Markdown under a single folder, so your data stays yours.
 
 ## Why Momentum Life
 - Reads/writes files locally via the Vault API — no GitHub token, no CORS workarounds.
 - Frontmatter parsing handled by Obsidian's metadata cache.
 - Cross-device sync handled by Obsidian Sync / iCloud / git.
 - Renders with Obsidian's DOM API and theme variables (no remote code, no CDN).
-- Optional network use only: the Nutrition food search (see [Network use & privacy](#network-use--privacy)).
+- Works offline. Network use is opt-in and limited to two features
+  (see [Network use & privacy](#network-use--privacy)).
 
 ## Modules
-| Module | What it does |
+| Tab | What it does |
 | --- | --- |
-| 🎯 Habit Tracker | Overview dashboard: KPIs, progress rings, donut charts, habit heatmaps, study progress |
-| ✅ Tasks & Lists | Kanban (drag & drop, boards, priorities, columns) + list view |
-| 🏋️ Fitness | Workout plans, active workout w/ timer, calendar, weight progress, logging |
-| 🥗 Nutrition | Fixed meal plans, food logging, calorie calendar & trends, water, Open Food Facts search |
+| 🎯 Cockpit Life | The landing page: today's whole picture in one screen — quick task capture, habits with streaks, study progress, evolution charts and one-tap actions |
+| 🚀 Habit Tracker | Monthly bullet-journal trackers: a clickable dot per day, weekly consistency bars and a rolling completion-rate line, per habit |
+| ✅ Tasks | Kanban (drag & drop, folder-backed boards, priorities, columns) + Eisenhower matrix, search, optional Google Tasks sync |
+| 🏋️ Fitness | Workout splits, active workout w/ timer, strength & cardio exercises, calendar, progress charts, monthly summaries |
+| 🥗 Nutrition | Fixed meal plans, food logging, calorie calendar & trends, water tracking, Open Food Facts search |
 | 📚 Studies | Kanban by topic (drag & drop, subtopics, URLs) + list view |
-| 💰 Finances | Income/expense ledger, monthly summaries, category breakdown, recurring templates (monthly & weekly) |
+| 💰 Finances | Income/expense ledger, monthly summaries, category breakdown, recurring templates (monthly & weekly), net worth trend, savings buckets |
 
 All visualizations use inline SVG (no external libraries / CDN).
 
-## Google Tasks sync (beta)
-> ⚠️ **Beta.** Two-way sync between your Tasks boards and Google Tasks. It works, but may
-> still have rough edges — keep a backup of your vault. Enable under **Settings → Google
-> tasks (beta)**; it's off by default.
+## Screenshots
+
+### 🎯 Cockpit Life
+Everything the day needs in three columns: capture and tick off what's due, toggle habits,
+watch the trends, and work the full open-task list without leaving the page.
+
+![Cockpit Life](https://raw.githubusercontent.com/jnagase/obsidian-momentum/main/docs/screenshots/cockpit-life.png)
+
+### 🚀 Habit Tracker
+One monthly tracker per habit — tap any day to log it, including days you forgot.
+
+![Habit Tracker](https://raw.githubusercontent.com/jnagase/obsidian-momentum/main/docs/screenshots/habit-tracker.png)
+
+### ✅ Tasks
+Kanban over folder-backed boards, plus an Eisenhower matrix you can drag tasks around in.
+
+![Tasks](https://raw.githubusercontent.com/jnagase/obsidian-momentum/main/docs/screenshots/tasks.png)
+
+### 🏋️ Fitness
+Splits, a live workout timer, and progress charts for both strength and cardio.
+
+![Fitness](https://raw.githubusercontent.com/jnagase/obsidian-momentum/main/docs/screenshots/fitness.png)
+
+### 🥗 Nutrition
+Four fixed meal slots, food search against Open Food Facts, and a calorie calendar.
+
+![Nutrition](https://raw.githubusercontent.com/jnagase/obsidian-momentum/main/docs/screenshots/nutrition.png)
+
+### 📚 Studies
+A Kanban per topic, with subtopics and links to the material.
+
+![Studies](https://raw.githubusercontent.com/jnagase/obsidian-momentum/main/docs/screenshots/studies.png)
+
+### 💰 Finances
+Ledger and monthly breakdown, a net worth trend since you started tracking, and savings
+buckets with their own goals.
+
+![Finances](https://raw.githubusercontent.com/jnagase/obsidian-momentum/main/docs/screenshots/finances.png)
+
+## Cockpit Life
+The default tab, built for a single daily pass instead of hopping between pages. Nothing
+here has its own data format — every action calls the same code the owning module's page
+uses, so the two views can't drift apart.
+
+- **Capture column** — tasks due today or overdue with an inline `+ add` (no modal, so you
+  can type several in a row), today's habits with their current streak and a 7-day
+  consistency bar, then per-topic study progress.
+- **Trends column** — tasks completed over 7 days, completion per board, workout minutes,
+  calories, and the monthly balance, each with a one-tap action next to it (log water, add
+  income or an expense).
+- **Open tasks column** — every open task grouped by board, filterable by board, paged the
+  same way the Kanban columns are. Completed tasks stay out of the way on their board.
+- Four status donuts across the top: workouts by type, studies, tasks, and habits today.
+
+## Habit Tracker
+Habits are tracked month by month, bullet-journal style, with all three chart styles per
+habit: a dot row, a bar chart and a line chart.
+
+- **Dots** — one per day of the month. Tap any past or current day to log or unlog it, so a
+  day you forgot to mark isn't lost.
+- **Weekly consistency** — a horizontal bar per week showing how many of that week's days
+  you hit.
+- **Rolling rate** — a 7-day completion-rate line, to see the trend rather than a single day.
+- Six habits are derived automatically from your other modules (workout, logged meal, water
+  goal, calorie goal, completed task, studied); the rest are yours. Custom habits come in two
+  flavours: **do** (build it, streak counts logged days) and **quit** (break it, streak counts
+  days since the last relapse).
+
+## Finances
+Beyond the ledger and the monthly category breakdown:
+
+- **Net worth** — an accumulated trend since you started tracking, with lines for balance,
+  income, expenses, savings and investments, over a fixed 13-month window that slides
+  forward as time passes. An optional starting balance covers money you already had.
+- **Savings buckets** — a fixed *Emergency fund* plus any buckets you create. Each has an
+  optional goal and a dated contribution log; the balance is always derived from that log, so
+  it can't drift out of sync with the entries.
+- **Recurring items** — monthly and weekly templates, appliable a week at a time or for the
+  whole month.
+
+## Google Tasks sync
+Two-way sync between your Tasks boards and Google Tasks. Off by default — enable it under
+**Settings → Google tasks**.
 
 - Each board maps to a Google Tasks list; the default **My Tasks** board pairs with your
   Google default list. Tasks are matched by a stable id, so renames don't create duplicates.
@@ -75,7 +156,7 @@ cases, and only when you actively use them:
   [Open Food Facts](https://world.openfoodfacts.org) public API
   (`world.openfoodfacts.org`) over HTTPS, sending only the search term you typed.
   No API key or account required.
-- **Google Tasks sync (beta, opt-in)** — when you connect and enable it, the plugin talks
+- **Google Tasks sync (opt-in)** — when you connect and enable it, the plugin talks
   to Google's Tasks API and to a small OAuth broker (a Cloudflare Worker) that holds the
   app credentials server-side. Only your task titles, status and due dates plus your Google
   auth tokens are sent, and only for the tasks you sync. Disabled by default.
@@ -85,10 +166,22 @@ not use these features, the plugin makes no network requests.
 
 ## Data location
 Set the **Data root folder** in plugin settings (default: `Momentum Life`).
-Expected subfolders: `Tasks/`, `Tasks/Lists/`, `Notes/`, `Fitness/Exercises`,
-`Fitness/Workouts`, `Fitness/Months`, `Nutrition/Plan`, `Nutrition/Logs`,
-`Nutrition/Months`, `Studies/`, `Habits/`, `Finance/Transactions/`,
-`Finance/Months`, `Config/settings.md`.
+
+| Path | Holds |
+| --- | --- |
+| `Tasks/<Board>/` | One folder per board, one note per task. The folder **is** the board |
+| `Tasks/Lists/<board>.md` | Markdown checklist mirrors, for interop with other plugins |
+| `Habits/` | One note per custom habit, with its date-keyed log |
+| `Fitness/splits.md`, `Fitness/Exercises/`, `Fitness/Workouts/`, `Fitness/Months/` | Splits config, exercise library, logged sessions, monthly hubs |
+| `Nutrition/Plan/`, `Nutrition/Logs/`, `Nutrition/Months/`, `Nutrition/water.md` | Meal plans, logged meals, monthly hubs, water log |
+| `Studies/boards.md`, `Studies/<Topic>/` | Topic list and one note per study card |
+| `Finance/Transactions/`, `Finance/Months/`, `Finance/recurring.md`, `Finance/savings.md` | Ledger, monthly hubs, recurring templates, savings buckets |
+| `Notes/` | Quick notes |
+| `Config/settings.md` | Your settings (currency, targets, columns, board order) |
+
+Task boards are plain folders, so creating a folder under `Tasks/` creates a board and
+dropping a `.md` file into one creates a task — the plugin adopts it, repairs its
+frontmatter and files it. `Tasks/_orphaned/` is an archive and is excluded everywhere.
 
 ## Readable notes & monthly hubs
 Finance transactions, Nutrition logs and Fitness workouts are saved with
@@ -161,23 +254,27 @@ across renames.
 Each module reads and writes plain Markdown notes with YAML frontmatter. Examples:
 
 ```yaml
-# Tasks/<title>.md
+# Tasks/<Board>/<title>.md
 task_id: "uuid"
 title: "Close the deal"
 status: "in progress"      # one of the task columns
 priority: "high"
-kanban_name: "Side Projects"
+kanban_name: "Side Projects"   # mirrors the folder; the FOLDER is the source of truth
 group: "KCD 26"
+due: "2026-09-30"
 type: "task"
 ```
 
 ```yaml
-# Tasks/boards.md
-type: boards-config
-boards:
-  - id: aws
-    name: AWS
-    emoji: ☁️
+# Habits/<name>.md
+id: "h1717171717"
+type: habit
+habit_type: "do"           # "do" (build it) or "quit" (break it)
+name: "Meditate"
+emoji: ⭐
+log:                       # date -> logged (for "quit", a date means a relapse)
+  2026-09-04: true
+  2026-09-05: true
 ```
 
 ```yaml
@@ -197,11 +294,15 @@ type: note
 - `src/modules/*.ts` — one renderer per page.
 - `styles.css` — UI styles mapped to Obsidian theme variables.
 
-## Publishing to the community store
-1. Push to a public GitHub repo.
-2. Tag a release matching `manifest.json` `version` (no `v` prefix), e.g.
-   `git tag 0.1.2 && git push origin 0.1.2`. The GitHub Action attaches
-   `main.js`, `manifest.json` and `styles.css` to the release.
-3. Submit the plugin at the
-   [Obsidian Community directory](https://community.obsidian.md) (sign in, link
-   your GitHub account, then Plugins → New plugin).
+## Releasing
+1. Bump the version in `manifest.json`, `versions.json`, `package.json` and the
+   `USER_AGENT` in `src/foodapi.ts`, then run `npm install --package-lock-only` so the
+   lockfile stays in sync (the release build uses `npm ci`).
+2. Tag it to match `manifest.json` `version`, with **no `v` prefix**:
+   `git tag 0.6.9 && git push origin 0.6.9`. The GitHub Action builds and attaches
+   `main.js`, `manifest.json` and `styles.css` to the release, with provenance attestations.
+3. Verify: `gh attestation verify <asset> --repo jnagase/obsidian-momentum`.
+
+The [community directory page](https://community.obsidian.md/plugins/momentum-life) renders
+this README and reads `manifest.json` straight from the repo, so it picks up documentation
+and screenshot changes on its own — there's nothing separate to upload there.

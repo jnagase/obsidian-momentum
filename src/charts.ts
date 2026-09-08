@@ -68,32 +68,71 @@ export function drawRing(
   if (label) wrap.createDiv({ text: label, cls: "pa-ring-label" });
 }
 
-/** A simple vertical bar chart. */
+/** A simple vertical bar chart.
+ *
+ *  Supports negative values: when any value is below zero the chart grows a zero baseline
+ *  and negative bars hang below it, while positive bars rise from it. Before this, a
+ *  negative value produced a negative bar height — so no rect was drawn AND its value
+ *  label was positioned below the baseline, off-canvas. The month simply vanished from the
+ *  chart (a month that closed in the red looked identical to a month with no data at all,
+ *  which is how the Cockpit's balance chart came to disagree with the real numbers).
+ *
+ *  With all-positive data the geometry is unchanged: `lo` collapses to 0 and the zero line
+ *  lands on the bottom of the chart area, exactly the previous layout. */
 export function drawBars(
   parent: HTMLElement,
   data: Array<{ label: string; value: number }>,
   max: number,
   color: string,
-  height = 120
+  height = 120,
+  format?: (n: number) => string
 ): void {
   const wrap = parent.createDiv({ cls: "pa-bars" });
   const w = Math.max(data.length * 44, 120);
   const barW = 26;
   const gap = (w - data.length * barW) / (data.length + 1);
-  const top = 8;
-  const chartH = height - 24;
+  const values = data.map((d) => d.value);
+  const hasNegative = values.some((v) => v < 0);
+  // Reserve room above the tallest possible bar for its value label — without this, a
+  // bar reaching (near) the chart's max height pushes its label above y=0, clipping it
+  // (this was cutting off values like "38" and "15854" at the top of the card). When
+  // negative bars are in play, reserve extra room at the bottom for THEIR value labels so
+  // they can't overlap the category labels sitting on the axis.
+  const top = 16;
+  const bottom = hasNegative ? 26 : 16;
+  const chartH = height - top - bottom;
+  // Value domain. `max` stays the top of the scale — callers may deliberately pass a
+  // target above the data (e.g. the calorie goal) so bars read against that target — and
+  // the floor is the lowest value, which is 0 whenever nothing is negative.
+  const hi = Math.max(max, 0, ...values);
+  const lo = Math.min(0, ...values);
+  const span = hi - lo || 1;
+  const zeroY = top + (chartH * hi) / span;
   const svg = svgEl("svg", { width: "100%", height, viewBox: `0 0 ${w} ${height}` });
   svg.setAttribute("preserveAspectRatio", "none");
+  const fmt = format ?? ((n: number) => String(n));
+
+  // Only drawn when it isn't already implied by the bottom of the chart area.
+  if (hasNegative) {
+    svg.appendChild(svgEl("line", {
+      x1: 0, y1: zeroY, x2: w, y2: zeroY,
+      stroke: "var(--background-modifier-border)", "stroke-width": 1,
+    }));
+  }
 
   data.forEach((d, i) => {
     const x = gap + i * (barW + gap);
-    const h = max > 0 ? Math.round((d.value / max) * chartH) : 0;
-    const y = top + (chartH - h);
-    svg.appendChild(svgEl("rect", { x, y, width: barW, height: h, rx: 4, fill: color }));
-    const val = svgEl("text", { x: x + barW / 2, y: y - 3, "text-anchor": "middle", "font-size": 9, fill: "var(--text-muted)" });
-    val.textContent = String(d.value);
+    const h = Math.round((Math.abs(d.value) / span) * chartH);
+    const negative = d.value < 0;
+    const barTop = negative ? zeroY : zeroY - h;
+    if (h > 0) svg.appendChild(svgEl("rect", { x, y: barTop, width: barW, height: h, rx: 4, fill: color }));
+    // Value label: just outside the bar (above a positive one, below a negative one),
+    // clamped so it always stays inside the chart and clear of the category labels.
+    const valY = negative ? Math.min(barTop + h + 9, height - 13) : Math.max(barTop - 4, 10);
+    const val = svgEl("text", { x: x + barW / 2, y: valY, "text-anchor": "middle", "font-size": 9, fill: "var(--text-muted)" });
+    val.textContent = fmt(d.value);
     svg.appendChild(val);
-    const lab = svgEl("text", { x: x + barW / 2, y: height - 4, "text-anchor": "middle", "font-size": 9, fill: "var(--text-muted)" });
+    const lab = svgEl("text", { x: x + barW / 2, y: height - 3, "text-anchor": "middle", "font-size": 9, fill: "var(--text-muted)" });
     lab.textContent = d.label;
     svg.appendChild(lab);
   });

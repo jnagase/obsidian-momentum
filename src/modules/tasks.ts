@@ -34,11 +34,11 @@ const COLUMN_COLORS = ["#7c3aed", "#3b82f6", "#16a34a", "#f59e0b", "#ef4444", "#
 /** How many cards a Kanban column shows before the "load more" button. */
 const PAGE_SIZE = 7;
 
-/** Renders the "Tasks & Notes" page: a Kanban / List board over Tasks/*.md. */
+/** Renders the "Tasks" page: a Kanban board (plus an Eisenhower matrix view) over Tasks/*.md. */
 export class TasksModule {
   private ctx: PAContext;
   private currentBoard = "all";
-  private view: "kanban" | "list" | "matrix" = "kanban";
+  private view: "kanban" | "matrix" = "kanban";
   private colLimits: Record<string, number> = {};
   /** Root of the last render, so search can scroll to and flash a card after re-rendering. */
   private rootEl: HTMLElement | null = null;
@@ -143,7 +143,7 @@ export class TasksModule {
   /** Walkthrough shown when "sync now" is pressed before Google Tasks is connected. */
   private openGoogleSetup(): void {
     new StepsModal(this.ctx.app, {
-      title: "Connect Google tasks (beta)",
+      title: "Connect Google tasks",
       intro: "Sync isn't set up yet. It takes about a minute:",
       steps: [
         "Open the Momentum life settings (button below).",
@@ -189,10 +189,8 @@ export class TasksModule {
       this.renderStats(root, filtered);
       this.renderBoardBar(root, boards);
       this.renderKanban(root, filtered, boards);
-    } else if (this.view === "matrix") {
-      this.renderMatrix(root, filtered, boards);
     } else {
-      this.renderList(root, filtered);
+      this.renderMatrix(root, filtered, boards);
     }
 
     // A search pick asked to jump to a card: do it now that the DOM exists.
@@ -203,8 +201,8 @@ export class TasksModule {
   private renderHeader(root: HTMLElement, filtered: Task[], compact = false): void {
     const head = root.createDiv({ cls: "pa-ht-header" });
     const left = head.createDiv();
-    left.createDiv({ text: "✅ Tasks & Lists", cls: "pa-h1" });
-    left.createDiv({ text: compact ? "Summary" : "Kanban and list", cls: "pa-muted" });
+    left.createDiv({ text: "✅ Tasks", cls: "pa-h1" });
+    left.createDiv({ text: compact ? "Summary" : "Kanban and matrix", cls: "pa-muted" });
     if (!compact) {
       // All three header actions share one row: the sidebar link (secondary) then the two
       // real buttons.
@@ -214,7 +212,6 @@ export class TasksModule {
       find.onclick = () => this.openSearch();
       if (this.ctx.syncGoogleTasks) {
         const sync = tools.createEl("button", { text: "🔄 Sync now", cls: "pa-mini-btn" });
-        sync.createSpan({ text: " (beta)", cls: "pa-beta-tag" });
         sync.onclick = () => {
           // Not connected yet → explain how to set it up instead of doing nothing.
           if (this.ctx.googleTasksReady && !this.ctx.googleTasksReady()) { this.openGoogleSetup(); return; }
@@ -241,12 +238,11 @@ export class TasksModule {
   // ---- View toggle ----
   private renderViewToggle(root: HTMLElement): void {
     const bar = root.createDiv({ cls: "pa-view-toggle" });
-    const mk = (id: "kanban" | "list" | "matrix", label: string) => {
+    const mk = (id: "kanban" | "matrix", label: string) => {
       const b = bar.createEl("button", { text: label, cls: "pa-toggle-btn" + (this.view === id ? " on" : "") });
       b.onclick = () => { this.view = id; this.ctx.refresh(); };
     };
     mk("kanban", "📋 Kanban");
-    mk("list", "📃 List");
     mk("matrix", "🎯 Matrix");
   }
 
@@ -668,55 +664,6 @@ export class TasksModule {
 
     card.createDiv({ text: t.title, cls: "pa-card-title" });
     renderCardChips(card, { priority: t.priority, due: t.due, created: t.created });
-  }
-
-  // ---- List view (single list per board, with collapsed Completed) ----
-  private renderList(root: HTMLElement, filtered: Task[]): void {
-    const cols = this.ctx.config.taskColumns;
-    const firstCol = cols[0];
-    const doneId = this.doneCol();
-    const colSet = new Set(cols);
-    const eff = (t: Task) => (colSet.has(t.status) ? t.status : cols[0]);
-    const isDone = (t: Task) => eff(t) === doneId;
-    const boards = this.ctx.store.loadBoards();
-
-    root.createDiv({ text: "📝 List de Tasks", cls: "pa-h2" });
-    if (!filtered.length) { root.createEl("p", { cls: "pa-muted", text: "No tasks." }); return; }
-
-    const groups = new Map<string, Task[]>();
-    filtered.forEach((t) => { const k = t.kanbanName || "No board"; if (!groups.has(k)) groups.set(k, []); groups.get(k)!.push(t); });
-
-    const wrap = root.createDiv({ cls: "pa-list-cards" });
-    groups.forEach((tasks, boardName) => {
-      const card = wrap.createDiv({ cls: "pa-list-card" });
-      card.createDiv({ text: boardName, cls: "pa-list-card-title" });
-      const add = card.createDiv({ cls: "pa-list-add", text: "✏️ Add a task" });
-      add.onclick = () => this.openTaskModal(null, firstCol, boards, boardName === "No board" ? "" : boardName);
-
-      const open = tasks.filter((t) => !isDone(t));
-      const done = tasks.filter((t) => isDone(t));
-      open.forEach((t) => this.renderListItem(card, t, false, doneId, firstCol));
-
-      if (done.length) {
-        const det = card.createEl("details", { cls: "pa-completed" });
-        det.createEl("summary", { text: `Completed (${done.length})` });
-        done.forEach((t) => this.renderListItem(det, t, true, doneId, firstCol));
-      }
-    });
-  }
-
-  private renderListItem(parent: HTMLElement, t: Task, done: boolean, doneCol: string, firstCol: string): void {
-    const row = parent.createDiv({ cls: "pa-list-item" + (done ? " done" : "") });
-    const circle = row.createSpan({ cls: "pa-list-circle" + (done ? " on" : ""), text: done ? "●" : "○" });
-    circle.onclick = async () => {
-      if (done) await this.ctx.store.updateTask(t, { status: firstCol });
-      else await this.ctx.store.completeTaskAtTop(t, doneCol);
-      this.ctx.refresh();
-    };
-    const main = row.createDiv({ cls: "pa-list-item-main" });
-    const title = main.createDiv({ text: t.title, cls: "pa-list-item-title" });
-    title.onclick = () => this.ctx.app.workspace.openLinkText(t.path, "", true);
-    if (t.group) main.createDiv({ text: t.group, cls: "pa-muted pa-list-item-sub" });
   }
 
   // ---- Modals & column management ----

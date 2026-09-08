@@ -6,6 +6,40 @@ export interface ChangeEntry { version: string; sections: ChangeSection[]; }
 /** Release notes shown in the "What's new" dialog, newest first. */
 export const CHANGELOG: ChangeEntry[] = [
   {
+    version: "0.6.9",
+    sections: [
+      {
+        title: "New — Cockpit Life",
+        items: [
+          "A new landing tab, Cockpit Life, consolidates the whole day in one place: quick task capture for today/overdue, habits with streaks, study progress, and a full list of open tasks filterable by board.",
+          "Evolution charts for tasks, workouts, calories and finances live side by side with one-tap quick actions (log water, add income/expense, add a task) — no need to leave the page.",
+          "Four status donuts (workouts, studies, tasks, habits) and the daily greeting moved here from the Habit Tracker.",
+        ],
+      },
+      {
+        title: "Improved — Habit Tracker",
+        items: [
+          "Reformatted as a bullet-journal-style monthly tracker: a clickable dot per day (so you can log a day you forgot to mark), a weekly consistency bar, and a rolling 7-day completion-rate line, for every habit.",
+          "Dots are sized for reliable tapping and can be edited for any past or current day.",
+        ],
+      },
+      {
+        title: "Changed",
+        items: [
+          "Google tasks sync is no longer marked beta. Nothing changes in how it works or in your settings — it has been stable in daily use, so the warning label is gone.",
+          "The Tasks page dropped its List view — Kanban and Matrix cover the same ground without the extra tab.",
+        ],
+      },
+      {
+        title: "Fixed",
+        items: [
+          "On mobile, searching for a food in Nutrition no longer closes the keyboard mid-typing — background data refreshes now skip re-rendering while you're actively typing in a field.",
+          "Bar charts now show negative values. A month that closed in the red used to draw no bar at all and looked exactly like a month with no data, which made the Cockpit's balance chart disagree with your actual numbers.",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.6.2",
     sections: [
       {

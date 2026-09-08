@@ -15,6 +15,7 @@ export class FitnessModule {
   private selectedDate: string | null = null;  // calendar day detail
   private weightSplit = "A";                    // weight-progress chart
   private startTime: number | null = null;
+  private pastDuration = 0;             // session duration (min) for the no-timer "log for a past date" flow
   private checked = new Set<string>();
   private timerId: number | null = null;
   private timerEl: HTMLElement | null = null;
@@ -110,7 +111,7 @@ export class FitnessModule {
     });
   }
 
-  private endWorkout(): void { this.stopTimer(); this.selectedSplit = null; this.workoutActive = false; this.startTime = null; this.checked.clear(); }
+  private endWorkout(): void { this.stopTimer(); this.selectedSplit = null; this.workoutActive = false; this.startTime = null; this.pastDuration = 0; this.checked.clear(); }
 
   // ---- Stats ----
   private renderStats(root: HTMLElement, workouts: Workout[], gymLog: Set<string>): void {
@@ -247,7 +248,14 @@ export class FitnessModule {
     const split = this.getSplits().find((s) => s.id === w.split);
     const card = panel.createDiv({ cls: "pa-card" });
     const head = card.createDiv({ cls: "pa-card-title-row" });
-    head.createEl("strong", { text: `${w.split} - ${split?.name || ""} · ${w.duration}min` });
+    head.createEl("strong", { text: `${w.split} - ${split?.name || ""}` });
+    // Editable duration for an already-logged session — previously shown as plain text
+    // with no way to correct it (e.g. a past-date log that was saved with duration 0).
+    const durWrap = head.createDiv({ cls: "pa-logged-dur-wrap" });
+    const durInput = durWrap.createEl("input", { cls: "pa-fit-input pa-logged-dur" });
+    durInput.type = "number";
+    durInput.value = String(w.duration);
+    durWrap.createSpan({ text: "min" });
     const del = head.createEl("button", { text: "🗑", cls: "pa-icon-btn" });
     del.setAttr("aria-label", "Delete this workout log");
     del.onclick = () => new ConfirmModal(this.ctx.app, `Delete this ${split?.name || w.split} workout (${w.duration}min)?`, async () => {
@@ -302,7 +310,8 @@ export class FitnessModule {
         const sv = tr?.querySelector("input.pa-log-s") as HTMLInputElement | null;
         return { ...we, weight: wv ? parseFloat(wv.value) || 0 : we.weight, sets: sv ? (sv.value.trim() || we.sets) : we.sets };
       });
-      await this.ctx.store.updateWorkoutExercises(w, updated);
+      const newDuration = parseFloat(durInput.value) || 0;
+      await this.ctx.store.updateWorkoutExercises(w, updated, newDuration);
       this.ctx.refresh();
       toast("💾 Workout updated");
     };
@@ -353,6 +362,13 @@ export class FitnessModule {
     } else {
       const past = this.selectedDate && this.selectedDate !== todayLocal() ? this.selectedDate : null;
       if (past) {
+        // No live timer makes sense for a past date, so the session duration needs a
+        // plain input instead — this was previously hardcoded to 0 with no way to set it.
+        const durLabel = actions.createEl("label", { cls: "pa-past-dur-label", text: "Duration (min)" });
+        const durInput = durLabel.createEl("input", { cls: "pa-fit-input pa-past-dur" });
+        durInput.type = "number";
+        durInput.value = String(this.pastDuration || 0);
+        durInput.oninput = () => { this.pastDuration = parseFloat(durInput.value) || 0; };
         const logPast = actions.createEl("button", { text: `✔ Log for ${past}`, cls: "pa-btn" });
         logPast.onclick = () => this.logWorkoutForDate(splitId, exs, panel, past);
       } else {
@@ -514,7 +530,8 @@ export class FitnessModule {
       logged.push(entry);
     }
     if (!logged.length) { toast(rejected ? "Enter a distance and duration greater than zero for cardio exercises." : "This workout has no exercises to log."); return; }
-    await this.ctx.store.logWorkout(splitId, 0, logged, date);
+    await this.ctx.store.logWorkout(splitId, this.pastDuration, logged, date);
+    this.pastDuration = 0;
     this.endWorkout();
     this.selectedDate = date;
     this.ctx.refresh();

@@ -85,8 +85,8 @@
 
 @media(max-width:600px){.pa-root{flex-direction:column}.pa-sidebar{width:100%;border-right:none;border-bottom:1px solid var(--background-modifier-border)}}
 
-/* ===== Habits ===== */
-.pa-habits-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px}
+/* ===== Habits: monthly bullet-journal-style trackers (dots + weekly bars + rolling line) ===== */
+.pa-habits-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px}
 .pa-habit-card{border:1px solid var(--background-modifier-border);border-radius:10px;padding:12px;background:var(--background-secondary)}
 .pa-habit-top{display:flex;justify-content:space-between;align-items:center;gap:6px;margin-bottom:10px}
 .pa-habit-name{font-size:.85rem;font-weight:600}
@@ -94,10 +94,19 @@
 .pa-streak{font-size:.72rem;white-space:nowrap}
 .pa-mini-btn{font-size:.68rem;padding:3px 9px;border-radius:6px;border:1px solid var(--background-modifier-border);background:var(--background-primary);color:var(--text-muted);cursor:pointer}
 .pa-mini-btn:hover{color:var(--text-normal)}
-.pa-heatmap{display:grid;grid-template-columns:repeat(18,1fr);gap:3px;width:100%}
-.pa-hm-cell{aspect-ratio:1;border-radius:50%;background:var(--background-modifier-border)}
-.pa-hm-cell.pa-clickable:hover{outline:2px solid var(--interactive-accent);outline-offset:1px}
+/* One dot per day of the selected month. Flex-wrap with a fixed dot size (not a
+   31-column grid) — 31 columns squeezed into one card width made each dot ~8px, too
+   small to click reliably; a wrapped layout keeps every dot a comfortable click target
+   regardless of how many days are in the month. */
+.pa-month-dots{display:flex;flex-wrap:wrap;gap:5px;width:100%;margin-bottom:8px}
+.pa-hm-cell{width:16px;height:16px;flex:0 0 auto;border-radius:50%;background:var(--background-modifier-border)}
+.pa-hm-cell.pa-clickable{cursor:pointer}
+.pa-hm-cell.pa-clickable:hover{outline:2px solid var(--interactive-accent);outline-offset:1px;transform:scale(1.15)}
 .pa-habit-hint{font-size:.68rem;margin:2px 0 6px}
+/* Weekly bars + rolling-rate line stacked under the dot row, each in its own mini-panel. */
+.pa-habit-card .pa-linechart{margin-top:6px;background:var(--background-primary);border-radius:8px;padding:4px}
+.pa-habit-weekbars{margin-top:6px;gap:5px}
+.pa-habit-weekbars .pa-progress-label{font-size:.72rem}
 
 /* ===== Charts ===== */
 .pa-ring{display:flex;flex-direction:column;align-items:center;gap:2px}
@@ -142,6 +151,10 @@
 .pa-fit-name{font-weight:500}
 .pa-fit-input{width:64px;padding:4px 6px;border:1px solid var(--background-modifier-border);border-radius:6px;background:var(--background-primary);color:var(--text-normal)}
 .pa-active-actions{display:flex;gap:8px;align-items:center;margin-top:8px}
+.pa-past-dur-label{display:flex;align-items:center;gap:6px;font-size:.78rem;color:var(--text-muted)}
+.pa-past-dur{width:64px}
+.pa-logged-dur-wrap{display:flex;align-items:center;gap:4px;font-size:.85rem;color:var(--text-muted);margin-left:8px}
+.pa-logged-dur-wrap .pa-fit-input{width:56px}
 
 /* ===== Nutrition ===== */
 .pa-macros-row{display:flex;flex-wrap:wrap;gap:18px;align-items:flex-start}
@@ -242,23 +255,9 @@
 .pa-editor-title{display:flex;align-items:center;gap:6px}
 .pa-editor-title .pa-panel-title{margin:0}
 
-/* ===== Tasks: List view (single list + collapsed completed) ===== */
 .pa-h2{font-size:1rem;font-weight:700;margin:6px 0 10px}
-.pa-list-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px;align-items:start}
-.pa-list-card{background:var(--background-secondary);border:1px solid var(--background-modifier-border);border-radius:12px;padding:14px}
-.pa-list-card-title{font-weight:700;font-size:.95rem;margin-bottom:4px}
-.pa-list-add{color:var(--text-accent);font-size:.82rem;cursor:pointer;padding:6px 0;border-bottom:1px solid var(--background-modifier-border);margin-bottom:4px}
-.pa-list-add:hover{opacity:.8}
-.pa-list-item{display:flex;gap:10px;align-items:flex-start;padding:8px 2px;border-bottom:1px solid var(--background-modifier-border)}
 .pa-list-circle{cursor:pointer;color:var(--text-muted);font-size:1rem;line-height:1.3;user-select:none}
 .pa-list-circle.on{color:#16a34a}
-.pa-list-item-main{flex:1;min-width:0}
-.pa-list-item-title{font-size:.88rem;cursor:pointer}
-.pa-list-item-title:hover{color:var(--text-accent)}
-.pa-list-item.done .pa-list-item-title{text-decoration:line-through;color:var(--text-muted)}
-.pa-list-item-sub{font-size:.72rem}
-.pa-completed{margin-top:8px}
-.pa-completed summary{cursor:pointer;color:var(--text-muted);font-size:.8rem;padding:4px 0;list-style:revert}
 
 .pa-fit-howto{font-size:.7rem;color:var(--text-muted);font-weight:400;margin-top:2px;max-width:340px;line-height:1.3}
 
@@ -511,8 +510,6 @@
 /* ===== Global top bar (every page) ===== */
 .pa-topbar{display:flex;justify-content:flex-end;padding:4px 8px 0;gap:8px}
 
-/* ===== Beta tag (e.g. Google tasks settings heading) ===== */
-.pa-beta-tag{color:var(--text-error);font-weight:600;font-size:.82em;text-transform:uppercase;letter-spacing:.02em}
 
 /* ── Tasks header tools (search / sync now) ─────────────────────────────── */
 .pa-ht-tools {
@@ -610,6 +607,35 @@ button.pa-link-btn:focus-visible {
 
 /* FormModal conditional fields (visibleWhen) — fitness-cardio */
 .pa-hidden { display: none !important; }
+
+/* ===== Cockpit Life ===== */
+.pa-cockpit-topbar{display:flex;align-items:baseline;gap:10px;margin-bottom:12px}
+.pa-cockpit-topbar .pa-h1{margin-bottom:0}
+/* 3 equal columns: quick capture · trend bars + quick actions · all tasks by board. */
+.pa-cockpit-cols{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;align-items:start}
+.pa-cockpit-col{display:flex;flex-direction:column;gap:12px;min-width:0}
+.pa-cockpit-card{margin-bottom:0}
+.pa-cockpit-barcard{display:flex;flex-direction:column}
+.pa-cockpit-tasklist{display:flex;flex-direction:column;gap:2px;margin-bottom:8px}
+.pa-cockpit-overdue .pa-ctx-item-title{color:#ef4444}
+.pa-cockpit-habitlist{display:flex;flex-direction:column;gap:2px}
+.pa-cockpit-quickrow{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+/* Inline "+ add" row — no modal, so capturing several tasks stays on this page. */
+.pa-cockpit-inline-add{display:flex;gap:6px;margin-top:4px}
+.pa-cockpit-inline-input{flex:1;min-width:0;padding:5px 8px;border:1px solid var(--background-modifier-border);border-radius:6px;background:var(--background-primary);color:var(--text-normal);font-size:.82rem}
+.pa-cockpit-inline-btn{border:1px solid var(--background-modifier-border);opacity:1;font-weight:700}
+/* Right column: always-visible scrollable list of every task, grouped by board. */
+.pa-cockpit-alltasks-card{display:flex;flex-direction:column}
+.pa-cockpit-alltasks{flex:1}
+.pa-cockpit-alltasks-group{font-size:.68rem;font-weight:700;letter-spacing:.03em;text-transform:uppercase;color:var(--text-muted);margin:10px 0 4px}
+.pa-cockpit-alltasks-group:first-child{margin-top:0}
+.pa-cockpit-board-select{font-size:.75rem;max-width:130px}
+.pa-cockpit-hbars{display:flex;flex-direction:column;gap:4px}
+.pa-cockpit-habit-week{margin-top:10px;padding-top:10px;border-top:1px solid var(--background-modifier-border)}
+.pa-cockpit-hbar-row .pa-progress-label{margin:0}
+.pa-cockpit-hbar-fill{background:#0ea5e9}
+@media(max-width:1100px){.pa-cockpit-cols{grid-template-columns:1fr 1fr}}
+@media(max-width:760px){.pa-cockpit-cols{grid-template-columns:1fr}}
 
 /* Savings panel: bucket cards in a 2-column grid (the donut moved up next to "so far") */
 .pa-savings-list{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:8px}

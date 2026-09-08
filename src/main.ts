@@ -48,7 +48,7 @@ const TASK_FOLDERS_SCHEMA = 5;
 export default class MomentumPlugin extends Plugin implements PAHost {
   settings: PASettings;
   store: PADataStore;
-  currentPage = "habit-tracker";
+  currentPage = "cockpit";
   /** True while the plugin itself is (re)writing the task-list mirrors, so the vault
    *  "modify" listener ignores our own writes and never re-enters (prevents runaway loops). */
   private mirrorSyncing = false;
@@ -687,7 +687,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       cfg.customPages = cfg.customPages.filter((p) => p.id !== id);
       await this.store.saveConfig(cfg);
       await this.reloadCustomPages();
-      if (this.currentPage === id) await this.openPage("habit-tracker");
+      if (this.currentPage === id) await this.openPage("cockpit");
     }).open();
   }
 
@@ -745,7 +745,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
     }
   }
 
-  /** True when the Google Tasks beta is enabled AND an account is connected. */
+  /** True when Google Tasks sync is enabled AND an account is connected. */
   isGoogleTasksReady(): boolean {
     return !!this.settings.googleTasksEnabled && !!this.settings.googleToken?.access_token;
   }
@@ -1046,8 +1046,7 @@ class PASettingTab extends PluginSettingTab {
       );
 
     // ── Google Tasks ──────────────────────────────────────────────────────
-    const gtHeading = new Setting(containerEl).setName("Google tasks").setHeading();
-    gtHeading.nameEl.createSpan({ text: " (beta)", cls: "pa-beta-tag" });
+    new Setting(containerEl).setName("Google tasks").setHeading();
 
     const token = this.plugin.settings.googleToken;
     const connected = !!token?.access_token;

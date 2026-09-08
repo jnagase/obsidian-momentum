@@ -109,6 +109,17 @@ export class FinancesModule {
     return start + this.sumByType(upTo, "income") - this.sumByType(upTo, "expense");
   }
 
+  /** A savings bucket's balance up to and including the given month — same idea as
+   *  cumulativeThrough but over the bucket's date-keyed contribution log instead of
+   *  transactions. This is "everything effectively set aside" as of that month: the sum
+   *  of every logged contribution (minus withdrawals, which are negative entries) dated
+   *  on or before the month's end — never a manually-typed running total. */
+  private cumulativeBucketThrough(bucket: SavingsBucket, monthKeyInclusive: string): number {
+    return Object.entries(bucket.log)
+      .filter(([date]) => date.slice(0, 7) <= monthKeyInclusive)
+      .reduce((a, [, v]) => a + v, 0);
+  }
+
   /** Fixed width of the net-worth chart's x-axis: always the current month plus the
    *  12 before it (13 points total). Unlike only plotting months that have data, this
    *  keeps the axis stable as history is backfilled or has gaps — and it slides forward
@@ -165,11 +176,28 @@ export class FinancesModule {
     const balanceValues = chartKeys.map((k) => Math.round(this.cumulativeThrough(txs, k)));
     const incomeValues = chartKeys.map((k) => Math.round(this.sumByType(txs.filter((t) => t.date.startsWith(k)), "income")));
     const expenseValues = chartKeys.map((k) => Math.round(this.sumByType(txs.filter((t) => t.date.startsWith(k)), "expense")));
-    drawLineChart(chartCol, labels, [
+    const series = [
       { name: "Balance", color: total >= 0 ? "#16a34a" : "#ef4444", values: balanceValues },
       { name: "Income", color: "#3b82f6", values: incomeValues },
       { name: "Expenses", color: "#f59e0b", values: expenseValues },
-    ], { height: 220, format: (n) => this.fmt(n) });
+    ];
+    // Savings line — everything effectively set aside over time, across EVERY bucket
+    // (Emergency fund + every custom bucket, e.g. Investments), each summed by its own
+    // date-keyed contribution log. Only added once there's at least one contribution
+    // logged anywhere, so a fresh vault with empty buckets doesn't add a flat zero line.
+    const buckets = this.ctx.store.loadSavingsBuckets();
+    if (buckets.some((b) => Object.keys(b.log).length)) {
+      const savingsValues = chartKeys.map((k) => Math.round(buckets.reduce((a, b) => a + this.cumulativeBucketThrough(b, k), 0)));
+      series.push({ name: "Savings", color: "#8b5cf6", values: savingsValues });
+    }
+    // Investments line — same idea, scoped to just the bucket named "Investments" (if
+    // any), so it's visible as its own trend alongside the combined Savings total above.
+    const investBucket = buckets.find((b) => b.kind === "custom" && b.name.toLowerCase() === "investments");
+    if (investBucket && Object.keys(investBucket.log).length) {
+      const investValues = chartKeys.map((k) => Math.round(this.cumulativeBucketThrough(investBucket, k)));
+      series.push({ name: "Investments", color: "#f97316", values: investValues });
+    }
+    drawLineChart(chartCol, labels, series, { height: 220, format: (n) => this.fmt(n) });
     if (allKeys.some((k) => k < chartKeys[0])) {
       chartCol.createDiv({ cls: "pa-muted", text: `Showing the last ${FinancesModule.NET_WORTH_CHART_MONTHS} months. Older history is included in the total above.` });
     }

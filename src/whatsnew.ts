@@ -9,6 +9,12 @@ export const CHANGELOG: ChangeEntry[] = [
     version: "0.6.9",
     sections: [
       {
+        title: "🎉 Google tasks integration is now free and in production",
+        items: [
+          "The two-way Google tasks sync is fully live and free for everyone in 0.6.9. It's out of beta and Google's verification is complete, so connecting is just the normal Google consent screen — no \"unverified app\" warning, no account limit, and nothing you need to do.",
+        ],
+      },
+      {
         title: "New — Cockpit Life",
         items: [
           "A new landing tab, Cockpit Life, consolidates the whole day in one place: quick task capture for today/overdue, habits with streaks, study progress, and a full list of open tasks filterable by board.",
@@ -26,7 +32,6 @@ export const CHANGELOG: ChangeEntry[] = [
       {
         title: "Changed",
         items: [
-          "Google tasks sync is no longer marked beta. Nothing changes in how it works or in your settings — it has been stable in daily use, so the warning label is gone.",
           "The Tasks page dropped its List view — Kanban and Matrix cover the same ground without the extra tab.",
         ],
       },

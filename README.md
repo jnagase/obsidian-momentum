@@ -120,24 +120,15 @@ Two-way sync between your Tasks boards and Google Tasks. Off by default — enab
 - Privacy: [privacy policy](https://momentumlife.jnagase.com/privacy) — your tasks are stored
   only in your vault, and the broker never sees their content.
 
-### "Google hasn't verified this app"
+### Connecting your Google account
 
-The app is pending Google's OAuth verification, so the first time you connect you'll see a
-warning screen. It's expected. To continue:
+The app has completed Google's OAuth verification, so connecting is the normal Google
+consent flow — no "unverified app" warning and no account limit:
 
-1. On the **"Google hasn't verified this app"** screen, click **Advanced** (bottom left).
-2. Click **Go to momentumlife.jnagase.com (unsafe)**.
-3. Review the requested permission — the plugin asks for Google Tasks access only — and click
-   **Continue**.
-4. You're returned to Obsidian and the plugin confirms it's connected.
-
-Two things worth knowing while verification is pending:
-
-- **A limited number of Google accounts can authorise the app** — Google caps unverified apps
-  at 100 accounts for the lifetime of the project, and the cap can't be reset. If you hit it,
-  connecting fails until verification is approved. Accounts already connected keep syncing.
-- The warning has nothing to do with the plugin's own security review: the plugin is open
-  source and audited by the Obsidian community review.
+1. In **Settings → Google tasks**, turn on the sync and click **Connect Google account**.
+2. Your browser opens Google's consent screen. Review the requested permission — the plugin
+   asks for Google Tasks access only — and click **Continue**.
+3. You're returned to Obsidian and the plugin confirms it's connected.
 
 ## Install (dev)
 1. `npm install`

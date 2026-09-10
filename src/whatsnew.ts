@@ -6,6 +6,18 @@ export interface ChangeEntry { version: string; sections: ChangeSection[]; }
 /** Release notes shown in the "What's new" dialog, newest first. */
 export const CHANGELOG: ChangeEntry[] = [
   {
+    version: "0.7.0",
+    sections: [
+      {
+        title: "Fixed — Google tasks sync across devices",
+        items: [
+          "A task you left in a column like \"in progress\" no longer jumps back to \"backlog\" after another device syncs. Google tasks has no concept of columns, so a task rebuilt from the Google side used to land in the first column — now it keeps its column (inherited from the matching note, and preserved when duplicate copies are merged).",
+          "Deleting a board now sticks, whichever way you delete it. Removing a board's folder (from another app, the file explorer, or your phone) used to leave the matching Google list alive, so the board reappeared on the next sync. The plugin now notices a board that disappeared and removes its Google list — with a safety check so a folder that's merely mid-download during a sync is never mistaken for a deletion.",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.6.9",
     sections: [
       {

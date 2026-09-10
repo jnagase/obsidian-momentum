@@ -102,6 +102,28 @@ function normStatus(s?: string): "completed" | "needsAction" {
 function sigKey(title: string, due: string | undefined, status?: string): string {
   return `${baseTitle(title)}\u0000${normalizeYmd(due)}\u0000${normStatus(status)}`;
 }
+/** Rank of a Kanban column = its index in the configured order (unknown → -1). Higher = more advanced. */
+export function colRank(status: string, cols: string[]): number { return cols.indexOf(status); }
+/**
+ * The most-advanced column among a group of tasks (highest index in the configured order).
+ * Used so collapsing duplicates keeps "in progress" over "backlog" instead of the Winner's
+ * possibly-default column. Group members share the same done-bit (see sigKey/normStatus), so
+ * this never promotes a task to "done" by accident.
+ */
+export function mostAdvancedCol(tasks: Task[], cols: string[]): string {
+  return tasks.reduce((best, t) => (colRank(t.status, cols) > colRank(best, cols) ? t.status : best), tasks[0].status);
+}
+/**
+ * Column a pullCreate should assign to a note materialized from the Google side. Google has no
+ * column: a completed remote lands in done; otherwise inherit an equivalent local note's column
+ * (preserving "in progress" across the multi-device race), falling back to the first column for
+ * a genuinely new task.
+ */
+export function pullCreateStatus(
+  gtStatus: string, sig: string, localColBySig: Map<string, string>, firstCol: string, doneCol: string,
+): string {
+  return gtStatus === "completed" ? doneCol : (localColBySig.get(sig) ?? firstCol);
+}
 /** Deterministic winner among Google ids: smallest by code-point order. Same on every device. */
 function pickWinnerGoogleId(ids: string[]): string {
   return ids.reduce((w, x) => (x < w ? x : w));
@@ -220,6 +242,18 @@ export class GTSyncService {
     const localStatus = (t: Task): GTTask["status"] => (t.status === doneCol ? "completed" : "needsAction");
     const linkedIds = new Set(tasks.filter((t) => t.googleId).map((t) => t.googleId as string));
 
+    // Kanban column round-trips only locally (Google has no column). To keep "in progress"
+    // from collapsing to "backlog" when a task is re-materialized from the Google side, map
+    // each local signature (baseTitle+due+doneBit) to its most-advanced existing column, so
+    // pullCreate can inherit it instead of hard-coding firstCol.
+    const localColBySig = new Map<string, string>();
+    for (const t of tasks) {
+      if (isBlankBase(t.title)) continue;
+      const k = sigKey(t.title, t.due, localStatus(t));
+      const prev = localColBySig.get(k);
+      if (prev === undefined || colRank(t.status, cols) > colRank(prev, cols)) localColBySig.set(k, t.status);
+    }
+
     // Group local tasks per list: linked ones by their stored google_list, unlinked ones
     // by the list their current board maps to.
     const linkedByList = new Map<string, Task[]>();
@@ -315,7 +349,7 @@ export class GTSyncService {
       result.errors.push(`Mass-change guard: ${writeOps} changes pending (limit ${MAX_WRITES_PER_RUN}). Run "Sync now" manually to confirm.`);
       const links = ops.filter((o) => o.kind === "link");
       let dl = 0;
-      for (const op of links) { await this.applyOp(at, op, result, localStatus, firstCol); report({ phase: "applying", done: ++dl, total: links.length }); }
+      for (const op of links) { await this.applyOp(at, op, result, localStatus, firstCol, localColBySig, doneCol); report({ phase: "applying", done: ++dl, total: links.length }); }
       await this.baselines.save();
       return result;
     }
@@ -323,7 +357,7 @@ export class GTSyncService {
     // ---- APPLY ----
     let done = 0;
     for (const op of ops) {
-      try { await this.applyOp(at, op, result, localStatus, firstCol); }
+      try { await this.applyOp(at, op, result, localStatus, firstCol, localColBySig, doneCol); }
       catch (e) { result.errors.push(`${op.kind}: ${String(e)}`); }
       report({ phase: "applying", done: ++done, total: ops.length });
     }
@@ -340,7 +374,7 @@ export class GTSyncService {
       // multi-device race so two devices converge on one item each. Wrapped so a failure
       // in one group never aborts the run.
       try {
-        await this.reconcileDuplicates(at, boardToListId, listIdToBoard, ignoredListIds, defaultListId, localStatus, result, opts.confirmMass);
+        await this.reconcileDuplicates(at, boardToListId, listIdToBoard, ignoredListIds, defaultListId, localStatus, cols, result, opts.confirmMass);
       } catch (e) { result.errors.push(`Reconcile duplicates: ${String(e)}`); }
     }
 
@@ -364,6 +398,7 @@ export class GTSyncService {
     ignoredListIds: Set<string>,
     defaultListId: string,
     localStatus: (t: Task) => GTTask["status"],
+    cols: string[],
     result: GTSyncResult,
     confirmMass?: (msg: string) => Promise<boolean>,
   ): Promise<void> {
@@ -415,6 +450,13 @@ export class GTSyncService {
         const hasPlainBase = fulls.some((f) => f === baseTitle(f));
         if (!(allSame || hasPlainBase)) continue; // e.g. "Phase 2"/"Phase 3" with no "Phase" → keep both
         const winner = pickWinnerNote(g);
+        // Keep the most-advanced column of the group on the Winner, so collapsing a
+        // "backlog" pullCreate copy against an "in progress" note doesn't lose the column.
+        const advanced = mostAdvancedCol(g, cols);
+        if (advanced !== winner.status) {
+          try { await this.store.updateTask(winner, { status: advanced }); winner.status = advanced; }
+          catch (e) { result.errors.push(`Reconcile keep-column "${winner.title}": ${String(e)}`); }
+        }
         for (const t of g) {
           if (t === winner) continue;
           if (t.googleId && t.googleId !== winner.googleId) googleDeletes.push({ listId: t.googleList || "", gtId: t.googleId });
@@ -636,6 +678,7 @@ export class GTSyncService {
   private async applyOp(
     at: string, op: SyncOp, result: GTSyncResult,
     localStatus: (t: Task) => GTTask["status"], firstCol: string,
+    localColBySig: Map<string, string>, doneCol: string,
   ): Promise<void> {
     switch (op.kind) {
       case "link":
@@ -662,9 +705,14 @@ export class GTSyncService {
         this.baselines.set(op.gtId, op.base);
         result.pulled++;
         break;
-      case "pullCreate":
+      case "pullCreate": {
+        // Google carries no column. A completed remote lands in done; otherwise inherit the
+        // column of an equivalent local note when one exists (preserves "in progress" across
+        // the multi-device race), falling back to the first column for a genuinely new task.
+        const sig = sigKey(op.gt.title, fromGTDue(op.gt.due), op.gt.status);
+        const status = pullCreateStatus(op.gt.status, sig, localColBySig, firstCol, doneCol);
         await this.store.createTask({
-          title: op.gt.title, status: firstCol, priority: "medium",
+          title: op.gt.title, status, priority: "medium",
           kanbanName: op.board,
           due: fromGTDue(op.gt.due) || undefined,
           googleId: op.gt.id, googleList: op.listId,
@@ -672,6 +720,7 @@ export class GTSyncService {
         if (op.gt.id) this.baselines.set(op.gt.id, { title: op.gt.title, status: op.gt.status, due: fromGTDue(op.gt.due) });
         result.pulled++;
         break;
+      }
     }
   }
 }

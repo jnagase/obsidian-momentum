@@ -232,6 +232,45 @@ export class MomentumStore {
     return board;
   }
 
+  /**
+   * Delete a board (mirrors the plugin's deleteBoard): move its tasks into My Tasks and
+   * tombstone it in Config/deleted-boards.md so Google-list discovery won't resurrect it.
+   * Does NOT touch Google — the plugin propagates the deletion (removes the Google list) on
+   * its next sync. Refuses "My Tasks"; no-op when the board doesn't exist.
+   */
+  async deleteBoard(name) {
+    const clean = (name || "").trim();
+    if (!clean) return { ok: false, reason: "no board name" };
+    if (clean === "My Tasks") return { ok: false, reason: "cannot delete My Tasks" };
+    const folderAbs = this.full(this.taskBoardFolder(clean));
+    if (!(await this._absExists(folderAbs))) return { ok: false, reason: "not found" };
+    // Tombstone first so a lingering Google list can't resurrect the board mid-operation.
+    await this._addIgnoredBoard(clean);
+    // Move each task note to My Tasks (folder = source of truth).
+    const tasks = (await this.loadTasks()).filter((t) => t.kanbanName === clean);
+    let moved = 0;
+    for (const t of tasks) {
+      try { await this.updateTask(t.path, { board: "My Tasks" }); moved++; } catch { /* skip */ }
+    }
+    // Remove the now-empty folder (rmdir fails if non-empty — safe, non-destructive).
+    try { await fs.rmdir(folderAbs); } catch { /* not empty or already gone */ }
+    await this.syncTaskLists();
+    return { ok: true, board: clean, movedTasks: moved, tombstoned: true };
+  }
+
+  /** Append a board name to Config/deleted-boards.md (idempotent), mirroring the plugin. */
+  async _addIgnoredBoard(name) {
+    const rel = "Config/deleted-boards.md";
+    const cur = await this.readRaw(rel);
+    const set = new Set(cur ? coerce(this.parse(cur).fm.boards, []) : []);
+    if (set.has(name)) return;
+    set.add(name);
+    await this.writeRel(rel, this.buildDoc(
+      { type: "deleted-boards", boards: [...set] },
+      "# Deleted boards\n\nBoards removed here are not re-created from Google Tasks lists.\n",
+    ));
+  }
+
   // ============================================================
   // TASKS
   // ============================================================
@@ -391,7 +430,9 @@ export class MomentumStore {
     const rel = `${cfg.hubFolder}/${monthHubTitle(cfg.module, monthKey)}.md`;
     if (!items.length) { if (await this.exists(rel)) await this.removeAbs(this.full(rel)); return "removed"; }
     const body = await cfg.summaryBody(items, monthKey);
-    const content = this.buildDoc({ type: `${cfg.module.toLowerCase()}-month-hub`, month: monthKey, generated: new Date().toISOString() }, body);
+    // Deterministic frontmatter (no volatile `generated` timestamp) so two devices produce
+    // byte-identical hubs for the same month and a whole-vault sync never conflicts them.
+    const content = this.buildDoc({ type: `${cfg.module.toLowerCase()}-month-hub`, month: monthKey }, body);
     const cur = await this.readRaw(rel);
     if (cur != null && this.bodyOf(cur) === this.bodyOf(content)) return "unchanged";
     await this.writeRel(rel, content);

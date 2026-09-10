@@ -43,6 +43,7 @@ const tools = {
   // ---------- Boards ----------
   list_boards: { description: "List the task boards.", inputSchema: NONE, handler: () => store.loadBoards() },
   create_board: { description: "Create a task board (a folder under Tasks/).", inputSchema: S.obj({ name: S.str("Board name"), emoji: S.str("Optional emoji (ignored — boards are folders)") }, ["name"]), handler: async (a) => { const ok = await store.createBoard(a.name); return { ok }; } },
+  delete_board: { description: "Delete a task board: move its tasks to My Tasks and tombstone it so Google-list discovery won't resurrect it. Does NOT delete the Google list directly — the plugin removes it on its next sync. Refuses 'My Tasks'; no-op if the board doesn't exist.", inputSchema: S.obj({ name: S.str("Board name") }, ["name"]), handler: (a) => store.deleteBoard(a.name) },
 
   // ---------- Tasks ----------
   list_tasks: { description: "List tasks, optionally filtered by board and/or status/column.", inputSchema: S.obj({ board: S.str("Board name filter"), status: S.str("Column/status filter") }), handler: async (a) => { let t = await store.loadTasks(); if (a.board) t = t.filter((x) => x.kanbanName === a.board); if (a.status) t = t.filter((x) => x.status === a.status); return t.map(({ path, ...rest }) => ({ ...rest })); } },

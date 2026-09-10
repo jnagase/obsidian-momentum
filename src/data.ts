@@ -14,6 +14,87 @@ export function setDataRoot(root: string) { DATA_ROOT = root || ""; }
 
 type FM = Record<string, unknown>;
 
+/** Result of planning board deletions from a folder-listing diff (pure, testable). */
+export interface BoardDeletionPlan {
+  /** Boards to tombstone now (missing two sweeps in a row, under the mass guard). */
+  toTombstone: string[];
+  /** The updated known-boards set to persist. */
+  nextBoards: string[];
+  /** The updated pending-removal set to persist (missing this sweep, not yet tombstoned). */
+  nextPending: string[];
+  /** True when so many boards vanished at once that it's likely a load glitch, not a deletion. */
+  suspicious: boolean;
+  /** Confirmed-missing candidates when `suspicious` (awaiting user confirmation). */
+  suspiciousBoards: string[];
+}
+
+/**
+ * Decide which boards to tombstone from a folder-listing diff, with the sanity shield baked in.
+ * Pure and deterministic — no vault, no I/O — so it can be unit-tested exhaustively.
+ *
+ * Rules:
+ *  - "My Tasks" is never a deletion candidate.
+ *  - First observation (empty `known`) only initializes the registry; it never deletes.
+ *  - Debounce: a board is confirmed only if it was missing in the previous sweep too
+ *    (present in `pendingRemoval`), so a folder briefly absent mid-Sync never gets tombstoned.
+ *  - Mass guard: if more confirmed-missing boards than `guard`, mark `suspicious` and tombstone
+ *    nothing automatically (the caller asks the user / abstains).
+ *
+ * @param current      board names currently present as folders (excluding "My Tasks")
+ * @param known        board names previously observed
+ * @param pendingRemoval boards that were missing in the previous sweep
+ * @param tombstoned   boards already tombstoned (excluded from deletion)
+ * @param guard        max confirmed-missing boards before the run is treated as suspicious
+ */
+export function planBoardDeletions(
+  current: string[], known: string[], pendingRemoval: string[], tombstoned: string[], guard: number,
+): BoardDeletionPlan {
+  const cur = new Set(current.filter((b) => b !== "My Tasks"));
+  const knownSet = new Set(known.filter((b) => b !== "My Tasks"));
+  const tomb = new Set(tombstoned);
+
+  // First observation: initialize, never delete.
+  if (knownSet.size === 0) {
+    return { toTombstone: [], nextBoards: [...cur], nextPending: [], suspicious: false, suspiciousBoards: [] };
+  }
+
+  const learned = [...cur].filter((b) => !knownSet.has(b));
+  const missing = [...knownSet].filter((b) => !cur.has(b) && !tomb.has(b));
+  const prevPending = new Set(pendingRemoval);
+  const confirmed = missing.filter((b) => prevPending.has(b)); // missing this sweep AND last.
+
+  const suspicious = confirmed.length > guard;
+  const toTombstone = suspicious ? [] : confirmed;
+
+  const tombSet = new Set(toTombstone);
+  const nextBoards = [...new Set([...knownSet, ...learned])].filter((b) => !tombSet.has(b));
+  const nextPending = missing.filter((b) => !tombSet.has(b)); // still-missing candidates for next sweep.
+
+  return { toTombstone, nextBoards, nextPending, suspicious, suspiciousBoards: suspicious ? confirmed : [] };
+}
+
+/**
+ * True for a file a sync tool created to hold a conflict copy, so every loader can skip it.
+ * These are NOT plugin data — the plugin never writes a `.conflict` file — yet without this
+ * each copy is read as a real, separate item, showing up as dozens of duplicate meal logs /
+ * workouts / transactions and inflating every total.
+ *
+ * The observed producer here is the Air Sync plugin (Google Drive backend), whose conflict
+ * namer inserts `.conflict` (first conflict) or `.conflict-<n>` (subsequent) before the
+ * extension — e.g. `Lunch-221cal-2026-09-06.conflict.md`, `...conflict-2.md`, and the
+ * runaway nested `...conflict.conflict.conflict.md` chains it makes when it re-syncs and
+ * re-conflicts its own conflict files. Obsidian Sync's classic "(conflicted copy …)" naming
+ * is covered too, so this holds regardless of which sync tool is in use.
+ *
+ * The match is deliberately narrow so a legitimate note is never hidden: it fires only on a
+ * `.conflict` / `.conflict-<n>` segment that is followed by another dot (i.e. it sits before
+ * the extension or another conflict segment). A user note like "Resolve merge conflict.md"
+ * has no such `.conflict.`-style segment and is kept.
+ */
+export function isSyncConflictFile(name: string): boolean {
+  return /\.conflict(-\d+)?\./i.test(name) || /conflicted copy/i.test(name);
+}
+
 /** Anything a month hub can summarize: it only needs a `YYYY-MM-DD` date. */
 export interface MonthItem { date: string; }
 
@@ -124,7 +205,7 @@ export class PADataStore {
   listMarkdown(folder: string): TFile[] {
     const prefix = this.full(folder).replace(/\/$/, "") + "/";
     return this.app.vault.getMarkdownFiles()
-      .filter((f) => f.path.startsWith(prefix))
+      .filter((f) => f.path.startsWith(prefix) && !isSyncConflictFile(f.name))
       .sort((a, b) => a.path.localeCompare(b.path));
   }
 
@@ -312,6 +393,30 @@ export class PADataStore {
     await this.writeIgnoredBoards([...set]);
   }
 
+  // ── Known boards (deletion detection) ─────────────────────────────────────
+  // Registry of boards the plugin has already observed, so a board that disappears by ANY
+  // route (MCP/Claude, Finder, phone) — not just the in-app "Delete board" button — can be
+  // detected by diff and tombstoned. `pendingRemoval` holds boards missing in the LAST sweep;
+  // a board is only tombstoned once it's missing in two consecutive sweeps (debounce), so a
+  // folder momentarily absent from an Obsidian Sync download never triggers a real deletion.
+  // Plugin-only (the MCP never reads it), so there's no saveConfig-parity burden.
+  private knownBoardsFile = "Config/known-boards.md";
+  loadKnownBoards(): { boards: string[]; pendingRemoval: string[] } {
+    const f = this.fileAt(this.knownBoardsFile);
+    if (!f) return { boards: [], pendingRemoval: [] };
+    const m = this.frontmatter(f);
+    return {
+      boards: coerce<string[]>(m.boards, []),
+      pendingRemoval: coerce<string[]>(m.pending_removal, []),
+    };
+  }
+  async writeKnownBoards(state: { boards: string[]; pendingRemoval: string[] }): Promise<void> {
+    await this.writeFile(this.knownBoardsFile, this.buildDoc(
+      { type: "known-boards", boards: state.boards, pending_removal: state.pendingRemoval },
+      "# Known boards\n\nBoards the plugin has observed, used to detect deletions across devices. Managed automatically — do not edit by hand.\n",
+    ));
+  }
+
   // ── Pending Google deletions (tombstones) ─────────────────────────────────
   // A task deleted locally while still linked to Google Tasks (had a google_id) is recorded
   // here at delete time. Without this, the next sync sees the Google item still alive, finds
@@ -357,6 +462,15 @@ export class PADataStore {
     if (!clean || clean === "Lists" || clean === "untitled") return false;
     await this.removeIgnoredBoard(clean); // re-creating clears any tombstone.
     await this.ensureBoardFolder(clean);
+    // Learn it in the known-boards registry and drop any stale pending-removal candidacy so
+    // the deletion sweep never mistakes a freshly (re)created board for a disappearance.
+    const reg = this.loadKnownBoards();
+    if (!reg.boards.includes(clean) || reg.pendingRemoval.includes(clean)) {
+      await this.writeKnownBoards({
+        boards: [...new Set([...reg.boards, clean])],
+        pendingRemoval: reg.pendingRemoval.filter((b) => b !== clean),
+      });
+    }
     return true;
   }
 
@@ -376,6 +490,12 @@ export class PADataStore {
       const f = this.app.vault.getAbstractFileByPath(t.path);
       if (f instanceof TFile) await this.patchFrontmatter(f, (fm) => { fm.kanban_name = newName; });
     }
+    // Keep the known-boards registry in step so the old name isn't seen as a deletion.
+    const reg = this.loadKnownBoards();
+    await this.writeKnownBoards({
+      boards: [...new Set(reg.boards.map((b) => (b === oldName ? newName : b)))],
+      pendingRemoval: reg.pendingRemoval.filter((b) => b !== oldName && b !== newName),
+    });
   }
 
   /**
@@ -385,6 +505,14 @@ export class PADataStore {
   async deleteBoard(name: string): Promise<void> {
     if (name === "My Tasks") return;
     await this.addIgnoredBoard(name); // tombstone so discovery won't resurrect it from Google.
+    // Drop it from the known-boards registry so the deletion sweep doesn't re-flag it.
+    const reg = this.loadKnownBoards();
+    if (reg.boards.includes(name) || reg.pendingRemoval.includes(name)) {
+      await this.writeKnownBoards({
+        boards: reg.boards.filter((b) => b !== name),
+        pendingRemoval: reg.pendingRemoval.filter((b) => b !== name),
+      });
+    }
     const folderPath = this.full(this.taskBoardFolder(name));
     const folder = this.app.vault.getAbstractFileByPath(folderPath);
     if (!(folder instanceof TFolder)) return;
@@ -877,9 +1005,11 @@ export class PADataStore {
   }
 
   /**
-   * Write a hub document only when its BODY changes, ignoring frontmatter (so the
-   * volatile `generated` timestamp never triggers a rewrite). Keeps hubs churn-free
-   * and safe against Obsidian Sync feedback loops.
+   * Write a hub document only when its BODY changes, comparing bodies (not frontmatter).
+   * The hub frontmatter is now deterministic (no timestamp), so the written bytes are
+   * identical across devices for the same month — but body-only compare is kept because it
+   * also skips a rewrite when a legacy hub still carries the old `generated` field. Keeps
+   * hubs churn-free and safe against sync feedback loops.
    */
   private async writeHubIfBodyChanged(rel: string, meta: FM, body: string): Promise<boolean> {
     const content = this.buildDoc(meta, body);
@@ -917,10 +1047,15 @@ export class PADataStore {
     }
 
     const body = await cfg.summaryBody(monthItems, monthKey);
+    // No volatile field here (previously a `generated: <now>` timestamp). The hub is fully
+    // derived from the month's items, so two devices generating the same month produce
+    // byte-identical files — which a whole-vault sync (Air Sync / Obsidian Sync) can merge
+    // without a conflict. The old timestamp changed on every write, so each device wrote a
+    // different byte stream for the same data and the sync layer turned that into a
+    // `.conflict` copy (the month hubs were by far the biggest source of those).
     const meta: FM = {
       type: `${cfg.module.toLowerCase()}-month-hub`,
       month: monthKey,
-      generated: new Date().toISOString(),
     };
     const wrote = await this.writeHubIfBodyChanged(rel, meta, body);
     return wrote ? "written" : "unchanged";

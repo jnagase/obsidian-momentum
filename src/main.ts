@@ -1,5 +1,5 @@
 import { Plugin, WorkspaceLeaf, PluginSettingTab, App, Setting, TFolder, TFile, Notice } from "obsidian";
-import { PADataStore, setDataRoot } from "./data";
+import { PADataStore, setDataRoot, planBoardDeletions } from "./data";
 import { PAView, VIEW_TYPE_PA, PAHost, PALocation } from "./view";
 import { PANavView, VIEW_TYPE_PA_NAV } from "./nav";
 import { PASideView, VIEW_TYPE_PA_SIDE, momentumNoteType } from "./side";
@@ -223,6 +223,9 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       }
       // Start the periodic sync interval if a non-manual frequency is configured.
       this.resetGoogleSyncInterval();
+      // Once the vault has settled, seed the known-boards registry and (on later launches)
+      // catch boards deleted while this device was closed. First ever run only initializes.
+      window.setTimeout(() => void this.detectDeletedBoards(), 6000);
       // One-time, best-effort migration of module notes to readable filenames. Guarded by a
       // schema version so it runs once; on failure the guard stays unset so the command retries.
       if ((this.settings.readableNotesSchema ?? 0) < READABLE_NOTES_SCHEMA) {
@@ -335,6 +338,64 @@ export default class MomentumPlugin extends Plugin implements PAHost {
     // name (covers renames that arrived from another device via Obsidian Sync).
     await this.store.repairTaskTitles();
     await this.syncMirrors();
+    // After folders are settled (hand-made boards registered, loose notes filed), check for
+    // boards that vanished by any route and tombstone them (with the sanity shield).
+    await this.detectDeletedBoards();
+  }
+
+  /**
+   * Detect boards deleted by ANY route (MCP/Claude, Finder, phone) — not just the in-app
+   * "Delete board" button — and tombstone them so their Google Tasks list is removed and
+   * discovery won't resurrect them. A sanity shield keeps an Obsidian Sync mid-download or a
+   * half-loaded vault from being mistaken for a deletion: a board must be missing across two
+   * consecutive sweeps (debounce, ~5 min), and a mass disappearance asks the user first.
+   */
+  private async detectDeletedBoards(): Promise<void> {
+    try {
+      const current = this.store.loadBoards().map((b) => b.name).filter((n) => n !== "My Tasks");
+      if (current.length === 0) return; // vault not loaded yet — never act on an empty listing.
+      const reg = this.store.loadKnownBoards();
+      const tombstoned = this.store.loadIgnoredBoards();
+      const knownCount = reg.boards.filter((b) => b !== "My Tasks").length;
+      const guard = Math.max(2, Math.ceil(knownCount * 0.5));
+      const plan = planBoardDeletions(current, reg.boards, reg.pendingRemoval, tombstoned, guard);
+
+      if (plan.suspicious) {
+        const list = plan.suspiciousBoards.join(", ");
+        const msg = `Momentum: ${plan.suspiciousBoards.length} boards disappeared at once (${list}).\n\n` +
+          `This can be a real deletion, or an Obsidian Sync glitch / a half-loaded vault. If you continue, ` +
+          `they're removed and their Google Tasks lists are deleted on the next sync.\n\nRemove these boards?`;
+        const ok = await this.confirmBoardDeletion(msg);
+        // Declined or dismissed → keep everything intact; a genuine deletion is caught later
+        // once the vault is settled. Never tombstone behind the user's back.
+        if (!ok) return;
+        for (const name of plan.suspiciousBoards) await this.store.addIgnoredBoard(name);
+        await this.store.writeKnownBoards({
+          boards: reg.boards.filter((b) => !plan.suspiciousBoards.includes(b) && b !== "My Tasks"),
+          pendingRemoval: [],
+        });
+        new Notice(`Momentum: removed ${plan.suspiciousBoards.length} deleted board${plan.suspiciousBoards.length === 1 ? "" : "s"}.`);
+        if (this.isGoogleTasksReady()) void this.syncGoogleTasks(true);
+        return;
+      }
+
+      await this.store.writeKnownBoards({ boards: plan.nextBoards, pendingRemoval: plan.nextPending });
+      for (const name of plan.toTombstone) await this.store.addIgnoredBoard(name);
+      if (plan.toTombstone.length > 0) {
+        new Notice(`Momentum: removed ${plan.toTombstone.length} deleted board${plan.toTombstone.length === 1 ? "" : "s"}.`);
+        if (this.isGoogleTasksReady()) void this.syncGoogleTasks(true);
+      }
+    } catch { /* best-effort: detection must never break startup or the sweep */ }
+  }
+
+  /** Confirm a suspicious mass board deletion. Resolves true only on explicit confirm. */
+  private confirmBoardDeletion(msg: string): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      let done = false;
+      const modal = new ConfirmModal(this.app, msg, () => { done = true; resolve(true); });
+      modal.onClose = () => { modal.contentEl.empty(); if (!done) resolve(false); };
+      modal.open();
+    });
   }
 
   /**

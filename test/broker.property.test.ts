@@ -267,7 +267,9 @@ describe("Property 5: the request to Google leaks no secret and never widens sco
         });
         const consent = new URL(authRes.headers.get("location")!);
         expect(consent.searchParams.get("client_id")).toBe(ENV.GOOGLE_CLIENT_ID);
-        expect(consent.searchParams.get("scope")).toBe("https://www.googleapis.com/auth/tasks");
+        expect(consent.searchParams.get("scope")).toBe(
+          "https://www.googleapis.com/auth/tasks https://www.googleapis.com/auth/drive",
+        );
         expect(authRes.headers.get("location")).not.toContain(ENV.GOOGLE_CLIENT_SECRET);
 
         calls = [];

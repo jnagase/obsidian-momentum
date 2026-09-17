@@ -82,14 +82,22 @@ describe("plugin and Worker derive the same canonical redirect", () => {
   });
 });
 
-describe("the requested scope never widens", () => {
-  it("asks for the single Google Tasks scope", () => {
+describe("the requested scope is exactly tasks + full drive", () => {
+  it("asks for the Google Tasks scope and the full Drive scope", () => {
     const src = readFileSync("worker/src/index.js", "utf8");
-    const scopes = [...src.matchAll(/const SCOPES\s*=\s*"([^"]*)"/g)].map((m) => m[1]);
-    expect(scopes).toEqual(["https://www.googleapis.com/auth/tasks"]);
-    // A readonly variant or an extra identity scope would change what the consent screen
-    // shows and invalidate the verification submission.
+    // SCOPES is now an array joined with " ". Extract the individual scope string literals
+    // inside the SCOPES = [ ... ] block.
+    const block = src.match(/const SCOPES\s*=\s*\[([\s\S]*?)\]\.join/);
+    expect(block).not.toBeNull();
+    const scopes = [...block![1].matchAll(/"([^"]*)"/g)].map((m) => m[1]);
+    expect(scopes).toEqual([
+      "https://www.googleapis.com/auth/tasks",
+      "https://www.googleapis.com/auth/drive",
+    ]);
+    // The full drive scope is intentional (see spec decision D1), but these narrower/identity
+    // variants must still never appear — they would change the consent screen unexpectedly.
     expect(src).not.toContain("tasks.readonly");
+    expect(src).not.toContain("drive.readonly");
     expect(src).not.toContain("userinfo");
     expect(src).not.toContain("openid");
   });

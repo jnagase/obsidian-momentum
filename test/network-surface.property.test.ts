@@ -30,7 +30,7 @@ import { AUTH_HOST } from "../src/appdomain";
 // call, catching a host that never appears in these code paths.
 // =====================================================================================
 
-const ALLOWED_HOSTS = new Set([AUTH_HOST, "oauth2.googleapis.com", "tasks.googleapis.com"]);
+const ALLOWED_HOSTS = new Set([AUTH_HOST, "oauth2.googleapis.com", "tasks.googleapis.com", "www.googleapis.com"]);
 
 /** Only these keys may reach the Google Tasks API. Anything else widens what we declared. */
 const ALLOWED_TASK_KEYS = new Set(["id", "title", "notes", "due", "status", "completed"]);

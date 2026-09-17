@@ -8,9 +8,10 @@ import { CustomPage } from "./types";
 import { FormModal, ConfirmModal, FieldSpec } from "./ui";
 import {
   GoogleToken, authorizeGoogle, completeGoogleAuth, GOOGLE_PROTOCOL_ACTION,
-  GoogleAuthExpiredError, revokeGoogleToken, redactSecrets, isUserCapError,
+  GoogleAuthExpiredError, revokeGoogleToken, redactSecrets, isUserCapError, ensureFreshToken,
 } from "./googletasks";
 import { GTSyncService } from "./gtSync";
+import { DriveBrowserView, VIEW_TYPE_DRIVE } from "./driveBrowser";
 interface PASettings {
   dataRoot: string;
   notifyTasks: boolean;
@@ -72,6 +73,19 @@ export default class MomentumPlugin extends Plugin implements PAHost {
     this.registerView(VIEW_TYPE_PA, (leaf) => new PAView(leaf, this.store, this, this.manifest.name));
     this.registerView(VIEW_TYPE_PA_NAV, (leaf) => new PANavView(leaf, this, this.manifest.name));
     this.registerView(VIEW_TYPE_PA_SIDE, (leaf) => new PASideView(leaf, this.store));
+    this.registerView(VIEW_TYPE_DRIVE, (leaf) => new DriveBrowserView(leaf, async () => {
+      // Reuse the shared Google grant. Returns a fresh access_token, or null when disconnected.
+      const tok = this.settings.googleToken;
+      if (!this.settings.googleTasksEnabled || !tok) return null;
+      try {
+        const fresh = await ensureFreshToken(tok);
+        if (fresh !== tok) { this.settings.googleToken = fresh; await this.saveSettings(); }
+        return fresh.access_token;
+      } catch (e) {
+        if (e instanceof GoogleAuthExpiredError) return null;
+        throw e;
+      }
+    }));
 
     // Google OAuth returns here: the Cloudflare Worker deep-links obsidian://momentum-google
     // with the auth code, which completes the pending authorization (desktop and mobile).
@@ -89,6 +103,22 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       id: "migrate-readable-notes",
       name: "Momentum: migrate notes to readable names",
       callback: () => void this.runReadableNotesMigration(),
+    });
+
+    this.addCommand({
+      id: "momentum-open-drive",
+      name: "Momentum: open Google Drive browser",
+      callback: () => void this.activateDriveView(),
+    });
+
+    this.addCommand({
+      id: "momentum-save-to-drive",
+      name: "Momentum: save current file to Google Drive",
+      callback: () => {
+        const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_DRIVE)[0];
+        if (leaf?.view instanceof DriveBrowserView) void leaf.view.saveActiveToDrive();
+        else new Notice("Abra o navegador de Drive primeiro (Momentum: open Google Drive browser).");
+      },
     });
 
     this.addCommand({
@@ -534,6 +564,16 @@ export default class MomentumPlugin extends Plugin implements PAHost {
     }
     if (navLeaf) void workspace.revealLeaf(navLeaf);
     await this.openPage(this.currentPage);
+  }
+
+  /** Open (or reveal) the Google Drive browser in a center tab. */
+  async activateDriveView(): Promise<void> {
+    const { workspace } = this.app;
+    const existing = workspace.getLeavesOfType(VIEW_TYPE_DRIVE)[0];
+    if (existing) { void workspace.revealLeaf(existing); return; }
+    const leaf = workspace.getLeaf("tab");
+    await leaf.setViewState({ type: VIEW_TYPE_DRIVE, active: true });
+    void workspace.revealLeaf(leaf);
   }
 
   /** Set the active page and ensure a CENTER content view shows it (reusing one if present). */

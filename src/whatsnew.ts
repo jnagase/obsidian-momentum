@@ -6,6 +6,23 @@ export interface ChangeEntry { version: string; sections: ChangeSection[]; }
 /** Release notes shown in the "What's new" dialog, newest first. */
 export const CHANGELOG: ChangeEntry[] = [
   {
+    version: "0.7.1",
+    sections: [
+      {
+        title: "Added — more Google Tasks sync intervals",
+        items: [
+          "You can now set the Google Tasks auto-sync to run every hour, 2 hours, 5 hours, 12 hours or 24 hours, in addition to the existing 5 / 10 / 15 minute options.",
+        ],
+      },
+      {
+        title: "Added — Google Drive browser (early preview)",
+        items: [
+          "A new \"Google Drive\" panel lets you browse your Drive folders inside Obsidian, open a text or Markdown file to edit it, and save it back to Drive. Google Docs and Sheets can be exported (Doc → Markdown, Sheet → CSV) for reading. This is an early building block toward two-way Drive sync; connecting Drive needs Google's verification, which is still in progress.",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.7.0",
     sections: [
       {

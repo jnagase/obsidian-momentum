@@ -1,4 +1,4 @@
-import { Plugin, WorkspaceLeaf, PluginSettingTab, App, Setting, TFolder, TFile, Notice } from "obsidian";
+import { Plugin, WorkspaceLeaf, PluginSettingTab, App, Setting, TFolder, TFile, Notice, normalizePath } from "obsidian";
 import { PADataStore, setDataRoot, planBoardDeletions } from "./data";
 import { PAView, VIEW_TYPE_PA, PAHost, PALocation } from "./view";
 import { PANavView, VIEW_TYPE_PA_NAV } from "./nav";
@@ -12,6 +12,7 @@ import {
 } from "./googletasks";
 import { GTSyncService } from "./gtSync";
 import { DriveBrowserView, VIEW_TYPE_DRIVE } from "./driveBrowser";
+import { runDriveSync, DriveBaseline, DriveBaselineStore, VaultFS } from "./driveSync";
 interface PASettings {
   dataRoot: string;
   notifyTasks: boolean;
@@ -28,6 +29,9 @@ interface PASettings {
   googleDriveEnabled?: boolean;
   driveFolderId?: string;      // the Drive folder synced (empty = My Drive root)
   driveMirrorDir?: string;     // the local vault folder mirrored against Drive
+  driveSyncInterval?: number;  // 0=manual, or minutes
+  driveBaselines?: Record<string, { fileId: string; md5: string; modifiedTime: string; base?: string }>;
+  driveCursor?: string;        // Changes API page token (last clean cycle)
 }
 const DEFAULT_SETTINGS: PASettings = {
   dataRoot: "Momentum Life",
@@ -44,6 +48,9 @@ const DEFAULT_SETTINGS: PASettings = {
   googleDriveEnabled: false,
   driveFolderId: "",
   driveMirrorDir: "Drive",
+  driveSyncInterval: 0,
+  driveBaselines: {},
+  driveCursor: "",
 };
 const LEGACY_DATA_ROOT = "Personal Assistant";
 /** Bump when the readable-notes migration changes so the guarded auto-run re-triggers. */
@@ -131,6 +138,12 @@ export default class MomentumPlugin extends Plugin implements PAHost {
         if (leaf?.view instanceof DriveBrowserView) void leaf.view.saveActiveToDrive();
         else new Notice("Abra o navegador de Drive primeiro (Momentum: open Google Drive browser).");
       },
+    });
+
+    this.addCommand({
+      id: "momentum-sync-drive",
+      name: "Momentum: sync Google Drive now",
+      callback: () => void this.syncGoogleDrive(true),
     });
 
     this.addCommand({
@@ -265,6 +278,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       }
       // Start the periodic sync interval if a non-manual frequency is configured.
       this.resetGoogleSyncInterval();
+      this.resetDriveSyncInterval();
       // Once the vault has settled, seed the known-boards registry and (on later launches)
       // catch boards deleted while this device was closed. First ever run only initializes.
       window.setTimeout(() => void this.detectDeletedBoards(), 6000);
@@ -586,6 +600,103 @@ export default class MomentumPlugin extends Plugin implements PAHost {
     const leaf = workspace.getLeaf("tab");
     await leaf.setViewState({ type: VIEW_TYPE_DRIVE, active: true });
     void workspace.revealLeaf(leaf);
+  }
+
+  /** A fresh Google access_token for Drive, or null when disconnected. */
+  private async driveAccessToken(): Promise<string | null> {
+    const tok = this.settings.googleToken;
+    const on = this.settings.googleDriveEnabled || this.settings.googleTasksEnabled;
+    if (!on || !tok) return null;
+    try {
+      const fresh = await ensureFreshToken(tok);
+      if (fresh !== tok) { this.settings.googleToken = fresh; await this.saveSettings(); }
+      return fresh.access_token;
+    } catch (e) {
+      if (e instanceof GoogleAuthExpiredError) return null;
+      throw e;
+    }
+  }
+
+  /** DriveBaselineStore backed by settings.driveBaselines (persisted in data.json). */
+  private driveBaselineStore(): DriveBaselineStore {
+    const map = (this.settings.driveBaselines ??= {});
+    return {
+      get: (n) => map[n] as DriveBaseline | undefined,
+      set: (n, b) => { map[n] = b; },
+      remove: (n) => { delete map[n]; },
+      names: () => Object.keys(map),
+      getCursor: () => this.settings.driveCursor || undefined,
+      setCursor: (t) => { this.settings.driveCursor = t; },
+      save: async () => { await this.saveSettings(); },
+    };
+  }
+
+  /** VaultFS over the configured mirror folder. */
+  private driveVaultFS(): VaultFS {
+    const dir = normalizePath(this.settings.driveMirrorDir || "Drive");
+    const p = (name: string) => normalizePath(`${dir}/${name}`);
+    return {
+      list: async () => {
+        const folder = this.app.vault.getAbstractFileByPath(dir);
+        if (!(folder instanceof TFolder)) return [];
+        return folder.children.filter((c): c is TFile => c instanceof TFile).map((f) => f.name);
+      },
+      read: async (name) => {
+        const f = this.app.vault.getAbstractFileByPath(p(name));
+        return f instanceof TFile ? this.app.vault.read(f) : "";
+      },
+      write: async (name, content) => {
+        if (!this.app.vault.getAbstractFileByPath(dir)) await this.app.vault.createFolder(dir).catch(() => {});
+        const f = this.app.vault.getAbstractFileByPath(p(name));
+        if (f instanceof TFile) await this.app.vault.modify(f, content);
+        else await this.app.vault.create(p(name), content);
+      },
+      exists: async (name) => this.app.vault.getAbstractFileByPath(p(name)) instanceof TFile,
+      trash: async (name) => {
+        const f = this.app.vault.getAbstractFileByPath(p(name));
+        if (f instanceof TFile) await this.app.vault.trash(f, false); // to Obsidian's .trash (recoverable)
+      },
+    };
+  }
+
+  /** Run one bidirectional Drive sync cycle. `confirmed` (manual) bypasses the mass-change guard. */
+  async syncGoogleDrive(confirmed = false): Promise<void> {
+    const token = await this.driveAccessToken();
+    if (!token) { new Notice("Google Drive: não conectado."); return; }
+    try {
+      const result = await runDriveSync({
+        token,
+        driveFolderId: this.settings.driveFolderId || undefined,
+        fs: this.driveVaultFS(),
+        baselines: this.driveBaselineStore(),
+        confirmed,
+      });
+      await this.saveSettings();
+      if (result.blocked) {
+        new Notice(`Drive: ${result.blocked} mudanças pendentes (acima do limite). Use "Sync now" para confirmar.`);
+      } else {
+        const parts = [
+          result.pushed ? `↑${result.pushed}` : "",
+          result.pulled ? `↓${result.pulled}` : "",
+          result.merged ? `⇄${result.merged}` : "",
+          result.conflicted ? `⚠︎${result.conflicted}` : "",
+          (result.deletedLocal + result.deletedRemote) ? `🗑${result.deletedLocal + result.deletedRemote}` : "",
+        ].filter(Boolean).join(" ");
+        new Notice(`Drive sync: ${parts || "nada a fazer"}${result.errors.length ? ` (${result.errors.length} erros)` : ""}.`);
+      }
+    } catch (e) {
+      new Notice(`Drive sync falhou: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  private driveSyncTimer: number | null = null;
+  /** (Re)start the periodic Drive sync based on settings.driveSyncInterval. */
+  resetDriveSyncInterval(): void {
+    if (this.driveSyncTimer !== null) { window.clearInterval(this.driveSyncTimer); this.driveSyncTimer = null; }
+    const mins = this.settings.driveSyncInterval;
+    if (!mins || !this.settings.googleDriveEnabled || !this.settings.googleToken) return;
+    this.driveSyncTimer = window.setInterval(() => void this.syncGoogleDrive(false), mins * 60_000);
+    this.registerInterval(this.driveSyncTimer);
   }
 
   /** Set the active page and ensure a CENTER content view shows it (reusing one if present). */
@@ -1286,6 +1397,35 @@ class PASettingTab extends PluginSettingTab {
             void this.plugin.activateDriveView();
           })
         );
+
+      if (connected) {
+        new Setting(containerEl)
+          .setName("Drive auto-sync interval")
+          .setDesc("How often to sync the Drive folder with the vault mirror folder.")
+          .addDropdown((d) => {
+            d.addOption("0", "Manual only");
+            d.addOption("5", "Every 5 minutes");
+            d.addOption("15", "Every 15 minutes");
+            d.addOption("60", "Every hour");
+            d.addOption("360", "Every 6 hours");
+            d.addOption("1440", "Every 24 hours");
+            d.setValue(String(this.plugin.settings.driveSyncInterval ?? 0));
+            d.onChange(async (v) => {
+              this.plugin.settings.driveSyncInterval = parseInt(v, 10) || 0;
+              await this.plugin.saveSettings();
+              this.plugin.resetDriveSyncInterval();
+            });
+          });
+
+        new Setting(containerEl)
+          .setName("Sync Drive now")
+          .setDesc("Bidirectional sync: push, pull, 3-way merge, and safe deletion.")
+          .addButton((b) =>
+            b.setButtonText("Sync now").setCta().onClick(() => {
+              void this.plugin.syncGoogleDrive(true); // manual → bypasses mass-change guard
+            })
+          );
+      }
     }
   }
 }

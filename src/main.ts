@@ -24,6 +24,10 @@ interface PASettings {
   googleSyncInterval: number; // 0=manual, or minutes: 5, 10, 15, 60, 120, 300, 720, 1440
   googleToken: GoogleToken | null;
   gtBaselines?: Record<string, { title: string; status: string; due: string }>;
+  // Google Drive integration (block: settings toggle + two-column browser).
+  googleDriveEnabled?: boolean;
+  driveFolderId?: string;      // the Drive folder synced (empty = My Drive root)
+  driveMirrorDir?: string;     // the local vault folder mirrored against Drive
 }
 const DEFAULT_SETTINGS: PASettings = {
   dataRoot: "Momentum Life",
@@ -37,6 +41,9 @@ const DEFAULT_SETTINGS: PASettings = {
   googleSyncInterval: 0,   // manual by default
   googleToken: null,
   gtBaselines: {},
+  googleDriveEnabled: false,
+  driveFolderId: "",
+  driveMirrorDir: "Drive",
 };
 const LEGACY_DATA_ROOT = "Personal Assistant";
 /** Bump when the readable-notes migration changes so the guarded auto-run re-triggers. */
@@ -73,18 +80,23 @@ export default class MomentumPlugin extends Plugin implements PAHost {
     this.registerView(VIEW_TYPE_PA, (leaf) => new PAView(leaf, this.store, this, this.manifest.name));
     this.registerView(VIEW_TYPE_PA_NAV, (leaf) => new PANavView(leaf, this, this.manifest.name));
     this.registerView(VIEW_TYPE_PA_SIDE, (leaf) => new PASideView(leaf, this.store));
-    this.registerView(VIEW_TYPE_DRIVE, (leaf) => new DriveBrowserView(leaf, async () => {
-      // Reuse the shared Google grant. Returns a fresh access_token, or null when disconnected.
-      const tok = this.settings.googleToken;
-      if (!this.settings.googleTasksEnabled || !tok) return null;
-      try {
-        const fresh = await ensureFreshToken(tok);
-        if (fresh !== tok) { this.settings.googleToken = fresh; await this.saveSettings(); }
-        return fresh.access_token;
-      } catch (e) {
-        if (e instanceof GoogleAuthExpiredError) return null;
-        throw e;
-      }
+    this.registerView(VIEW_TYPE_DRIVE, (leaf) => new DriveBrowserView(leaf, {
+      getToken: async () => {
+        // Reuse the shared Google grant. Returns a fresh access_token, or null when disconnected.
+        const tok = this.settings.googleToken;
+        const anyGoogleOn = this.settings.googleDriveEnabled || this.settings.googleTasksEnabled;
+        if (!anyGoogleOn || !tok) return null;
+        try {
+          const fresh = await ensureFreshToken(tok);
+          if (fresh !== tok) { this.settings.googleToken = fresh; await this.saveSettings(); }
+          return fresh.access_token;
+        } catch (e) {
+          if (e instanceof GoogleAuthExpiredError) return null;
+          throw e;
+        }
+      },
+      mirrorDir: () => this.settings.driveMirrorDir ?? "Drive",
+      driveFolderId: () => this.settings.driveFolderId ?? "",
     }));
 
     // Google OAuth returns here: the Cloudflare Worker deep-links obsidian://momentum-google
@@ -1216,6 +1228,64 @@ class PASettingTab extends PluginSettingTab {
             })
           );
       }
+    }
+
+    // ── Google Drive ──────────────────────────────────────────────────────
+    new Setting(containerEl).setName("Google Drive").setHeading();
+
+    new Setting(containerEl)
+      .setName("Enable Google Drive")
+      .setDesc(
+        "Browse and sync files between a Drive folder and a vault folder. Uses the same Google " +
+        "account as Tasks. The full Drive scope needs Google verification (in progress) — until " +
+        "then, connect with a test-user account.",
+      )
+      .addToggle((t) =>
+        t.setValue(!!this.plugin.settings.googleDriveEnabled).onChange(async (v) => {
+          this.plugin.settings.googleDriveEnabled = v;
+          await this.plugin.saveSettings();
+          rerender();
+        })
+      );
+
+    if (this.plugin.settings.googleDriveEnabled) {
+      new Setting(containerEl)
+        .setName("Google account")
+        .setDesc(connected ? "Connected (shared with Tasks)." : "Not connected.")
+        .addButton((b) => {
+          if (connected) {
+            b.setButtonText("Disconnect").onClick(async () => {
+              await this.plugin.disconnectGoogleTasks();
+              rerender();
+            });
+          } else {
+            b.setButtonText("Connect Google account").setCta().onClick(() => {
+              void this.plugin.connectGoogleTasks().then(() => rerender());
+            });
+          }
+        });
+
+      new Setting(containerEl)
+        .setName("Vault mirror folder")
+        .setDesc("Local folder where Drive files are mirrored for editing.")
+        .addText((t) =>
+          t
+            .setPlaceholder("Drive")
+            .setValue(this.plugin.settings.driveMirrorDir ?? "Drive")
+            .onChange(async (v) => {
+              this.plugin.settings.driveMirrorDir = v.trim() || "Drive";
+              await this.plugin.saveSettings();
+            })
+        );
+
+      new Setting(containerEl)
+        .setName("Open Drive browser")
+        .setDesc("Two-column view: Drive files on one side, vault files on the other.")
+        .addButton((b) =>
+          b.setButtonText("Open").setCta().onClick(() => {
+            void this.plugin.activateDriveView();
+          })
+        );
     }
   }
 }

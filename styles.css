@@ -661,3 +661,15 @@ button.pa-link-btn:focus-visible {
 .pa-linechart{position:relative}
 .pa-chart-tooltip{position:absolute;transform:translate(-50%,-130%);background:var(--background-primary);border:1px solid var(--background-modifier-border);border-radius:6px;padding:3px 7px;font-size:.72rem;color:var(--text-normal);white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .1s;z-index:5;box-shadow:0 2px 6px rgba(0,0,0,.15)}
 .pa-chart-tooltip.visible{opacity:1}
+.pa-drive-header{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}
+.pa-drive-stats{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}
+.pa-drive-chip{display:flex;flex-direction:column;align-items:center;min-width:84px;padding:6px 10px;border:1px solid var(--background-modifier-border);border-radius:8px;background:var(--background-secondary)}
+.pa-drive-chip-v{font-size:1.2rem;font-weight:600;color:var(--text-normal)}
+.pa-drive-chip-l{font-size:.68rem;color:var(--text-muted);text-align:center}
+.pa-drive-cols{display:flex;flex-direction:column;gap:2px}
+.pa-drive-row{display:grid;grid-template-columns:1fr 140px 1fr;align-items:center;gap:8px;padding:4px 6px;border-bottom:1px solid var(--background-modifier-border-hover)}
+.pa-drive-head{font-weight:600;color:var(--text-muted);border-bottom:2px solid var(--background-modifier-border)}
+.pa-drive-cell{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pa-drive-mid{display:flex;align-items:center;gap:6px;justify-content:center;font-size:.75rem;color:var(--text-muted)}
+.pa-drive-mid button{font-size:.7rem;padding:1px 6px}
+.pa-drive-muted{color:var(--text-faint)}

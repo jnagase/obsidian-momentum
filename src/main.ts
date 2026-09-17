@@ -20,7 +20,7 @@ interface PASettings {
   taskFoldersSchema?: number;
   googleTasksEnabled: boolean;
   googleTasksSyncOnStartup: boolean;
-  googleSyncInterval: number; // 0=manual, 5, 10, 15 (minutes)
+  googleSyncInterval: number; // 0=manual, or minutes: 5, 10, 15, 60, 120, 300, 720, 1440
   googleToken: GoogleToken | null;
   gtBaselines?: Record<string, { title: string; status: string; due: string }>;
 }
@@ -1154,6 +1154,11 @@ class PASettingTab extends PluginSettingTab {
             d.addOption("5", "Every 5 minutes");
             d.addOption("10", "Every 10 minutes");
             d.addOption("15", "Every 15 minutes");
+            d.addOption("60", "Every hour");
+            d.addOption("120", "Every 2 hours");
+            d.addOption("300", "Every 5 hours");
+            d.addOption("720", "Every 12 hours");
+            d.addOption("1440", "Every 24 hours");
             d.setValue(String(this.plugin.settings.googleSyncInterval ?? 0));
             d.onChange(async (v) => {
               this.plugin.settings.googleSyncInterval = parseInt(v, 10) || 0;

@@ -1,4 +1,5 @@
 import { ItemView, WorkspaceLeaf, Notice, normalizePath, TFile, TFolder } from "obsidian";
+import { drawDonut } from "./charts";
 import {
   DriveFile,
   listFiles,
@@ -13,15 +14,11 @@ import {
 
 export const VIEW_TYPE_DRIVE = "momentum-drive-browser";
 
-/** Returns a fresh Google access_token, or null when the account isn't connected. */
 export type TokenProvider = () => Promise<string | null>;
 
-/** Config the view reads from the plugin settings. */
 export interface DriveViewConfig {
   getToken: TokenProvider;
-  /** Local vault folder mirrored against the Drive folder. */
   mirrorDir: () => string;
-  /** Drive folder id to sync (empty/undefined = My Drive root). */
   driveFolderId: () => string | undefined;
 }
 
@@ -32,29 +29,47 @@ function extOf(name: string): string {
   return i >= 0 ? name.slice(i + 1).toLowerCase() : "";
 }
 
-/** Per-file reconciliation status shown in the middle column. */
+/** Per-file reconciliation status (see UX research: green=ok, blue=cloud, amber=conflict, gray=ignored). */
 type RowStatus = "only_drive" | "only_local" | "same" | "diff" | "native";
+
+/** Convergent status color language from Dropbox/OneDrive/Nextcloud research. */
+const STATUS_META: Record<RowStatus, { label: string; icon: string; color: string }> = {
+  same:       { label: "Em sync",     icon: "✓", color: "#16a34a" }, // green
+  only_drive: { label: "Só no Drive", icon: "☁", color: "#3b82f6" }, // blue (cloud)
+  only_local: { label: "Só local",    icon: "💾", color: "#0ea5e9" }, // cyan
+  diff:       { label: "Divergente",  icon: "⚠", color: "#f59e0b" }, // amber (conflict)
+  native:     { label: "Google doc",  icon: "G", color: "#9ca3af" }, // gray (read-only export)
+};
 
 interface Row {
   name: string;
   drive?: DriveFile;
   localPath?: string;
   status: RowStatus;
+  size: number;
+  modified: string;
 }
 
+type SortField = "name" | "size" | "modified" | "status";
+
 /**
- * Two-column Google Drive browser rendered INSIDE Obsidian (no iframe — Google blocks that with
- * X-Frame-Options). Left column: files in the chosen Drive folder. Right column: files in the
- * vault mirror folder. The middle shows each file's state (only on one side, in sync, or
- * differing) with manual download/upload actions. A small header dashboard shows vault metrics.
- *
- * This is the manual, visible half of Drive sync. The automatic bidirectional engine
- * (baseline + 3-way merge, spec blocks 4-8) plugs into the same status model later.
+ * Two-column Google Drive browser inside Obsidian, with a status dashboard (donut + counters),
+ * filter chips, search, a "show only diverging" toggle, and sortable columns. Grounded in
+ * dual-pane file-manager + sync-app UX research. No iframe (Google blocks it).
  */
 export class DriveBrowserView extends ItemView {
   private cfg: DriveViewConfig;
+  private dashEl: HTMLElement | null = null;
+  private controlsEl: HTMLElement | null = null;
   private bodyEl: HTMLElement | null = null;
-  private statsEl: HTMLElement | null = null;
+
+  private rows: Row[] = [];
+  private search = "";
+  private activeFilters = new Set<RowStatus>();
+  private onlyDiverging = false;
+  private sortField: SortField = "name";
+  private sortDir: 1 | -1 = 1;
+  private lastToken: string | null = null;
 
   constructor(leaf: WorkspaceLeaf, cfg: DriveViewConfig) {
     super(leaf);
@@ -73,148 +88,207 @@ export class DriveBrowserView extends ItemView {
     const header = root.createDiv({ cls: "pa-drive-header" });
     header.createEl("h3", { text: "Google Drive ⇄ Vault" });
     const refresh = header.createEl("button", { text: "↻ Refresh" });
-    refresh.onclick = () => void this.render();
+    refresh.onclick = () => void this.reload();
 
-    this.statsEl = root.createDiv({ cls: "pa-drive-stats" });
+    this.dashEl = root.createDiv({ cls: "pa-drive-dash" });
+    this.controlsEl = root.createDiv({ cls: "pa-drive-controls" });
     this.bodyEl = root.createDiv({ cls: "pa-drive-cols" });
-    await this.render();
+    await this.reload();
   }
 
-  private renderStats(driveCount: number, localCount: number, inSync: number, diff: number): void {
-    if (!this.statsEl) return;
-    this.statsEl.empty();
-    const vaultNotes = this.app.vault.getMarkdownFiles().length;
-    const allFiles = this.app.vault.getFiles().length;
-    const chip = (label: string, value: string | number) => {
-      const c = this.statsEl!.createDiv({ cls: "pa-drive-chip" });
-      c.createSpan({ cls: "pa-drive-chip-v", text: String(value) });
-      c.createSpan({ cls: "pa-drive-chip-l", text: label });
-    };
-    chip("Notas no vault", vaultNotes);
-    chip("Arquivos no vault", allFiles);
-    chip("No Drive (pasta)", driveCount);
-    chip("Na pasta espelho", localCount);
-    chip("Em sync", inSync);
-    chip("Divergentes/só-um-lado", diff);
-  }
-
-  private async render(): Promise<void> {
-    if (!this.bodyEl) return;
-    this.bodyEl.empty();
+  /** Fetch both sides and rebuild the row model, then render. */
+  private async reload(): Promise<void> {
     const token = await this.cfg.getToken();
+    this.lastToken = token;
+    if (!token) { this.rows = []; this.render(); return; }
 
-    if (!token) {
-      this.bodyEl.createEl("p", {
-        text: "Não conectado ao Google. Ative o Google Drive e conecte a conta nas configurações do Momentum.",
-      });
-      this.renderStats(0, 0, 0, 0);
-      return;
-    }
-
-    // Left side: Drive folder listing.
     let driveFiles: DriveFile[] = [];
     try {
-      driveFiles = await listFiles(token, { folderId: this.cfg.driveFolderId() || undefined });
+      driveFiles = (await listFiles(token, { folderId: this.cfg.driveFolderId() || undefined })).filter((f) => !isFolder(f));
     } catch (e) {
-      this.bodyEl.createEl("p", { text: `Erro ao listar o Drive: ${e instanceof Error ? e.message : String(e)}` });
-      this.renderStats(0, 0, 0, 0);
+      this.rows = [];
+      this.render(`Erro ao listar o Drive: ${e instanceof Error ? e.message : String(e)}`);
       return;
     }
-    driveFiles = driveFiles.filter((f) => !isFolder(f)); // files only, first cut (no recursion yet)
 
-    // Right side: vault mirror folder listing.
     const mirror = normalizePath(this.cfg.mirrorDir());
     const localFiles = this.listLocalMirror(mirror);
+    const localByName = new Map(localFiles.map((p) => [p.split("/").pop()!, p]));
 
-    // Build the reconciliation rows by name.
     const byName = new Map<string, Row>();
     for (const d of driveFiles) {
-      byName.set(d.name, { name: d.name, drive: d, status: isGoogleNative(d) ? "native" : "only_drive" });
+      byName.set(d.name, {
+        name: d.name, drive: d,
+        status: isGoogleNative(d) ? "native" : "only_drive",
+        size: d.size ? parseInt(d.size, 10) : 0,
+        modified: d.modifiedTime ?? "",
+      });
     }
-    for (const lp of localFiles) {
-      const name = lp.split("/").pop()!;
-      const existing = byName.get(name);
-      if (existing) {
-        existing.localPath = lp;
-        existing.status = existing.status === "native" ? "native" : "same"; // size/hash compare comes with the engine
-      } else {
-        byName.set(name, { name, localPath: lp, status: "only_local" });
-      }
+    for (const [name, lp] of localByName) {
+      const ex = byName.get(name);
+      if (ex) { ex.localPath = lp; if (ex.status !== "native") ex.status = "same"; }
+      else byName.set(name, { name, localPath: lp, status: "only_local", size: 0, modified: "" });
     }
+    this.rows = [...byName.values()];
+    this.render();
+  }
 
-    const rows = [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
-    const inSync = rows.filter((r) => r.status === "same").length;
-    const oneSide = rows.filter((r) => r.status === "only_drive" || r.status === "only_local" || r.status === "diff").length;
-    this.renderStats(driveFiles.length, localFiles.length, inSync, oneSide);
+  private render(errorMsg?: string): void {
+    this.renderDashboard();
+    this.renderControls();
+    this.renderBody(errorMsg);
+  }
 
-    // Header row.
-    const head = this.bodyEl.createDiv({ cls: "pa-drive-row pa-drive-head" });
-    head.createDiv({ cls: "pa-drive-cell", text: "Google Drive" });
-    head.createDiv({ cls: "pa-drive-cell pa-drive-mid", text: "Estado" });
-    head.createDiv({ cls: "pa-drive-cell", text: `Vault / ${mirror}` });
+  // ---- dashboard: donut by status + counters ------------------------------------------
+  private renderDashboard(): void {
+    if (!this.dashEl) return;
+    this.dashEl.empty();
+    const counts = this.statusCounts();
 
-    if (rows.length === 0) {
-      this.bodyEl.createEl("p", { text: "(nenhum arquivo dos dois lados)" });
+    const donutWrap = this.dashEl.createDiv({ cls: "pa-drive-donut" });
+    drawDonut(
+      donutWrap,
+      (Object.keys(STATUS_META) as RowStatus[]).map((s) => ({
+        label: STATUS_META[s].label, value: counts[s], color: STATUS_META[s].color,
+      })),
+      130,
+      undefined,
+      () => String(this.rows.length),
+    );
+
+    const chips = this.dashEl.createDiv({ cls: "pa-drive-counters" });
+    const vaultNotes = this.app.vault.getMarkdownFiles().length;
+    const allFiles = this.app.vault.getFiles().length;
+    const counter = (label: string, value: number | string, color?: string) => {
+      const c = chips.createDiv({ cls: "pa-drive-chip" });
+      const v = c.createSpan({ cls: "pa-drive-chip-v", text: String(value) });
+      if (color) v.style.color = color;
+      c.createSpan({ cls: "pa-drive-chip-l", text: label });
+    };
+    counter("Notas no vault", vaultNotes);
+    counter("Arquivos no vault", allFiles);
+    (Object.keys(STATUS_META) as RowStatus[]).forEach((s) =>
+      counter(STATUS_META[s].label, counts[s], STATUS_META[s].color),
+    );
+  }
+
+  private statusCounts(): Record<RowStatus, number> {
+    const c: Record<RowStatus, number> = { same: 0, only_drive: 0, only_local: 0, diff: 0, native: 0 };
+    for (const r of this.rows) c[r.status]++;
+    return c;
+  }
+
+  // ---- controls: search + status filter chips + only-diverging toggle -----------------
+  private renderControls(): void {
+    if (!this.controlsEl) return;
+    this.controlsEl.empty();
+
+    const searchInput = this.controlsEl.createEl("input", { cls: "pa-drive-search", type: "text", placeholder: "Buscar…" });
+    searchInput.value = this.search;
+    searchInput.oninput = () => { this.search = searchInput.value.toLowerCase(); this.renderBody(); };
+
+    const chipRow = this.controlsEl.createDiv({ cls: "pa-drive-filterchips" });
+    (Object.keys(STATUS_META) as RowStatus[]).forEach((s) => {
+      const meta = STATUS_META[s];
+      const chip = chipRow.createEl("button", { cls: "pa-drive-filterchip", text: `${meta.icon} ${meta.label}` });
+      chip.style.borderColor = meta.color;
+      if (this.activeFilters.has(s)) { chip.addClass("active"); chip.style.background = meta.color; chip.style.color = "#fff"; }
+      chip.onclick = () => {
+        if (this.activeFilters.has(s)) this.activeFilters.delete(s); else this.activeFilters.add(s);
+        this.renderControls(); this.renderBody();
+      };
+    });
+
+    const toggle = this.controlsEl.createEl("label", { cls: "pa-drive-toggle" });
+    const cb = toggle.createEl("input", { type: "checkbox" });
+    cb.checked = this.onlyDiverging;
+    cb.onchange = () => { this.onlyDiverging = cb.checked; this.renderBody(); };
+    toggle.createSpan({ text: " Só divergentes" });
+  }
+
+  // ---- body: sortable two-column list -------------------------------------------------
+  private renderBody(errorMsg?: string): void {
+    if (!this.bodyEl) return;
+    this.bodyEl.empty();
+
+    if (!this.lastToken) {
+      this.bodyEl.createEl("p", { text: "Não conectado ao Google. Ative o Google Drive e conecte a conta nas configurações do Momentum." });
       return;
     }
+    if (errorMsg) { this.bodyEl.createEl("p", { text: errorMsg }); return; }
+
+    const head = this.bodyEl.createDiv({ cls: "pa-drive-row pa-drive-head" });
+    head.createDiv({ cls: "pa-drive-cell", text: "Google Drive" });
+    this.sortHeader(head.createDiv({ cls: "pa-drive-cell pa-drive-mid" }), "Estado", "status");
+    head.createDiv({ cls: "pa-drive-cell", text: `Vault / ${normalizePath(this.cfg.mirrorDir())}` });
+
+    const rows = this.visibleRows();
+    if (rows.length === 0) { this.bodyEl.createEl("p", { text: "(nada corresponde ao filtro)" }); return; }
 
     for (const r of rows) {
+      const meta = STATUS_META[r.status];
       const row = this.bodyEl.createDiv({ cls: "pa-drive-row" });
 
-      // Left: Drive side.
       const left = row.createDiv({ cls: "pa-drive-cell" });
       if (r.drive) {
         const exp = r.status === "native" ? EXPORT_MIME[r.drive.mimeType] : undefined;
-        const label = r.status === "native"
-          ? `📄 ${r.name}${exp ? ` (export → .${exp.ext})` : " (não exportável)"}`
-          : `📄 ${r.name}`;
+        const label = r.status === "native" ? `📄 ${r.name}${exp ? ` (→ .${exp.ext})` : ""}` : `📄 ${r.name}`;
         const a = left.createEl("a", { text: label, href: "#" });
-        a.onclick = (e) => { e.preventDefault(); void this.openFromDrive(token, r.drive!); };
-      } else {
-        left.createSpan({ cls: "pa-drive-muted", text: "—" });
-      }
+        a.onclick = (e) => { e.preventDefault(); void this.openFromDrive(this.lastToken!, r.drive!); };
+      } else left.createSpan({ cls: "pa-drive-muted", text: "—" });
 
-      // Middle: status + action.
       const mid = row.createDiv({ cls: "pa-drive-cell pa-drive-mid" });
-      mid.createSpan({ text: this.statusLabel(r.status) });
-      if (r.status === "only_drive") {
-        const b = mid.createEl("button", { text: "↓ baixar" });
-        b.onclick = () => void this.openFromDrive(token, r.drive!);
+      const badge = mid.createSpan({ text: `${meta.icon} ${meta.label}` });
+      badge.style.color = meta.color;
+      if (r.status === "only_drive" || r.status === "native") {
+        const b = mid.createEl("button", { text: "↓" }); b.title = "baixar";
+        b.onclick = () => void this.openFromDrive(this.lastToken!, r.drive!);
       } else if (r.status === "only_local") {
-        const b = mid.createEl("button", { text: "↑ subir" });
-        b.onclick = () => void this.uploadLocal(token, r.localPath!);
+        const b = mid.createEl("button", { text: "↑" }); b.title = "subir";
+        b.onclick = () => void this.uploadLocal(this.lastToken!, r.localPath!);
       }
 
-      // Right: vault side.
       const right = row.createDiv({ cls: "pa-drive-cell" });
       if (r.localPath) {
         const a = right.createEl("a", { text: `📄 ${r.name}`, href: "#" });
         a.onclick = (e) => { e.preventDefault(); void this.openInEditor(r.localPath!); };
-      } else {
-        right.createSpan({ cls: "pa-drive-muted", text: "—" });
+      } else right.createSpan({ cls: "pa-drive-muted", text: "—" });
+    }
+  }
+
+  private sortHeader(el: HTMLElement, label: string, field: SortField): void {
+    const glyph = this.sortField === field ? (this.sortDir === 1 ? " ▲" : " ▼") : "";
+    const a = el.createEl("a", { text: label + glyph, href: "#" });
+    a.onclick = (e) => {
+      e.preventDefault();
+      if (this.sortField === field) this.sortDir = this.sortDir === 1 ? -1 : 1;
+      else { this.sortField = field; this.sortDir = 1; }
+      this.renderBody();
+    };
+  }
+
+  private visibleRows(): Row[] {
+    let rows = this.rows.slice();
+    if (this.search) rows = rows.filter((r) => r.name.toLowerCase().includes(this.search));
+    if (this.activeFilters.size) rows = rows.filter((r) => this.activeFilters.has(r.status));
+    if (this.onlyDiverging) rows = rows.filter((r) => r.status !== "same");
+    const dir = this.sortDir;
+    rows.sort((a, b) => {
+      switch (this.sortField) {
+        case "size": return (a.size - b.size) * dir;
+        case "modified": return a.modified.localeCompare(b.modified) * dir;
+        case "status": return a.status.localeCompare(b.status) * dir;
+        default: return a.name.localeCompare(b.name) * dir;
       }
-    }
+    });
+    return rows;
   }
 
-  private statusLabel(s: RowStatus): string {
-    switch (s) {
-      case "same": return "✓ ";
-      case "only_drive": return "☁︎ só no Drive ";
-      case "only_local": return "💾 só local ";
-      case "diff": return "⚠︎ diferente ";
-      case "native": return "G doc (leitura) ";
-    }
-  }
-
-  /** List markdown/text files directly under the vault mirror folder. */
+  // ---- file operations (unchanged behavior) -------------------------------------------
   private listLocalMirror(dir: string): string[] {
     const folder = this.app.vault.getAbstractFileByPath(dir);
     if (!(folder instanceof TFolder)) return [];
-    const out: string[] = [];
-    for (const child of folder.children) {
-      if (child instanceof TFile) out.push(child.path);
-    }
-    return out;
+    return folder.children.filter((c): c is TFile => c instanceof TFile).map((f) => f.path);
   }
 
   private async openFromDrive(token: string, f: DriveFile): Promise<void> {
@@ -225,21 +299,17 @@ export class DriveBrowserView extends ItemView {
         const text = await exportFile(token, f.id, exp.mime);
         const path = await this.writeMirror(`${f.name}.${exp.ext}`, text, undefined);
         await this.openInEditor(path);
-        new Notice(`Exportado (leitura): ${f.name} → .${exp.ext}. Re-subir NÃO atualiza o original.`);
+        new Notice(`Exportado (leitura): ${f.name} → .${exp.ext}.`);
       } else {
-        const buf = await downloadFile(token, f.id);
-        const text = new TextDecoder().decode(buf);
+        const text = new TextDecoder().decode(await downloadFile(token, f.id));
         const path = await this.writeMirror(f.name, text, f.id);
         await this.openInEditor(path);
-        new Notice(`Aberto ${f.name}. Edite e use "Save to Drive" para re-subir.`);
+        new Notice(`Aberto ${f.name}.`);
       }
-      await this.render();
-    } catch (e) {
-      new Notice(`Falha: ${e instanceof Error ? e.message : String(e)}`);
-    }
+      await this.reload();
+    } catch (e) { new Notice(`Falha: ${e instanceof Error ? e.message : String(e)}`); }
   }
 
-  /** Upload a local mirror file to Drive as a new file in the synced folder. */
   private async uploadLocal(token: string, localPath: string): Promise<void> {
     const file = this.app.vault.getAbstractFileByPath(localPath);
     if (!(file instanceof TFile)) return;
@@ -247,21 +317,15 @@ export class DriveBrowserView extends ItemView {
       const content = await this.app.vault.read(file);
       await createTextFile(token, file.name, content, this.cfg.driveFolderId() || undefined);
       new Notice(`Enviado para o Drive: ${file.name}`);
-      await this.render();
-    } catch (e) {
-      new Notice(`Falha ao subir: ${e instanceof Error ? e.message : String(e)}`);
-    }
+      await this.reload();
+    } catch (e) { new Notice(`Falha ao subir: ${e instanceof Error ? e.message : String(e)}`); }
   }
 
   private async writeMirror(name: string, content: string, driveId: string | undefined): Promise<string> {
     const dir = normalizePath(this.cfg.mirrorDir());
-    if (!this.app.vault.getAbstractFileByPath(dir)) {
-      await this.app.vault.createFolder(dir).catch(() => {});
-    }
+    if (!this.app.vault.getAbstractFileByPath(dir)) await this.app.vault.createFolder(dir).catch(() => {});
     const path = normalizePath(`${dir}/${name}`);
-    const body = driveId && (name.endsWith(".md") || name.endsWith(".txt"))
-      ? `---\ndrive_id: ${driveId}\n---\n${content}`
-      : content;
+    const body = driveId && (name.endsWith(".md") || name.endsWith(".txt")) ? `---\ndrive_id: ${driveId}\n---\n${content}` : content;
     const existing = this.app.vault.getAbstractFileByPath(path);
     if (existing instanceof TFile) await this.app.vault.modify(existing, body);
     else await this.app.vault.create(path, body);
@@ -271,11 +335,9 @@ export class DriveBrowserView extends ItemView {
   private async openInEditor(path: string): Promise<void> {
     const file = this.app.vault.getAbstractFileByPath(path);
     if (!(file instanceof TFile)) return;
-    const leaf = this.app.workspace.getLeaf(true);
-    await leaf.openFile(file);
+    await this.app.workspace.getLeaf(true).openFile(file);
   }
 
-  /** Re-upload the active mirror note back to its Drive file (from its drive_id frontmatter). */
   async saveActiveToDrive(): Promise<void> {
     const token = await this.cfg.getToken();
     if (!token) { new Notice("Não conectado ao Google."); return; }
@@ -285,11 +347,7 @@ export class DriveBrowserView extends ItemView {
     const m = raw.match(/^---\ndrive_id:\s*(\S+)\n---\n([\s\S]*)$/);
     if (!m) { new Notice("Este arquivo não tem drive_id — não veio do Drive."); return; }
     const [, driveId, content] = m;
-    try {
-      await updateTextFile(token, driveId, content);
-      new Notice("Salvo no Google Drive.");
-    } catch (e) {
-      new Notice(`Falha ao salvar: ${e instanceof Error ? e.message : String(e)}`);
-    }
+    try { await updateTextFile(token, driveId, content); new Notice("Salvo no Google Drive."); }
+    catch (e) { new Notice(`Falha ao salvar: ${e instanceof Error ? e.message : String(e)}`); }
   }
 }

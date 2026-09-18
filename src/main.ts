@@ -13,6 +13,7 @@ import {
 import { GTSyncService } from "./gtSync";
 import { DriveBrowserView, VIEW_TYPE_DRIVE } from "./driveBrowser";
 import { runDriveSync, DriveBaseline, DriveBaselineStore, VaultFS } from "./driveSync";
+import { QuickAccessView, VIEW_TYPE_QUICK } from "./quickAccess";
 interface PASettings {
   dataRoot: string;
   notifyTasks: boolean;
@@ -32,6 +33,7 @@ interface PASettings {
   driveSyncInterval?: number;  // 0=manual, or minutes
   driveBaselines?: Record<string, { fileId: string; md5: string; modifiedTime: string; base?: string }>;
   driveCursor?: string;        // Changes API page token (last clean cycle)
+  quickAccessPins?: string[];  // vault-relative paths pinned in the quick-access tab
 }
 const DEFAULT_SETTINGS: PASettings = {
   dataRoot: "Momentum Life",
@@ -51,6 +53,7 @@ const DEFAULT_SETTINGS: PASettings = {
   driveSyncInterval: 0,
   driveBaselines: {},
   driveCursor: "",
+  quickAccessPins: [],
 };
 const LEGACY_DATA_ROOT = "Personal Assistant";
 /** Bump when the readable-notes migration changes so the guarded auto-run re-triggers. */
@@ -105,6 +108,10 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       mirrorDir: () => this.settings.driveMirrorDir ?? "Drive",
       driveFolderId: () => this.settings.driveFolderId ?? "",
     }));
+    this.registerView(VIEW_TYPE_QUICK, (leaf) => new QuickAccessView(leaf, {
+      getPins: () => this.settings.quickAccessPins ?? [],
+      setPins: async (paths) => { this.settings.quickAccessPins = paths; await this.saveSettings(); },
+    }));
 
     // Google OAuth returns here: the Cloudflare Worker deep-links obsidian://momentum-google
     // with the auth code, which completes the pending authorization (desktop and mobile).
@@ -144,6 +151,12 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       id: "momentum-sync-drive",
       name: "Momentum: sync Google Drive now",
       callback: () => void this.syncGoogleDrive(true),
+    });
+
+    this.addCommand({
+      id: "momentum-open-quick-access",
+      name: "Momentum: open Quick Access",
+      callback: () => void this.activateQuickView(),
     });
 
     this.addCommand({
@@ -599,6 +612,16 @@ export default class MomentumPlugin extends Plugin implements PAHost {
     if (existing) { void workspace.revealLeaf(existing); return; }
     const leaf = workspace.getLeaf("tab");
     await leaf.setViewState({ type: VIEW_TYPE_DRIVE, active: true });
+    void workspace.revealLeaf(leaf);
+  }
+
+  /** Open (or reveal) the Quick Access tab in a center tab. */
+  async activateQuickView(): Promise<void> {
+    const { workspace } = this.app;
+    const existing = workspace.getLeavesOfType(VIEW_TYPE_QUICK)[0];
+    if (existing) { void workspace.revealLeaf(existing); return; }
+    const leaf = workspace.getLeaf("tab");
+    await leaf.setViewState({ type: VIEW_TYPE_QUICK, active: true });
     void workspace.revealLeaf(leaf);
   }
 

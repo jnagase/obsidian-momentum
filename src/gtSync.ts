@@ -124,6 +124,21 @@ export function pullCreateStatus(
 ): string {
   return gtStatus === "completed" ? doneCol : (localColBySig.get(sig) ?? firstCol);
 }
+
+/**
+ * Whether a discovered Google list should be materialized as a local board folder right now
+ * (even if empty). True unless: it's already a board, it's the permanent "My Tasks" list (which
+ * pairs with the default board and is handled separately), or its name is tombstoned (a board
+ * the user deleted — never resurrect it). Pure so it can be unit-tested.
+ */
+export function shouldMaterializeBoard(
+  listTitle: string, existingBoards: Set<string>, tombstoned: Set<string>,
+): boolean {
+  if (listTitle === "My Tasks") return false;
+  if (existingBoards.has(listTitle)) return false;
+  if (tombstoned.has(listTitle)) return false;
+  return true;
+}
 /** Deterministic winner among Google ids: smallest by code-point order. Same on every device. */
 function pickWinnerGoogleId(ids: string[]): string {
   return ids.reduce((w, x) => (x < w ? x : w));
@@ -233,9 +248,18 @@ export class GTSyncService {
     // a board is permanent even if a stale Google list of the same name lingers.
     const ignored = new Set(this.store.loadIgnoredBoards());
     const ignoredListIds = new Set(gtLists.filter((l) => ignored.has(l.title)).map((l) => l.id));
+    const existingBoards = new Set(boardNames);
     for (const l of gtLists) {
       if (ignored.has(l.title) || listIdToBoard.has(l.id)) continue;
       listIdToBoard.set(l.id, l.title);
+      // Materialize the board folder NOW, even if the list is empty, so a list created directly
+      // in Google Tasks surfaces as a board immediately (previously a board only appeared once
+      // its first task was pulled — an empty new list stayed invisible). createBoard is
+      // idempotent and respects tombstones (a board the user deleted is not resurrected).
+      if (shouldMaterializeBoard(l.title, existingBoards, ignored)) {
+        try { await this.store.createBoard(l.title); existingBoards.add(l.title); result.linked++; }
+        catch (e) { result.errors.push(`Create board "${l.title}": ${String(e)}`); }
+      }
     }
 
     const boardOf = (t: Task) => t.kanbanName || "My Tasks";

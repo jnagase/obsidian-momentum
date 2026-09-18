@@ -1,4 +1,4 @@
-import { Plugin, WorkspaceLeaf, PluginSettingTab, App, Setting, TFolder, TFile, Notice } from "obsidian";
+import { Plugin, WorkspaceLeaf, PluginSettingTab, App, Setting, TFolder, TFile, Notice, normalizePath } from "obsidian";
 import { PADataStore, setDataRoot, planBoardDeletions } from "./data";
 import { PAView, VIEW_TYPE_PA, PAHost, PALocation } from "./view";
 import { PANavView, VIEW_TYPE_PA_NAV } from "./nav";
@@ -8,9 +8,12 @@ import { CustomPage } from "./types";
 import { FormModal, ConfirmModal, FieldSpec } from "./ui";
 import {
   GoogleToken, authorizeGoogle, completeGoogleAuth, GOOGLE_PROTOCOL_ACTION,
-  GoogleAuthExpiredError, revokeGoogleToken, redactSecrets, isUserCapError,
+  GoogleAuthExpiredError, revokeGoogleToken, redactSecrets, isUserCapError, ensureFreshToken,
 } from "./googletasks";
 import { GTSyncService } from "./gtSync";
+import { DriveBrowserView, VIEW_TYPE_DRIVE } from "./driveBrowser";
+import { runDriveSync, DriveBaseline, DriveBaselineStore, VaultFS } from "./driveSync";
+import { QuickAccessView, VIEW_TYPE_QUICK } from "./quickAccess";
 interface PASettings {
   dataRoot: string;
   notifyTasks: boolean;
@@ -23,6 +26,14 @@ interface PASettings {
   googleSyncInterval: number; // 0=manual, or minutes: 5, 10, 15, 60, 120, 300, 720, 1440
   googleToken: GoogleToken | null;
   gtBaselines?: Record<string, { title: string; status: string; due: string }>;
+  // Google Drive integration (block: settings toggle + two-column browser).
+  googleDriveEnabled?: boolean;
+  driveFolderId?: string;      // the Drive folder synced (empty = My Drive root)
+  driveMirrorDir?: string;     // the local vault folder mirrored against Drive
+  driveSyncInterval?: number;  // 0=manual, or minutes
+  driveBaselines?: Record<string, { fileId: string; md5: string; modifiedTime: string; base?: string }>;
+  driveCursor?: string;        // Changes API page token (last clean cycle)
+  quickAccessPins?: string[];  // vault-relative paths pinned in the quick-access tab
 }
 const DEFAULT_SETTINGS: PASettings = {
   dataRoot: "Momentum Life",
@@ -36,6 +47,13 @@ const DEFAULT_SETTINGS: PASettings = {
   googleSyncInterval: 0,   // manual by default
   googleToken: null,
   gtBaselines: {},
+  googleDriveEnabled: false,
+  driveFolderId: "",
+  driveMirrorDir: "Drive",
+  driveSyncInterval: 0,
+  driveBaselines: {},
+  driveCursor: "",
+  quickAccessPins: [],
 };
 const LEGACY_DATA_ROOT = "Personal Assistant";
 /** Bump when the readable-notes migration changes so the guarded auto-run re-triggers. */
@@ -72,6 +90,28 @@ export default class MomentumPlugin extends Plugin implements PAHost {
     this.registerView(VIEW_TYPE_PA, (leaf) => new PAView(leaf, this.store, this, this.manifest.name));
     this.registerView(VIEW_TYPE_PA_NAV, (leaf) => new PANavView(leaf, this, this.manifest.name));
     this.registerView(VIEW_TYPE_PA_SIDE, (leaf) => new PASideView(leaf, this.store));
+    this.registerView(VIEW_TYPE_DRIVE, (leaf) => new DriveBrowserView(leaf, {
+      getToken: async () => {
+        // Reuse the shared Google grant. Returns a fresh access_token, or null when disconnected.
+        const tok = this.settings.googleToken;
+        const anyGoogleOn = this.settings.googleDriveEnabled || this.settings.googleTasksEnabled;
+        if (!anyGoogleOn || !tok) return null;
+        try {
+          const fresh = await ensureFreshToken(tok);
+          if (fresh !== tok) { this.settings.googleToken = fresh; await this.saveSettings(); }
+          return fresh.access_token;
+        } catch (e) {
+          if (e instanceof GoogleAuthExpiredError) return null;
+          throw e;
+        }
+      },
+      mirrorDir: () => this.settings.driveMirrorDir ?? "Drive",
+      driveFolderId: () => this.settings.driveFolderId ?? "",
+    }));
+    this.registerView(VIEW_TYPE_QUICK, (leaf) => new QuickAccessView(leaf, {
+      getPins: () => this.settings.quickAccessPins ?? [],
+      setPins: async (paths) => { this.settings.quickAccessPins = paths; await this.saveSettings(); },
+    }));
 
     // Google OAuth returns here: the Cloudflare Worker deep-links obsidian://momentum-google
     // with the auth code, which completes the pending authorization (desktop and mobile).
@@ -89,6 +129,34 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       id: "migrate-readable-notes",
       name: "Momentum: migrate notes to readable names",
       callback: () => void this.runReadableNotesMigration(),
+    });
+
+    this.addCommand({
+      id: "momentum-open-drive",
+      name: "Momentum: open Google Drive browser",
+      callback: () => void this.activateDriveView(),
+    });
+
+    this.addCommand({
+      id: "momentum-save-to-drive",
+      name: "Momentum: save current file to Google Drive",
+      callback: () => {
+        const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_DRIVE)[0];
+        if (leaf?.view instanceof DriveBrowserView) void leaf.view.saveActiveToDrive();
+        else new Notice("Open the Drive browser first (Momentum: open Google Drive browser).");
+      },
+    });
+
+    this.addCommand({
+      id: "momentum-sync-drive",
+      name: "Momentum: sync Google Drive now",
+      callback: () => void this.syncGoogleDrive(true),
+    });
+
+    this.addCommand({
+      id: "momentum-open-quick-access",
+      name: "Momentum: open Quick Access",
+      callback: () => void this.activateQuickView(),
     });
 
     this.addCommand({
@@ -223,6 +291,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       }
       // Start the periodic sync interval if a non-manual frequency is configured.
       this.resetGoogleSyncInterval();
+      this.resetDriveSyncInterval();
       // Once the vault has settled, seed the known-boards registry and (on later launches)
       // catch boards deleted while this device was closed. First ever run only initializes.
       window.setTimeout(() => void this.detectDeletedBoards(), 6000);
@@ -536,8 +605,128 @@ export default class MomentumPlugin extends Plugin implements PAHost {
     await this.openPage(this.currentPage);
   }
 
+  /** Open (or reveal) the Google Drive browser in a center tab. */
+  async activateDriveView(): Promise<void> {
+    const { workspace } = this.app;
+    const existing = workspace.getLeavesOfType(VIEW_TYPE_DRIVE)[0];
+    if (existing) { void workspace.revealLeaf(existing); return; }
+    const leaf = workspace.getLeaf("tab");
+    await leaf.setViewState({ type: VIEW_TYPE_DRIVE, active: true });
+    void workspace.revealLeaf(leaf);
+  }
+
+  /** Open (or reveal) the Quick Access tab in a center tab. */
+  async activateQuickView(): Promise<void> {
+    const { workspace } = this.app;
+    const existing = workspace.getLeavesOfType(VIEW_TYPE_QUICK)[0];
+    if (existing) { void workspace.revealLeaf(existing); return; }
+    const leaf = workspace.getLeaf("tab");
+    await leaf.setViewState({ type: VIEW_TYPE_QUICK, active: true });
+    void workspace.revealLeaf(leaf);
+  }
+
+  /** A fresh Google access_token for Drive, or null when disconnected. */
+  private async driveAccessToken(): Promise<string | null> {
+    const tok = this.settings.googleToken;
+    const on = this.settings.googleDriveEnabled || this.settings.googleTasksEnabled;
+    if (!on || !tok) return null;
+    try {
+      const fresh = await ensureFreshToken(tok);
+      if (fresh !== tok) { this.settings.googleToken = fresh; await this.saveSettings(); }
+      return fresh.access_token;
+    } catch (e) {
+      if (e instanceof GoogleAuthExpiredError) return null;
+      throw e;
+    }
+  }
+
+  /** DriveBaselineStore backed by settings.driveBaselines (persisted in data.json). */
+  private driveBaselineStore(): DriveBaselineStore {
+    const map = (this.settings.driveBaselines ??= {});
+    return {
+      get: (n) => map[n] as DriveBaseline | undefined,
+      set: (n, b) => { map[n] = b; },
+      remove: (n) => { delete map[n]; },
+      names: () => Object.keys(map),
+      getCursor: () => this.settings.driveCursor || undefined,
+      setCursor: (t) => { this.settings.driveCursor = t; },
+      save: async () => { await this.saveSettings(); },
+    };
+  }
+
+  /** VaultFS over the configured mirror folder. */
+  private driveVaultFS(): VaultFS {
+    const dir = normalizePath(this.settings.driveMirrorDir || "Drive");
+    const p = (name: string) => normalizePath(`${dir}/${name}`);
+    return {
+      list: async () => {
+        const folder = this.app.vault.getAbstractFileByPath(dir);
+        if (!(folder instanceof TFolder)) return [];
+        return folder.children.filter((c): c is TFile => c instanceof TFile).map((f) => f.name);
+      },
+      read: async (name) => {
+        const f = this.app.vault.getAbstractFileByPath(p(name));
+        return f instanceof TFile ? this.app.vault.read(f) : "";
+      },
+      write: async (name, content) => {
+        if (!this.app.vault.getAbstractFileByPath(dir)) await this.app.vault.createFolder(dir).catch(() => {});
+        const f = this.app.vault.getAbstractFileByPath(p(name));
+        if (f instanceof TFile) await this.app.vault.modify(f, content);
+        else await this.app.vault.create(p(name), content);
+      },
+      exists: async (name) => this.app.vault.getAbstractFileByPath(p(name)) instanceof TFile,
+      trash: async (name) => {
+        const f = this.app.vault.getAbstractFileByPath(p(name));
+        if (f instanceof TFile) await this.app.vault.trash(f, false); // to Obsidian's .trash (recoverable)
+      },
+    };
+  }
+
+  /** Run one bidirectional Drive sync cycle. `confirmed` (manual) bypasses the mass-change guard. */
+  async syncGoogleDrive(confirmed = false): Promise<void> {
+    const token = await this.driveAccessToken();
+    if (!token) { new Notice("Google Drive: not connected."); return; }
+    try {
+      const result = await runDriveSync({
+        token,
+        driveFolderId: this.settings.driveFolderId || undefined,
+        fs: this.driveVaultFS(),
+        baselines: this.driveBaselineStore(),
+        confirmed,
+      });
+      await this.saveSettings();
+      if (result.blocked) {
+        new Notice(`Drive: ${result.blocked} pending changes (over the limit). Use "Sync now" to confirm.`);
+      } else {
+        const parts = [
+          result.pushed ? `↑${result.pushed}` : "",
+          result.pulled ? `↓${result.pulled}` : "",
+          result.merged ? `⇄${result.merged}` : "",
+          result.conflicted ? `⚠︎${result.conflicted}` : "",
+          (result.deletedLocal + result.deletedRemote) ? `🗑${result.deletedLocal + result.deletedRemote}` : "",
+        ].filter(Boolean).join(" ");
+        new Notice(`Drive sync: ${parts || "nothing to do"}${result.errors.length ? ` (${result.errors.length} errors)` : ""}.`);
+      }
+    } catch (e) {
+      new Notice(`Drive sync failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  private driveSyncTimer: number | null = null;
+  /** (Re)start the periodic Drive sync based on settings.driveSyncInterval. */
+  resetDriveSyncInterval(): void {
+    if (this.driveSyncTimer !== null) { window.clearInterval(this.driveSyncTimer); this.driveSyncTimer = null; }
+    const mins = this.settings.driveSyncInterval;
+    if (!mins || !this.settings.googleDriveEnabled || !this.settings.googleToken) return;
+    this.driveSyncTimer = window.setInterval(() => void this.syncGoogleDrive(false), mins * 60_000);
+    this.registerInterval(this.driveSyncTimer);
+  }
+
   /** Set the active page and ensure a CENTER content view shows it (reusing one if present). */
   async openPage(id: string): Promise<void> {
+    // Quick Access and Google Drive are dedicated ItemViews, not PAView pages.
+    if (id === "quick-access") { this.currentPage = id; this.refreshNav(); return void this.activateQuickView(); }
+    if (id === "drive") { this.currentPage = id; this.refreshNav(); return void this.activateDriveView(); }
     this.currentPage = id;
     const { workspace } = this.app;
     let leaf = this.findCenterPAView();
@@ -559,6 +748,8 @@ export default class MomentumPlugin extends Plugin implements PAHost {
 
   /** Open a page in a chosen workspace location as an independent view. */
   async openPageIn(id: string, location: PALocation): Promise<void> {
+    if (id === "quick-access") { this.currentPage = id; this.refreshNav(); return void this.activateQuickView(); }
+    if (id === "drive") { this.currentPage = id; this.refreshNav(); return void this.activateDriveView(); }
     this.currentPage = id;
     const { workspace } = this.app;
     let leaf: WorkspaceLeaf | null;
@@ -1173,6 +1364,93 @@ class PASettingTab extends PluginSettingTab {
           .addButton((b) =>
             b.setButtonText("Sync now").setCta().onClick(() => {
               void this.plugin.syncGoogleTasks();
+            })
+          );
+      }
+    }
+
+    // ── Google Drive ──────────────────────────────────────────────────────
+    new Setting(containerEl).setName("Google Drive").setHeading();
+
+    new Setting(containerEl)
+      .setName("Enable Google Drive")
+      .setDesc(
+        "Browse and sync files between a Drive folder and a vault folder. Uses the same Google " +
+        "account as Tasks. The full Drive scope needs Google verification (in progress) — until " +
+        "then, connect with a test-user account.",
+      )
+      .addToggle((t) =>
+        t.setValue(!!this.plugin.settings.googleDriveEnabled).onChange(async (v) => {
+          this.plugin.settings.googleDriveEnabled = v;
+          await this.plugin.saveSettings();
+          rerender();
+        })
+      );
+
+    if (this.plugin.settings.googleDriveEnabled) {
+      new Setting(containerEl)
+        .setName("Google account")
+        .setDesc(connected ? "Connected (shared with Tasks)." : "Not connected.")
+        .addButton((b) => {
+          if (connected) {
+            b.setButtonText("Disconnect").onClick(async () => {
+              await this.plugin.disconnectGoogleTasks();
+              rerender();
+            });
+          } else {
+            b.setButtonText("Connect Google account").setCta().onClick(() => {
+              void this.plugin.connectGoogleTasks().then(() => rerender());
+            });
+          }
+        });
+
+      new Setting(containerEl)
+        .setName("Vault mirror folder")
+        .setDesc("Local folder where Drive files are mirrored for editing.")
+        .addText((t) =>
+          t
+            .setPlaceholder("Drive")
+            .setValue(this.plugin.settings.driveMirrorDir ?? "Drive")
+            .onChange(async (v) => {
+              this.plugin.settings.driveMirrorDir = v.trim() || "Drive";
+              await this.plugin.saveSettings();
+            })
+        );
+
+      new Setting(containerEl)
+        .setName("Open Drive browser")
+        .setDesc("Two-column view: Drive files on one side, vault files on the other.")
+        .addButton((b) =>
+          b.setButtonText("Open").setCta().onClick(() => {
+            void this.plugin.activateDriveView();
+          })
+        );
+
+      if (connected) {
+        new Setting(containerEl)
+          .setName("Drive auto-sync interval")
+          .setDesc("How often to sync the Drive folder with the vault mirror folder.")
+          .addDropdown((d) => {
+            d.addOption("0", "Manual only");
+            d.addOption("5", "Every 5 minutes");
+            d.addOption("15", "Every 15 minutes");
+            d.addOption("60", "Every hour");
+            d.addOption("360", "Every 6 hours");
+            d.addOption("1440", "Every 24 hours");
+            d.setValue(String(this.plugin.settings.driveSyncInterval ?? 0));
+            d.onChange(async (v) => {
+              this.plugin.settings.driveSyncInterval = parseInt(v, 10) || 0;
+              await this.plugin.saveSettings();
+              this.plugin.resetDriveSyncInterval();
+            });
+          });
+
+        new Setting(containerEl)
+          .setName("Sync Drive now")
+          .setDesc("Bidirectional sync: push, pull, 3-way merge, and safe deletion.")
+          .addButton((b) =>
+            b.setButtonText("Sync now").setCta().onClick(() => {
+              void this.plugin.syncGoogleDrive(true); // manual → bypasses mass-change guard
             })
           );
       }

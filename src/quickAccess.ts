@@ -45,7 +45,7 @@ export class QuickAccessView extends ItemView {
   async onOpen(): Promise<void> {
     const root = this.contentEl;
     root.empty();
-    root.addClass("pa-root", "pa-quick-root");
+    root.addClass("pa-quick-root");
     root.createEl("h3", { text: "⭐ Acesso rápido" });
     this.bodyEl = root.createDiv();
     this.render();
@@ -73,8 +73,8 @@ export class QuickAccessView extends ItemView {
     const total = files.length || 1;
     const palette = ["#7c3aed", "#3b82f6", "#16a34a", "#f59e0b", "#ef4444", "#0ea5e9"];
 
-    const sec = this.bodyEl!.createDiv({ cls: "pa-quick-sec" });
-    sec.createEl("div", { cls: "pa-quick-sec-title", text: `Vault — ${files.length} arquivos` });
+    const sec = this.bodyEl!.createDiv({ cls: "pa-panel pa-quick-sec" });
+    sec.createEl("div", { cls: "pa-panel-title", text: `Vault — ${files.length} arquivos` });
     const bar = sec.createDiv({ cls: "pa-quick-bar" });
     top.forEach(([ext, n], i) => {
       const seg = bar.createDiv({ cls: "pa-quick-bar-seg" });
@@ -93,8 +93,8 @@ export class QuickAccessView extends ItemView {
 
   // ---- fixados: curated grid of cards -------------------------------------------------
   private renderPinned(): void {
-    const sec = this.bodyEl!.createDiv({ cls: "pa-quick-sec" });
-    sec.createEl("div", { cls: "pa-quick-sec-title", text: "📌 Fixados" });
+    const sec = this.bodyEl!.createDiv({ cls: "pa-panel pa-quick-sec" });
+    sec.createEl("div", { cls: "pa-panel-title", text: "📌 Fixados" });
     const pins = this.cfg.getPins();
     if (pins.length === 0) {
       sec.createEl("p", { cls: "pa-drive-muted", text: "Nada fixado ainda. Abra um arquivo e clique em 📌 na lista de recentes." });
@@ -123,8 +123,8 @@ export class QuickAccessView extends ItemView {
 
   // ---- recentes: dynamic list from getLastOpenFiles() ---------------------------------
   private renderRecents(): void {
-    const sec = this.bodyEl!.createDiv({ cls: "pa-quick-sec" });
-    sec.createEl("div", { cls: "pa-quick-sec-title", text: "🕘 Recentes" });
+    const sec = this.bodyEl!.createDiv({ cls: "pa-panel pa-quick-sec" });
+    sec.createEl("div", { cls: "pa-panel-title", text: "🕘 Recentes" });
     const recents = this.app.workspace.getLastOpenFiles().slice(0, 12);
     if (recents.length === 0) { sec.createEl("p", { cls: "pa-drive-muted", text: "Sem arquivos recentes." }); return; }
     const pins = new Set(this.cfg.getPins());

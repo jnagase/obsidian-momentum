@@ -663,9 +663,6 @@ button.pa-link-btn:focus-visible {
 .pa-chart-tooltip.visible{opacity:1}
 .pa-drive-header{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}
 .pa-drive-stats{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}
-.pa-drive-chip{display:flex;flex-direction:column;align-items:center;min-width:84px;padding:6px 10px;border:1px solid var(--background-modifier-border);border-radius:8px;background:var(--background-secondary)}
-.pa-drive-chip-v{font-size:1.2rem;font-weight:600;color:var(--text-normal)}
-.pa-drive-chip-l{font-size:.68rem;color:var(--text-muted);text-align:center}
 .pa-drive-cols{display:flex;flex-direction:column;gap:2px}
 .pa-drive-row{display:grid;grid-template-columns:1fr 140px 1fr;align-items:center;gap:8px;padding:4px 6px;border-bottom:1px solid var(--background-modifier-border-hover)}
 .pa-drive-head{font-weight:600;color:var(--text-muted);border-bottom:2px solid var(--background-modifier-border)}
@@ -673,9 +670,11 @@ button.pa-link-btn:focus-visible {
 .pa-drive-mid{display:flex;align-items:center;gap:6px;justify-content:center;font-size:.75rem;color:var(--text-muted)}
 .pa-drive-mid button{font-size:.7rem;padding:1px 6px}
 .pa-drive-muted{color:var(--text-faint)}
-.pa-drive-dash{display:flex;gap:16px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
+.pa-drive-root,.pa-quick-root{padding:16px 20px;overflow:auto;font-size:14px}
+.pa-drive-dash{margin-bottom:10px}
+.pa-drive-dash-inner{display:flex;gap:16px;align-items:center;flex-wrap:wrap}
 .pa-drive-donut{flex:0 0 auto}
-.pa-drive-counters{display:flex;flex-wrap:wrap;gap:8px}
+.pa-drive-counters{flex:1;grid-template-columns:repeat(auto-fit,minmax(90px,1fr));margin-bottom:0}
 .pa-drive-controls{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:10px}
 .pa-drive-search{flex:1 1 160px;min-width:120px;padding:4px 8px;border:1px solid var(--background-modifier-border);border-radius:6px;background:var(--background-primary);color:var(--text-normal)}
 .pa-drive-filterchips{display:flex;flex-wrap:wrap;gap:6px}
@@ -685,7 +684,6 @@ button.pa-link-btn:focus-visible {
 .pa-drive-mid a{color:var(--text-muted);text-decoration:none}
 /* quick access */
 .pa-quick-sec{margin-bottom:18px}
-.pa-quick-sec-title{font-weight:600;color:var(--text-muted);margin-bottom:6px}
 .pa-quick-bar{display:flex;height:14px;border-radius:7px;overflow:hidden;background:var(--background-modifier-border)}
 .pa-quick-bar-seg{height:100%}
 .pa-quick-legend{display:flex;flex-wrap:wrap;gap:10px;margin-top:6px;font-size:.72rem;color:var(--text-muted)}

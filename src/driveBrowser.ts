@@ -83,16 +83,16 @@ export class DriveBrowserView extends ItemView {
   async onOpen(): Promise<void> {
     const root = this.contentEl;
     root.empty();
-    root.addClass("pa-root", "pa-drive-root");
+    root.addClass("pa-drive-root");
 
-    const header = root.createDiv({ cls: "pa-drive-header" });
+    const header = root.createDiv({ cls: "pa-section-head pa-drive-header" });
     header.createEl("h3", { text: "Google Drive ⇄ Vault" });
-    const refresh = header.createEl("button", { text: "↻ Refresh" });
+    const refresh = header.createEl("button", { cls: "pa-mini-btn", text: "↻ Refresh" });
     refresh.onclick = () => void this.reload();
 
     this.dashEl = root.createDiv({ cls: "pa-drive-dash" });
-    this.controlsEl = root.createDiv({ cls: "pa-drive-controls" });
-    this.bodyEl = root.createDiv({ cls: "pa-drive-cols" });
+    this.controlsEl = root.createDiv({ cls: "pa-panel pa-drive-controls" });
+    this.bodyEl = root.createDiv({ cls: "pa-panel pa-drive-cols" });
     await this.reload();
   }
 
@@ -143,9 +143,11 @@ export class DriveBrowserView extends ItemView {
   private renderDashboard(): void {
     if (!this.dashEl) return;
     this.dashEl.empty();
+    this.dashEl.addClass("pa-panel");
     const counts = this.statusCounts();
 
-    const donutWrap = this.dashEl.createDiv({ cls: "pa-drive-donut" });
+    const inner = this.dashEl.createDiv({ cls: "pa-drive-dash-inner" });
+    const donutWrap = inner.createDiv({ cls: "pa-drive-donut" });
     drawDonut(
       donutWrap,
       (Object.keys(STATUS_META) as RowStatus[]).map((s) => ({
@@ -156,14 +158,14 @@ export class DriveBrowserView extends ItemView {
       () => String(this.rows.length),
     );
 
-    const chips = this.dashEl.createDiv({ cls: "pa-drive-counters" });
+    const chips = inner.createDiv({ cls: "pa-stats-row pa-drive-counters" });
     const vaultNotes = this.app.vault.getMarkdownFiles().length;
     const allFiles = this.app.vault.getFiles().length;
     const counter = (label: string, value: number | string, color?: string) => {
-      const c = chips.createDiv({ cls: "pa-drive-chip" });
-      const v = c.createSpan({ cls: "pa-drive-chip-v", text: String(value) });
+      const c = chips.createDiv({ cls: "pa-stat" });
+      const v = c.createSpan({ cls: "pa-stat-value", text: String(value) });
       if (color) v.style.color = color;
-      c.createSpan({ cls: "pa-drive-chip-l", text: label });
+      c.createDiv({ cls: "pa-stat-label", text: label });
     };
     counter("Notas no vault", vaultNotes);
     counter("Arquivos no vault", allFiles);
@@ -241,10 +243,10 @@ export class DriveBrowserView extends ItemView {
       const badge = mid.createSpan({ text: `${meta.icon} ${meta.label}` });
       badge.style.color = meta.color;
       if (r.status === "only_drive" || r.status === "native") {
-        const b = mid.createEl("button", { text: "↓" }); b.title = "baixar";
+        const b = mid.createEl("button", { cls: "pa-mini-btn", text: "↓" }); b.title = "baixar";
         b.onclick = () => void this.openFromDrive(this.lastToken!, r.drive!);
       } else if (r.status === "only_local") {
-        const b = mid.createEl("button", { text: "↑" }); b.title = "subir";
+        const b = mid.createEl("button", { cls: "pa-mini-btn", text: "↑" }); b.title = "subir";
         b.onclick = () => void this.uploadLocal(this.lastToken!, r.localPath!);
       }
 

@@ -700,3 +700,8 @@ button.pa-link-btn:focus-visible {
 .pa-quick-listname{flex:1;text-decoration:none;color:var(--text-normal)}
 .pa-quick-listmeta{font-size:.7rem;color:var(--text-faint)}
 .pa-quick-pin,.pa-quick-listrow button{background:transparent;border:none;cursor:pointer;font-size:.85rem}
+.pa-treemap{position:relative;width:100%;border-radius:8px;overflow:hidden;background:var(--background-modifier-border)}
+.pa-treemap-tile{position:absolute;box-sizing:border-box;border:1px solid var(--background-primary);overflow:hidden;display:flex;align-items:flex-start}
+.pa-treemap-lbl{font-size:.65rem;color:#fff;padding:2px 4px;text-shadow:0 1px 2px rgba(0,0,0,.5);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+.pa-quick-toprow{display:flex;gap:20px;align-items:center;flex-wrap:wrap}
+.pa-quick-counters{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;flex:1;min-width:180px}

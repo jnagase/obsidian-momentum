@@ -414,3 +414,54 @@ export function drawScatter(
 
   wrap.appendChild(svg);
 }
+
+/** One tile of a treemap. */
+export interface TreemapTile { label: string; value: number; color: string; onClick?: () => void; }
+
+/**
+ * A WinDirStat-style treemap: area of each tile ∝ value. Uses a simple slice-and-dice split
+ * (alternating horizontal/vertical) — good enough for a folder/type size overview, no SVG.
+ * Renders nested absolutely-positioned divs inside a fixed-height box.
+ */
+export function drawTreemap(parent: HTMLElement, tiles: TreemapTile[], height = 220): void {
+  const box = parent.createDiv({ cls: "pa-treemap" });
+  box.style.height = `${height}px`;
+  const items = tiles.filter((t) => t.value > 0).sort((a, b) => b.value - a.value);
+  if (!items.length) { box.createDiv({ cls: "pa-muted", text: "No data yet." }); return; }
+
+  const layout = (list: TreemapTile[], x: number, y: number, w: number, h: number, horizontal: boolean) => {
+    const total = list.reduce((s, t) => s + t.value, 0);
+    if (total <= 0) return;
+    let offset = 0;
+    for (const t of list) {
+      const frac = t.value / total;
+      const tileEl = box.createDiv({ cls: "pa-treemap-tile" });
+      let tw: number, th: number, tx: number, ty: number;
+      if (horizontal) { tw = w * frac; th = h; tx = x + offset; ty = y; offset += tw; }
+      else { tw = w; th = h * frac; tx = x; ty = y + offset; offset += th; }
+      tileEl.style.left = `${tx}%`; tileEl.style.top = `${ty}%`;
+      tileEl.style.width = `${tw}%`; tileEl.style.height = `${th}%`;
+      tileEl.style.background = t.color;
+      tileEl.setAttr("title", `${t.label}: ${t.value}`);
+      if (t.value / total > 0.06) tileEl.createSpan({ cls: "pa-treemap-lbl", text: t.label });
+      if (t.onClick) { tileEl.addClass("pa-clickable"); tileEl.onclick = t.onClick; }
+    }
+  };
+  // Split largest-first into two balanced halves recursively for a squarified feel.
+  const recurse = (list: TreemapTile[], x: number, y: number, w: number, h: number, horizontal: boolean) => {
+    if (list.length <= 2 || (w < 12 || h < 12)) { layout(list, x, y, w, h, horizontal); return; }
+    const total = list.reduce((s, t) => s + t.value, 0);
+    let acc = 0, i = 0;
+    while (i < list.length - 1 && acc + list[i].value < total / 2) { acc += list[i].value; i++; }
+    const a = list.slice(0, i + 1), b = list.slice(i + 1);
+    const aFrac = acc + list[i].value ? (acc + list[i].value) / total : 0.5;
+    if (horizontal) {
+      recurse(a, x, y, w * aFrac, h, !horizontal);
+      recurse(b, x + w * aFrac, y, w * (1 - aFrac), h, !horizontal);
+    } else {
+      recurse(a, x, y, w, h * aFrac, !horizontal);
+      recurse(b, x, y + h * aFrac, w, h * (1 - aFrac), !horizontal);
+    }
+  };
+  recurse(items, 0, 0, 100, 100, true);
+}

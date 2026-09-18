@@ -167,8 +167,8 @@ export class DriveBrowserView extends ItemView {
       if (color) v.style.color = color;
       c.createDiv({ cls: "pa-stat-label", text: label });
     };
-    counter("Notas no vault", vaultNotes);
-    counter("Arquivos no vault", allFiles);
+    counter("Vault notes", vaultNotes);
+    counter("Vault files", allFiles);
     (Object.keys(STATUS_META) as RowStatus[]).forEach((s) =>
       counter(STATUS_META[s].label, counts[s], STATUS_META[s].color),
     );

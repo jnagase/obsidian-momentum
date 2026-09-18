@@ -20,6 +20,21 @@ import {
 
 const DEFAULT_TASK_COLUMNS = ["backlog", "in progress", "done"];
 const DEFAULT_TASK_COLUMN_NAMES = { backlog: "📌 BACKLOG", "in progress": "🔄 IN PROGRESS", done: "✅ DONE" };
+
+/** Normalize a column label for tolerant matching: lowercase, hyphens/underscores → space, collapse spaces. */
+export function normCol(s) {
+  return String(s || "").toLowerCase().replace(/[-_]+/g, " ").replace(/\s+/g, " ").trim();
+}
+/**
+ * Resolve a requested status to a REAL column name, tolerant to hyphen/underscore/case/spacing
+ * variants ("in-progress" → "in progress"). Returns the canonical column, or null if unknown.
+ */
+export function resolveColumn(requested, cols) {
+  if (!requested) return null;
+  const want = normCol(requested);
+  return cols.find((c) => normCol(c) === want) ?? null;
+}
+
 const DEFAULT_EXPENSE_CATEGORIES = ["Housing", "Food", "Transport", "Health", "Leisure", "Bills", "Shopping", "Other"];
 const DEFAULT_INCOME_CATEGORIES = ["Salary", "Bonus", "Investments", "Gift", "Other"];
 
@@ -315,8 +330,10 @@ export class MomentumStore {
   async createTask(t) {
     const cfg = await this.loadConfig();
     const cols = cfg.taskColumns;
-    // Validate the column; fall back to the first column if invalid (prevents "status: todo" messes).
-    let status = t.status && cols.includes(t.status) ? t.status : cols[0];
+    // Validate/resolve the requested column tolerantly, so "in-progress", "in_progress" or
+    // "In Progress" all match the real "in progress" column instead of silently falling back to
+    // backlog (cols[0]). Only a genuinely unknown column falls back.
+    let status = resolveColumn(t.status, cols) ?? cols[0];
     // Board = folder (default My Tasks); ensure the folder exists so the task is filed there.
     const board = await this.ensureBoard(t.board);
     const title = (t.title || "Untitled").trim() || "Untitled";
@@ -339,7 +356,7 @@ export class MomentumStore {
     const cfg = await this.loadConfig();
     const raw = await fs.readFile(target.path, "utf8");
     const { fm, body } = this.parse(raw);
-    if (changes.status !== undefined) fm.status = cfg.taskColumns.includes(changes.status) ? changes.status : cfg.taskColumns[0];
+    if (changes.status !== undefined) fm.status = resolveColumn(changes.status, cfg.taskColumns) ?? cfg.taskColumns[0];
     if (changes.priority !== undefined) fm.priority = changes.priority;
     if (changes.title !== undefined) fm.title = changes.title;
     if (changes.board !== undefined) fm.kanban_name = this.boardOrDefault(changes.board);

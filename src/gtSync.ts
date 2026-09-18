@@ -233,9 +233,18 @@ export class GTSyncService {
     // a board is permanent even if a stale Google list of the same name lingers.
     const ignored = new Set(this.store.loadIgnoredBoards());
     const ignoredListIds = new Set(gtLists.filter((l) => ignored.has(l.title)).map((l) => l.id));
+    const existingBoards = new Set(boardNames);
     for (const l of gtLists) {
       if (ignored.has(l.title) || listIdToBoard.has(l.id)) continue;
       listIdToBoard.set(l.id, l.title);
+      // Materialize the board folder NOW, even if the list is empty, so a list created directly
+      // in Google Tasks surfaces as a board immediately (previously a board only appeared once
+      // its first task was pulled — an empty new list stayed invisible). createBoard is
+      // idempotent and respects tombstones (a board the user deleted is not resurrected).
+      if (!existingBoards.has(l.title) && l.title !== "My Tasks") {
+        try { await this.store.createBoard(l.title); existingBoards.add(l.title); result.linked++; }
+        catch (e) { result.errors.push(`Create board "${l.title}": ${String(e)}`); }
+      }
     }
 
     const boardOf = (t: Task) => t.kanbanName || "My Tasks";

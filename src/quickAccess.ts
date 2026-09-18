@@ -98,9 +98,11 @@ export class FileManagerView extends ItemView {
     this.renderTreemap(byFolder);
     this.renderFolderCards(byFolder);
     this.renderActivity(monthly);
-    this.renderRecent(files);
-    this.renderPinned();
-    this.renderRecents();
+    // Recently modified · Pinned · Recently opened — side by side in a 3-column row.
+    const cols = this.bodyEl.createDiv({ cls: "pa-fm-3col" });
+    this.renderRecent(files, cols.createDiv({ cls: "pa-panel" }));
+    this.renderPinned(cols.createDiv({ cls: "pa-panel" }));
+    this.renderRecents(cols.createDiv({ cls: "pa-panel" }));
     this.renderDriveSection();
   }
 
@@ -203,8 +205,7 @@ export class FileManagerView extends ItemView {
   }
 
   // ---- recently modified -------------------------------------------------------------
-  private renderRecent(files: TFile[]): void {
-    const sec = this.bodyEl!.createDiv({ cls: "pa-panel" });
+  private renderRecent(files: TFile[], sec: HTMLElement): void {
     sec.createEl("div", { cls: "pa-panel-title", text: "Recently modified" });
     const recent = files.slice().sort((a, b) => b.stat.mtime - a.stat.mtime).slice(0, 8);
     const list = sec.createDiv({ cls: "pa-quick-list" });
@@ -216,8 +217,7 @@ export class FileManagerView extends ItemView {
     }
   }
 
-  private renderPinned(): void {
-    const sec = this.bodyEl!.createDiv({ cls: "pa-panel" });
+  private renderPinned(sec: HTMLElement): void {
     sec.createEl("div", { cls: "pa-panel-title", text: "📌 Pinned" });
     const pins = this.cfg.getPins();
     if (pins.length === 0) {
@@ -240,8 +240,7 @@ export class FileManagerView extends ItemView {
     }
   }
 
-  private renderRecents(): void {
-    const sec = this.bodyEl!.createDiv({ cls: "pa-panel" });
+  private renderRecents(sec: HTMLElement): void {
     sec.createEl("div", { cls: "pa-panel-title", text: "🕘 Recently opened" });
     const recents = this.app.workspace.getLastOpenFiles().slice(0, 12);
     if (recents.length === 0) { sec.createEl("p", { cls: "pa-drive-muted", text: "No recent files." }); return; }

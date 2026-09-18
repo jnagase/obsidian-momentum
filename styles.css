@@ -711,3 +711,6 @@ button.pa-link-btn:focus-visible {
 .pa-fm-drive-summary::before{content:"▸ ";color:var(--text-muted)}
 .pa-fm-drive[open] .pa-fm-drive-summary::before{content:"▾ "}
 .pa-fm-drive > div{padding:0 12px 12px}
+.pa-fm-3col{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+.pa-fm-3col > .pa-panel{margin-bottom:0;min-width:0}
+@media(max-width:900px){.pa-fm-3col{grid-template-columns:1fr}}

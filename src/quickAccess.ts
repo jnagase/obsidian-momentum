@@ -1,4 +1,4 @@
-import { ItemView, WorkspaceLeaf, TFile, TFolder, setIcon } from "obsidian";
+import { ItemView, WorkspaceLeaf, TFile, TFolder, setIcon, Notice } from "obsidian";
 import { drawDonut, drawTreemap, drawLineChart, drawRing } from "./charts";
 import { DrivePanel, DriveViewConfig } from "./driveBrowser";
 
@@ -259,15 +259,26 @@ export class FileManagerView extends ItemView {
     }
   }
 
-  /** Reveal a top-level folder in Obsidian's file explorer (best-effort). */
+  /** Reveal a folder in Obsidian's native file explorer (expands + highlights it). */
   private openFolder(folder: string): void {
-    if (folder.startsWith("/")) return;
+    if (folder.startsWith("/")) return; // vault root — nothing to reveal
     const f = this.app.vault.getAbstractFileByPath(folder);
-    if (f instanceof TFolder) {
-      // Open the first file inside so the user lands in that folder's context.
-      const firstFile = f.children.find((c): c is TFile => c instanceof TFile);
-      if (firstFile) void this.app.workspace.getLeaf(false).openFile(firstFile);
+    if (!(f instanceof TFolder)) return;
+
+    // Preferred: the built-in File Explorer's revealInFolder — expands the tree to this folder
+    // and highlights it, without opening any file. internalPlugins is not in the public typings.
+    const internal = (this.app as unknown as {
+      internalPlugins?: { getPluginById?: (id: string) => { instance?: { revealInFolder?: (f: TFolder) => void } } | undefined };
+    }).internalPlugins;
+    const instance = internal?.getPluginById?.("file-explorer")?.instance;
+    if (instance?.revealInFolder) {
+      const leaves = this.app.workspace.getLeavesOfType("file-explorer");
+      if (leaves.length) void this.app.workspace.revealLeaf(leaves[0]);
+      instance.revealInFolder(f);
+      return;
     }
+    // Fallback: at least surface the folder name so the click isn't silently dead.
+    new Notice(`Folder: ${folder} (${f.children.length} items)`);
   }
 
   private async togglePin(path: string): Promise<void> {

@@ -143,7 +143,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       callback: () => {
         const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_DRIVE)[0];
         if (leaf?.view instanceof DriveBrowserView) void leaf.view.saveActiveToDrive();
-        else new Notice("Abra o navegador de Drive primeiro (Momentum: open Google Drive browser).");
+        else new Notice("Open the Drive browser first (Momentum: open Google Drive browser).");
       },
     });
 
@@ -685,7 +685,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
   /** Run one bidirectional Drive sync cycle. `confirmed` (manual) bypasses the mass-change guard. */
   async syncGoogleDrive(confirmed = false): Promise<void> {
     const token = await this.driveAccessToken();
-    if (!token) { new Notice("Google Drive: não conectado."); return; }
+    if (!token) { new Notice("Google Drive: not connected."); return; }
     try {
       const result = await runDriveSync({
         token,
@@ -696,7 +696,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       });
       await this.saveSettings();
       if (result.blocked) {
-        new Notice(`Drive: ${result.blocked} mudanças pendentes (acima do limite). Use "Sync now" para confirmar.`);
+        new Notice(`Drive: ${result.blocked} pending changes (over the limit). Use "Sync now" to confirm.`);
       } else {
         const parts = [
           result.pushed ? `↑${result.pushed}` : "",
@@ -705,10 +705,10 @@ export default class MomentumPlugin extends Plugin implements PAHost {
           result.conflicted ? `⚠︎${result.conflicted}` : "",
           (result.deletedLocal + result.deletedRemote) ? `🗑${result.deletedLocal + result.deletedRemote}` : "",
         ].filter(Boolean).join(" ");
-        new Notice(`Drive sync: ${parts || "nada a fazer"}${result.errors.length ? ` (${result.errors.length} erros)` : ""}.`);
+        new Notice(`Drive sync: ${parts || "nothing to do"}${result.errors.length ? ` (${result.errors.length} errors)` : ""}.`);
       }
     } catch (e) {
-      new Notice(`Drive sync falhou: ${e instanceof Error ? e.message : String(e)}`);
+      new Notice(`Drive sync failed: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 

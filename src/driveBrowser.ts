@@ -34,10 +34,10 @@ type RowStatus = "only_drive" | "only_local" | "same" | "diff" | "native";
 
 /** Convergent status color language from Dropbox/OneDrive/Nextcloud research. */
 const STATUS_META: Record<RowStatus, { label: string; icon: string; color: string }> = {
-  same:       { label: "Em sync",     icon: "✓", color: "#16a34a" }, // green
-  only_drive: { label: "Só no Drive", icon: "☁", color: "#3b82f6" }, // blue (cloud)
-  only_local: { label: "Só local",    icon: "💾", color: "#0ea5e9" }, // cyan
-  diff:       { label: "Divergente",  icon: "⚠", color: "#f59e0b" }, // amber (conflict)
+  same:       { label: "In sync",     icon: "✓", color: "#16a34a" }, // green
+  only_drive: { label: "Drive only",  icon: "☁", color: "#3b82f6" }, // blue (cloud)
+  only_local: { label: "Local only",  icon: "💾", color: "#0ea5e9" }, // cyan
+  diff:       { label: "Diverged",    icon: "⚠", color: "#f59e0b" }, // amber (conflict)
   native:     { label: "Google doc",  icon: "G", color: "#9ca3af" }, // gray (read-only export)
 };
 
@@ -107,7 +107,7 @@ export class DriveBrowserView extends ItemView {
       driveFiles = (await listFiles(token, { folderId: this.cfg.driveFolderId() || undefined })).filter((f) => !isFolder(f));
     } catch (e) {
       this.rows = [];
-      this.render(`Erro ao listar o Drive: ${e instanceof Error ? e.message : String(e)}`);
+      this.render(`Error listing Drive: ${e instanceof Error ? e.message : String(e)}`);
       return;
     }
 
@@ -185,7 +185,7 @@ export class DriveBrowserView extends ItemView {
     if (!this.controlsEl) return;
     this.controlsEl.empty();
 
-    const searchInput = this.controlsEl.createEl("input", { cls: "pa-drive-search", type: "text", placeholder: "Buscar…" });
+    const searchInput = this.controlsEl.createEl("input", { cls: "pa-drive-search", type: "text", placeholder: "Search…" });
     searchInput.value = this.search;
     searchInput.oninput = () => { this.search = searchInput.value.toLowerCase(); this.renderBody(); };
 
@@ -205,7 +205,7 @@ export class DriveBrowserView extends ItemView {
     const cb = toggle.createEl("input", { type: "checkbox" });
     cb.checked = this.onlyDiverging;
     cb.onchange = () => { this.onlyDiverging = cb.checked; this.renderBody(); };
-    toggle.createSpan({ text: " Só divergentes" });
+    toggle.createSpan({ text: " Only diverging" });
   }
 
   // ---- body: sortable two-column list -------------------------------------------------
@@ -214,18 +214,18 @@ export class DriveBrowserView extends ItemView {
     this.bodyEl.empty();
 
     if (!this.lastToken) {
-      this.bodyEl.createEl("p", { text: "Não conectado ao Google. Ative o Google Drive e conecte a conta nas configurações do Momentum." });
+      this.bodyEl.createEl("p", { text: "Not connected to Google. Enable Google Drive and connect your account in Momentum settings." });
       return;
     }
     if (errorMsg) { this.bodyEl.createEl("p", { text: errorMsg }); return; }
 
     const head = this.bodyEl.createDiv({ cls: "pa-drive-row pa-drive-head" });
     head.createDiv({ cls: "pa-drive-cell", text: "Google Drive" });
-    this.sortHeader(head.createDiv({ cls: "pa-drive-cell pa-drive-mid" }), "Estado", "status");
+    this.sortHeader(head.createDiv({ cls: "pa-drive-cell pa-drive-mid" }), "Status", "status");
     head.createDiv({ cls: "pa-drive-cell", text: `Vault / ${normalizePath(this.cfg.mirrorDir())}` });
 
     const rows = this.visibleRows();
-    if (rows.length === 0) { this.bodyEl.createEl("p", { text: "(nada corresponde ao filtro)" }); return; }
+    if (rows.length === 0) { this.bodyEl.createEl("p", { text: "(nothing matches the filter)" }); return; }
 
     for (const r of rows) {
       const meta = STATUS_META[r.status];
@@ -243,10 +243,10 @@ export class DriveBrowserView extends ItemView {
       const badge = mid.createSpan({ text: `${meta.icon} ${meta.label}` });
       badge.style.color = meta.color;
       if (r.status === "only_drive" || r.status === "native") {
-        const b = mid.createEl("button", { cls: "pa-mini-btn", text: "↓" }); b.title = "baixar";
+        const b = mid.createEl("button", { cls: "pa-mini-btn", text: "↓" }); b.title = "download";
         b.onclick = () => void this.openFromDrive(this.lastToken!, r.drive!);
       } else if (r.status === "only_local") {
-        const b = mid.createEl("button", { cls: "pa-mini-btn", text: "↑" }); b.title = "subir";
+        const b = mid.createEl("button", { cls: "pa-mini-btn", text: "↑" }); b.title = "upload";
         b.onclick = () => void this.uploadLocal(this.lastToken!, r.localPath!);
       }
 
@@ -297,19 +297,19 @@ export class DriveBrowserView extends ItemView {
     try {
       if (isGoogleNative(f)) {
         const exp = EXPORT_MIME[f.mimeType];
-        if (!exp) { new Notice("Tipo Google não exportável."); return; }
+        if (!exp) { new Notice("This Google file type can't be exported."); return; }
         const text = await exportFile(token, f.id, exp.mime);
         const path = await this.writeMirror(`${f.name}.${exp.ext}`, text, undefined);
         await this.openInEditor(path);
-        new Notice(`Exportado (leitura): ${f.name} → .${exp.ext}.`);
+        new Notice(`Exported (read-only): ${f.name} → .${exp.ext}.`);
       } else {
         const text = new TextDecoder().decode(await downloadFile(token, f.id));
         const path = await this.writeMirror(f.name, text, f.id);
         await this.openInEditor(path);
-        new Notice(`Aberto ${f.name}.`);
+        new Notice(`Opened ${f.name}.`);
       }
       await this.reload();
-    } catch (e) { new Notice(`Falha: ${e instanceof Error ? e.message : String(e)}`); }
+    } catch (e) { new Notice(`Failed: ${e instanceof Error ? e.message : String(e)}`); }
   }
 
   private async uploadLocal(token: string, localPath: string): Promise<void> {
@@ -318,9 +318,9 @@ export class DriveBrowserView extends ItemView {
     try {
       const content = await this.app.vault.read(file);
       await createTextFile(token, file.name, content, this.cfg.driveFolderId() || undefined);
-      new Notice(`Enviado para o Drive: ${file.name}`);
+      new Notice(`Uploaded to Drive: ${file.name}`);
       await this.reload();
-    } catch (e) { new Notice(`Falha ao subir: ${e instanceof Error ? e.message : String(e)}`); }
+    } catch (e) { new Notice(`Upload failed: ${e instanceof Error ? e.message : String(e)}`); }
   }
 
   private async writeMirror(name: string, content: string, driveId: string | undefined): Promise<string> {
@@ -342,14 +342,14 @@ export class DriveBrowserView extends ItemView {
 
   async saveActiveToDrive(): Promise<void> {
     const token = await this.cfg.getToken();
-    if (!token) { new Notice("Não conectado ao Google."); return; }
+    if (!token) { new Notice("Not connected to Google."); return; }
     const file = this.app.workspace.getActiveFile();
-    if (!(file instanceof TFile)) { new Notice("Nenhum arquivo ativo."); return; }
+    if (!(file instanceof TFile)) { new Notice("No active file."); return; }
     const raw = await this.app.vault.read(file);
     const m = raw.match(/^---\ndrive_id:\s*(\S+)\n---\n([\s\S]*)$/);
-    if (!m) { new Notice("Este arquivo não tem drive_id — não veio do Drive."); return; }
+    if (!m) { new Notice("This file has no drive_id — it didn't come from Drive."); return; }
     const [, driveId, content] = m;
-    try { await updateTextFile(token, driveId, content); new Notice("Salvo no Google Drive."); }
-    catch (e) { new Notice(`Falha ao salvar: ${e instanceof Error ? e.message : String(e)}`); }
+    try { await updateTextFile(token, driveId, content); new Notice("Saved to Google Drive."); }
+    catch (e) { new Notice(`Save failed: ${e instanceof Error ? e.message : String(e)}`); }
   }
 }

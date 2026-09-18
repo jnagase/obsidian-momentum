@@ -22,7 +22,7 @@ export const PAGES = [
   { id: "nutrition", label: "🥗 Nutrition" },
   { id: "studies", label: "📚 Studies" },
   { id: "finances", label: "💰 Finances" },
-  { id: "quick-access", label: "⭐ Acesso rápido" },
+  { id: "quick-access", label: "⭐ Quick Access" },
   { id: "drive", label: "☁️ Google Drive" },
 ];
 

@@ -339,7 +339,7 @@ async function this_conflict(
   while (await fs.exists(cName)) cName = conflictName(cName, () => false);
   await fs.write(cName, remoteText);
   result.conflicted++;
-  result.notes.push(`Conflito em ${name}: cópia remota salva como ${cName}. Sua versão local foi mantida.`);
+  result.notes.push(`Conflict on ${name}: remote copy saved as ${cName}. Your local version was kept.`);
   // Do not update the baseline for `name` — it stays "diverged" until the user resolves it.
 }
 
@@ -350,7 +350,7 @@ async function this_deleteLocal(
   if (await fs.exists(name)) {
     await fs.trash(name);
     result.deletedLocal++;
-    result.notes.push(`Removido localmente (apagado no Drive): ${name} → lixeira.`);
+    result.notes.push(`Removed locally (deleted on Drive): ${name} → trash.`);
   }
   baselines.remove(name);
 }
@@ -363,7 +363,7 @@ async function this_deleteRemote(
   if (fileId) {
     await trashFile(token, fileId);
     result.deletedRemote++;
-    result.notes.push(`Removido no Drive (apagado localmente): ${name} → lixeira do Drive.`);
+    result.notes.push(`Removed on Drive (deleted locally): ${name} → Drive trash.`);
   }
   baselines.remove(name);
 }

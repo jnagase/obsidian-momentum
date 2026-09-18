@@ -8,17 +8,17 @@ export interface QuickAccessConfig {
   setPins: (paths: string[]) => Promise<void>;
 }
 
-/** Relative time label ("2h atrás", "ontem"). */
+/** Relative time label ("2h ago", "yesterday"). */
 function relTime(ms: number): string {
   const diff = Date.now() - ms;
   const min = Math.round(diff / 60000);
-  if (min < 1) return "agora";
-  if (min < 60) return `${min}min atrás`;
+  if (min < 1) return "now";
+  if (min < 60) return `${min}min ago`;
   const h = Math.round(min / 60);
-  if (h < 24) return `${h}h atrás`;
+  if (h < 24) return `${h}h ago`;
   const d = Math.round(h / 24);
-  if (d === 1) return "ontem";
-  if (d < 30) return `${d}d atrás`;
+  if (d === 1) return "yesterday";
+  if (d < 30) return `${d}d ago`;
   return new Date(ms).toLocaleDateString();
 }
 
@@ -39,14 +39,14 @@ export class QuickAccessView extends ItemView {
   }
 
   getViewType(): string { return VIEW_TYPE_QUICK; }
-  getDisplayText(): string { return "Acesso rápido"; }
+  getDisplayText(): string { return "Quick Access"; }
   getIcon(): string { return "star"; }
 
   async onOpen(): Promise<void> {
     const root = this.contentEl;
     root.empty();
     root.addClass("pa-quick-root");
-    root.createEl("h3", { text: "⭐ Acesso rápido" });
+    root.createEl("h3", { text: "⭐ Quick Access" });
     this.bodyEl = root.createDiv();
     this.render();
     // Refresh recents when the active file changes.
@@ -74,7 +74,7 @@ export class QuickAccessView extends ItemView {
     const palette = ["#7c3aed", "#3b82f6", "#16a34a", "#f59e0b", "#ef4444", "#0ea5e9"];
 
     const sec = this.bodyEl!.createDiv({ cls: "pa-panel pa-quick-sec" });
-    sec.createEl("div", { cls: "pa-panel-title", text: `Vault — ${files.length} arquivos` });
+    sec.createEl("div", { cls: "pa-panel-title", text: `Vault — ${files.length} files` });
     const bar = sec.createDiv({ cls: "pa-quick-bar" });
     top.forEach(([ext, n], i) => {
       const seg = bar.createDiv({ cls: "pa-quick-bar-seg" });
@@ -94,10 +94,10 @@ export class QuickAccessView extends ItemView {
   // ---- fixados: curated grid of cards -------------------------------------------------
   private renderPinned(): void {
     const sec = this.bodyEl!.createDiv({ cls: "pa-panel pa-quick-sec" });
-    sec.createEl("div", { cls: "pa-panel-title", text: "📌 Fixados" });
+    sec.createEl("div", { cls: "pa-panel-title", text: "📌 Pinned" });
     const pins = this.cfg.getPins();
     if (pins.length === 0) {
-      sec.createEl("p", { cls: "pa-drive-muted", text: "Nada fixado ainda. Abra um arquivo e clique em 📌 na lista de recentes." });
+      sec.createEl("p", { cls: "pa-drive-muted", text: "Nothing pinned yet. Open a file and click 📌 in the recents list." });
       return;
     }
     const grid = sec.createDiv({ cls: "pa-quick-grid" });
@@ -110,23 +110,23 @@ export class QuickAccessView extends ItemView {
       card.createDiv({ cls: "pa-quick-card-name", text: path.split("/").pop() ?? path });
       if (stale) {
         card.addClass("stale");
-        card.title = "Arquivo não encontrado (movido/apagado). Clique para desafixar.";
+        card.title = "File not found (moved/deleted). Click to unpin.";
         card.onclick = () => void this.togglePin(path);
       } else {
         card.onclick = () => void this.app.workspace.getLeaf(false).openFile(file as TFile);
       }
       const unpin = card.createEl("button", { cls: "pa-quick-unpin", text: "×" });
-      unpin.title = "Desafixar (não apaga o arquivo)";
+      unpin.title = "Unpin (doesn't delete the file)";
       unpin.onclick = (e) => { e.stopPropagation(); void this.togglePin(path); };
     }
   }
 
-  // ---- recentes: dynamic list from getLastOpenFiles() ---------------------------------
+  // ---- recents: dynamic list from getLastOpenFiles() ----------------------------------
   private renderRecents(): void {
     const sec = this.bodyEl!.createDiv({ cls: "pa-panel pa-quick-sec" });
-    sec.createEl("div", { cls: "pa-panel-title", text: "🕘 Recentes" });
+    sec.createEl("div", { cls: "pa-panel-title", text: "🕘 Recents" });
     const recents = this.app.workspace.getLastOpenFiles().slice(0, 12);
-    if (recents.length === 0) { sec.createEl("p", { cls: "pa-drive-muted", text: "Sem arquivos recentes." }); return; }
+    if (recents.length === 0) { sec.createEl("p", { cls: "pa-drive-muted", text: "No recent files." }); return; }
     const pins = new Set(this.cfg.getPins());
     const list = sec.createDiv({ cls: "pa-quick-list" });
     for (const path of recents) {
@@ -137,7 +137,7 @@ export class QuickAccessView extends ItemView {
       name.onclick = (e) => { e.preventDefault(); void this.app.workspace.getLeaf(false).openFile(file); };
       row.createSpan({ cls: "pa-quick-listmeta", text: relTime(file.stat.mtime) });
       const pin = row.createEl("button", { cls: "pa-quick-pin", text: pins.has(path) ? "📌" : "📍" });
-      pin.title = pins.has(path) ? "Desafixar" : "Fixar";
+      pin.title = pins.has(path) ? "Unpin" : "Pin";
       pin.onclick = () => void this.togglePin(path);
     }
   }

@@ -11,9 +11,9 @@ import {
   GoogleAuthExpiredError, revokeGoogleToken, redactSecrets, isUserCapError, ensureFreshToken,
 } from "./googletasks";
 import { GTSyncService } from "./gtSync";
-import { DriveBrowserView, VIEW_TYPE_DRIVE } from "./driveBrowser";
+import { DriveBrowserView, VIEW_TYPE_DRIVE, DriveViewConfig } from "./driveBrowser";
 import { runDriveSync, DriveBaseline, DriveBaselineStore, VaultFS } from "./driveSync";
-import { QuickAccessView, VIEW_TYPE_QUICK } from "./quickAccess";
+import { FileManagerView, VIEW_TYPE_QUICK } from "./quickAccess";
 interface PASettings {
   dataRoot: string;
   notifyTasks: boolean;
@@ -90,27 +90,11 @@ export default class MomentumPlugin extends Plugin implements PAHost {
     this.registerView(VIEW_TYPE_PA, (leaf) => new PAView(leaf, this.store, this, this.manifest.name));
     this.registerView(VIEW_TYPE_PA_NAV, (leaf) => new PANavView(leaf, this, this.manifest.name));
     this.registerView(VIEW_TYPE_PA_SIDE, (leaf) => new PASideView(leaf, this.store));
-    this.registerView(VIEW_TYPE_DRIVE, (leaf) => new DriveBrowserView(leaf, {
-      getToken: async () => {
-        // Reuse the shared Google grant. Returns a fresh access_token, or null when disconnected.
-        const tok = this.settings.googleToken;
-        const anyGoogleOn = this.settings.googleDriveEnabled || this.settings.googleTasksEnabled;
-        if (!anyGoogleOn || !tok) return null;
-        try {
-          const fresh = await ensureFreshToken(tok);
-          if (fresh !== tok) { this.settings.googleToken = fresh; await this.saveSettings(); }
-          return fresh.access_token;
-        } catch (e) {
-          if (e instanceof GoogleAuthExpiredError) return null;
-          throw e;
-        }
-      },
-      mirrorDir: () => this.settings.driveMirrorDir ?? "Drive",
-      driveFolderId: () => this.settings.driveFolderId ?? "",
-    }));
-    this.registerView(VIEW_TYPE_QUICK, (leaf) => new QuickAccessView(leaf, {
+    this.registerView(VIEW_TYPE_DRIVE, (leaf) => new DriveBrowserView(leaf, this.driveViewConfig()));
+    this.registerView(VIEW_TYPE_QUICK, (leaf) => new FileManagerView(leaf, {
       getPins: () => this.settings.quickAccessPins ?? [],
       setPins: async (paths) => { this.settings.quickAccessPins = paths; await this.saveSettings(); },
+      drive: this.driveViewConfig(),
     }));
 
     // Google OAuth returns here: the Cloudflare Worker deep-links obsidian://momentum-google
@@ -155,7 +139,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
 
     this.addCommand({
       id: "momentum-open-quick-access",
-      name: "Momentum: open Quick Access",
+      name: "Momentum: open File Manager",
       callback: () => void this.activateQuickView(),
     });
 
@@ -638,6 +622,15 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       if (e instanceof GoogleAuthExpiredError) return null;
       throw e;
     }
+  }
+
+  /** Config passed to the Drive panel (standalone view and the File Manager section). */
+  private driveViewConfig(): DriveViewConfig {
+    return {
+      getToken: () => this.driveAccessToken(),
+      mirrorDir: () => this.settings.driveMirrorDir ?? "Drive",
+      driveFolderId: () => this.settings.driveFolderId ?? "",
+    };
   }
 
   /** DriveBaselineStore backed by settings.driveBaselines (persisted in data.json). */

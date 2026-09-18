@@ -1,12 +1,14 @@
 import { ItemView, WorkspaceLeaf, TFile, TFolder, setIcon } from "obsidian";
 import { drawDonut, drawTreemap, drawLineChart, drawRing } from "./charts";
+import { DrivePanel, DriveViewConfig } from "./driveBrowser";
 
 export const VIEW_TYPE_QUICK = "momentum-quick-access";
 
-/** Pin persistence — the view reads/writes vault-relative paths (a pin is a path reference). */
+/** Config for the File Manager tab: pin persistence + the embedded Drive panel's config. */
 export interface QuickAccessConfig {
   getPins: () => string[];
   setPins: (paths: string[]) => Promise<void>;
+  drive: DriveViewConfig;
 }
 
 /** Palette shared across the dashboard visualizations. */
@@ -46,9 +48,10 @@ function topFolder(path: string): string {
  *   - Recently modified list + Pinned + Recents
  * All drawn with the project's own chart helpers (drawDonut/drawTreemap/drawLineChart/drawRing).
  */
-export class QuickAccessView extends ItemView {
+export class FileManagerView extends ItemView {
   private cfg: QuickAccessConfig;
   private bodyEl: HTMLElement | null = null;
+  private drivePanel: DrivePanel | null = null;
 
   constructor(leaf: WorkspaceLeaf, cfg: QuickAccessConfig) {
     super(leaf);
@@ -56,14 +59,14 @@ export class QuickAccessView extends ItemView {
   }
 
   getViewType(): string { return VIEW_TYPE_QUICK; }
-  getDisplayText(): string { return "Quick Access"; }
-  getIcon(): string { return "star"; }
+  getDisplayText(): string { return "File Manager"; }
+  getIcon(): string { return "folder-open"; }
 
   async onOpen(): Promise<void> {
     const root = this.contentEl;
     root.empty();
     root.addClass("pa-quick-root");
-    root.createEl("h3", { text: "⭐ Quick Access — Vault Explorer" });
+    root.createEl("h3", { text: "🗂️ File Manager" });
     this.bodyEl = root.createDiv();
     this.render();
     this.registerEvent(this.app.workspace.on("file-open", () => this.render()));
@@ -98,6 +101,26 @@ export class QuickAccessView extends ItemView {
     this.renderRecent(files);
     this.renderPinned();
     this.renderRecents();
+    this.renderDriveSection();
+  }
+
+  /** Google Drive as a collapsible section inside File Manager (embeds the DrivePanel). */
+  private renderDriveSection(): void {
+    const sec = this.bodyEl!.createEl("details", { cls: "pa-panel pa-fm-drive" });
+    sec.open = false;
+    const summary = sec.createEl("summary", { cls: "pa-panel-title pa-fm-drive-summary" });
+    summary.createSpan({ text: "☁️ Google Drive" });
+    const panelHost = sec.createDiv();
+    // Mount the Drive panel lazily on first expand, so an unconnected Drive doesn't hit the
+    // network until the user opens the section.
+    let mounted = false;
+    sec.ontoggle = () => {
+      if (sec.open && !mounted) {
+        mounted = true;
+        this.drivePanel = new DrivePanel(this.app, panelHost, this.cfg.drive);
+        void this.drivePanel.mount();
+      }
+    };
   }
 
   // ---- top row: storage ring + type donut + headline counters ------------------------

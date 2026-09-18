@@ -705,3 +705,9 @@ button.pa-link-btn:focus-visible {
 .pa-treemap-lbl{font-size:.65rem;color:#fff;padding:2px 4px;text-shadow:0 1px 2px rgba(0,0,0,.5);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
 .pa-quick-toprow{display:flex;gap:20px;align-items:center;flex-wrap:wrap}
 .pa-quick-counters{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;flex:1;min-width:180px}
+.pa-fm-drive{padding:0}
+.pa-fm-drive-summary{cursor:pointer;padding:12px;margin:0;list-style:none}
+.pa-fm-drive-summary::-webkit-details-marker{display:none}
+.pa-fm-drive-summary::before{content:"▸ ";color:var(--text-muted)}
+.pa-fm-drive[open] .pa-fm-drive-summary::before{content:"▾ "}
+.pa-fm-drive > div{padding:0 12px 12px}

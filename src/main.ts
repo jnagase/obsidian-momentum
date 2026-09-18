@@ -724,6 +724,9 @@ export default class MomentumPlugin extends Plugin implements PAHost {
 
   /** Set the active page and ensure a CENTER content view shows it (reusing one if present). */
   async openPage(id: string): Promise<void> {
+    // Quick Access and Google Drive are dedicated ItemViews, not PAView pages.
+    if (id === "quick-access") { this.currentPage = id; this.refreshNav(); return void this.activateQuickView(); }
+    if (id === "drive") { this.currentPage = id; this.refreshNav(); return void this.activateDriveView(); }
     this.currentPage = id;
     const { workspace } = this.app;
     let leaf = this.findCenterPAView();
@@ -745,6 +748,8 @@ export default class MomentumPlugin extends Plugin implements PAHost {
 
   /** Open a page in a chosen workspace location as an independent view. */
   async openPageIn(id: string, location: PALocation): Promise<void> {
+    if (id === "quick-access") { this.currentPage = id; this.refreshNav(); return void this.activateQuickView(); }
+    if (id === "drive") { this.currentPage = id; this.refreshNav(); return void this.activateDriveView(); }
     this.currentPage = id;
     const { workspace } = this.app;
     let leaf: WorkspaceLeaf | null;

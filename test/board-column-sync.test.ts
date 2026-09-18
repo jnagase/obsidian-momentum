@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { colRank, mostAdvancedCol, pullCreateStatus } from "../src/gtSync";
+import { colRank, mostAdvancedCol, pullCreateStatus, shouldMaterializeBoard } from "../src/gtSync";
 import { planBoardDeletions } from "../src/data";
 import type { Task } from "../src/types";
 
@@ -116,5 +116,30 @@ describe("planBoardDeletions — sanity shield (Req 2/3/6)", () => {
     const p = planBoardDeletions(["Work", "New"], ["Work"], [], [], 2);
     expect(new Set(p.nextBoards)).toEqual(new Set(["Work", "New"]));
     expect(p.toTombstone).toEqual([]);
+  });
+});
+
+// -------------------------------------------------------------------------------------
+// Bug 1: a Google Tasks list (even an EMPTY one) must surface as a local board. Previously
+// a board only appeared once its first task was pulled, so a new empty list stayed invisible.
+// shouldMaterializeBoard decides which discovered lists get a board folder created now.
+// -------------------------------------------------------------------------------------
+describe("shouldMaterializeBoard — empty Google list becomes a board (bug 1)", () => {
+  const none = new Set<string>();
+
+  it("materializes a brand-new list (the reported 'Shopping' case)", () => {
+    expect(shouldMaterializeBoard("Shopping", none, none)).toBe(true);
+  });
+
+  it("does not duplicate a board that already exists locally", () => {
+    expect(shouldMaterializeBoard("Work", new Set(["Work"]), none)).toBe(false);
+  });
+
+  it("never resurrects a tombstoned (user-deleted) board", () => {
+    expect(shouldMaterializeBoard("Deleted", none, new Set(["Deleted"]))).toBe(false);
+  });
+
+  it("skips the permanent 'My Tasks' list (handled separately)", () => {
+    expect(shouldMaterializeBoard("My Tasks", none, none)).toBe(false);
   });
 });

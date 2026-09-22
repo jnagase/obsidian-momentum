@@ -32,16 +32,9 @@ import { CANONICAL_REDIRECT_URI } from "./config.js";
 
 const GOOGLE_AUTH = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN = "https://oauth2.googleapis.com/token";
-// OAuth scopes requested at consent. Space-separated per Google's spec.
-// - tasks: existing Google Tasks sync.
-// - drive: FULL Drive scope (RESTRICTED). Chosen so the plugin can see files the user adds
-//   via the Drive web UI, not just files it created itself (drive.file). This makes the app
-//   "restricted" and REQUIRES Google's restricted-scope verification before public release.
-//   See .kiro/specs/google-drive-sync-and-browser/ (decision D1).
-const SCOPES = [
-  "https://www.googleapis.com/auth/tasks",
-  "https://www.googleapis.com/auth/drive",
-].join(" ");
+// OAuth scope requested at consent: the Google Tasks scope only. Keeping it to this single
+// non-sensitive scope is what lets the app stay verified without a restricted-scope review.
+const SCOPES = "https://www.googleapis.com/auth/tasks";
 const OBSIDIAN_ACTION = "obsidian://momentum-google";
 
 /**

@@ -22,8 +22,7 @@ export const PAGES = [
   { id: "nutrition", label: "🥗 Nutrition" },
   { id: "studies", label: "📚 Studies" },
   { id: "finances", label: "💰 Finances" },
-  { id: "quick-access", label: "⭐ Quick Access" },
-  { id: "drive", label: "☁️ Google Drive" },
+  { id: "quick-access", label: "🗂️ File Manager" },
 ];
 
 /** Where a page can be opened in the workspace. */

@@ -6,13 +6,12 @@ export interface ChangeEntry { version: string; sections: ChangeSection[]; }
 /** Release notes shown in the "What's new" dialog, newest first. */
 export const CHANGELOG: ChangeEntry[] = [
   {
-    version: "0.7.2",
+    version: "0.7.5",
     sections: [
       {
-        title: "Added — Google Drive integration (preview)",
+        title: "New — File Manager",
         items: [
-          "A new Google Drive tab lets you browse your Drive next to your vault in two columns, with a status dashboard (in sync / Drive only / local only / diverged), search, status filters and a bidirectional sync engine (safe 3-way merge, edit-beats-delete, soft trash). Enable it under Settings → Momentum → Google Drive. Connecting Drive needs Google's verification, which is in progress.",
-          "A new Quick Access tab with pinned files, recents, and vault metrics.",
+          "A new File Manager tab gives you a visual overview of your vault: a storage breakdown by file type, a WinDirStat-style treemap of space by folder, per-folder cards, an activity chart of files changed per month, and side-by-side Recently modified / Pinned / Recently opened lists. Pin the files you keep coming back to, and click a folder to reveal it in the file explorer. It works entirely on your local vault — no account or network needed.",
         ],
       },
       {
@@ -31,12 +30,6 @@ export const CHANGELOG: ChangeEntry[] = [
         title: "Added — more Google Tasks sync intervals",
         items: [
           "You can now set the Google Tasks auto-sync to run every hour, 2 hours, 5 hours, 12 hours or 24 hours, in addition to the existing 5 / 10 / 15 minute options.",
-        ],
-      },
-      {
-        title: "Added — Google Drive browser (early preview)",
-        items: [
-          "A new \"Google Drive\" panel lets you browse your Drive folders inside Obsidian, open a text or Markdown file to edit it, and save it back to Drive. Google Docs and Sheets can be exported (Doc → Markdown, Sheet → CSV) for reading. This is an early building block toward two-way Drive sync; connecting Drive needs Google's verification, which is still in progress.",
         ],
       },
     ],

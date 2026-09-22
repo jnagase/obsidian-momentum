@@ -45,8 +45,9 @@ const LEGACY_DATA_ROOT = "Personal Assistant";
 const READABLE_NOTES_SCHEMA = 1;
 /** Bump when the task-list mirror layout changes so the guarded migration re-runs. */
 const TASK_LISTS_SCHEMA = 1;
-/** Bump when the per-board folder layout changes so the guarded migration re-runs. */
-const TASK_FOLDERS_SCHEMA = 5;
+/** Bump when the per-board folder layout changes so the guarded migration re-runs.
+ *  6: re-run repairTaskFrontmatter to strip Obsidian Sync conflict markers that stuck cards. */
+const TASK_FOLDERS_SCHEMA = 6;
 
 export default class MomentumPlugin extends Plugin implements PAHost {
   settings: PASettings;
@@ -213,6 +214,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
               // Repair malformed YAML frontmatter (e.g. unquoted "[gbm] ..." titles from
               // external widgets) so status/board parse and updates (done button) work.
               await this.store.repairTaskFrontmatter();
+              await this.store.repairHabitFrontmatter();
               const filed = await this.store.migrateTaskFolders();
               // Boards are folders now — drop the obsolete Tasks/boards.md once, on upgrade.
               await this.store.removeLegacyBoardsConfig();

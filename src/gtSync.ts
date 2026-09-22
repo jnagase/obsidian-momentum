@@ -98,9 +98,16 @@ function isBlankBase(title: string): boolean {
 function normStatus(s?: string): "completed" | "needsAction" {
   return s === "completed" ? "completed" : "needsAction";
 }
-/** Grouping key: base title + normalized due + normalized status. */
+/**
+ * Grouping key for duplicate detection: EXACT title (trimmed, lower-cased) + normalized due +
+ * normalized status. Deliberately NOT baseTitle — stripping a trailing number treated
+ * "teste 1"/"teste 2" as copies of "teste" and DELETED distinct numbered cards. A genuine
+ * multi-device duplicate keeps the exact frontmatter title (only the FILENAME gets a " 2"
+ * suffix via uniquePath), so exact-title grouping still catches the real dupes. Case-insensitive
+ * because the filesystem is (so "Teste" and "teste" are the same note).
+ */
 function sigKey(title: string, due: string | undefined, status?: string): string {
-  return `${baseTitle(title)}\u0000${normalizeYmd(due)}\u0000${normStatus(status)}`;
+  return `${(title || "").trim().toLowerCase()}\u0000${normalizeYmd(due)}\u0000${normStatus(status)}`;
 }
 /** Rank of a Kanban column = its index in the configured order (unknown → -1). Higher = more advanced. */
 export function colRank(status: string, cols: string[]): number { return cols.indexOf(status); }
@@ -157,6 +164,38 @@ function pickWinnerNote(notes: Task[]): Task {
 function pushInto<T>(m: Map<string, T[]>, k: string, v: T): void {
   const a = m.get(k); if (a) a.push(v); else m.set(k, [v]);
 }
+
+/** One collapse decision: the note to keep, the notes to remove, and the column to keep on it. */
+export interface NoteDupGroup { winner: Task; losers: Task[]; column: string; }
+
+/**
+ * Pure planner for collapsing DUPLICATE task notes (the multi-device race can leave two notes
+ * for one logical task). Groups within each board by (exact title + due + done-bit) and, for
+ * every group of 2+, picks the deterministic Winner and the most-advanced column to keep on it.
+ *
+ * Deliberately grouped by EXACT title, not a number-stripped base: distinct numbered cards
+ * ("teste 1", "teste 2", …) are NOT duplicates and must never be collapsed. A real duplicate
+ * keeps the same frontmatter title (only its filename got a " 2" suffix). Pure & deterministic
+ * so it can be unit-tested exhaustively.
+ */
+export function planNoteDuplicates(
+  tasks: Task[], localStatus: (t: Task) => GTTask["status"], cols: string[],
+): NoteDupGroup[] {
+  const byBoard = new Map<string, Task[]>();
+  for (const t of tasks) { if (!isBlankBase(t.title)) pushInto(byBoard, t.kanbanName || "My Tasks", t); }
+  const out: NoteDupGroup[] = [];
+  for (const [, arr] of byBoard) {
+    const groups = new Map<string, Task[]>();
+    for (const t of arr) pushInto(groups, sigKey(t.title, t.due, localStatus(t)), t);
+    for (const [, g] of groups) {
+      if (g.length < 2) continue;
+      const winner = pickWinnerNote(g);
+      out.push({ winner, losers: g.filter((t) => t !== winner), column: mostAdvancedCol(g, cols) });
+    }
+  }
+  return out;
+}
+
 /** A Google API error whose HTTP status means the item is gone. */
 function isGoneErr(e: unknown): boolean {
   const m = e instanceof Error ? e.message : String(e);
@@ -450,8 +489,7 @@ export class GTSyncService {
         pushInto(groups, sigKey(gt.title, fromGTDue(gt.due), gt.status), gt);
       }
       for (const [k, g] of groups) {
-        if (g.length < 2) continue;
-        if (new Set(g.map((x) => (x.title || "").trim())).size !== 1) continue; // distinct titles → not artifacts
+        if (g.length < 2) continue; // same (exact title + due + done-bit) → race duplicates
         const winner = pickWinnerGoogleId(g.map((x) => x.id as string));
         listSigWinner.set(`${listId}\u0000${k}`, winner);
         for (const x of g) if (x.id !== winner) googleDeletes.push({ listId, gtId: x.id as string });
@@ -462,30 +500,16 @@ export class GTSyncService {
     // their full titles are identical OR form a base + " N" suffix set (the base is present).
     const tasks = this.store.loadTasks();
     const noteDeletes: Task[] = [];
-    const byBoard = new Map<string, Task[]>();
-    for (const t of tasks) { if (!isBlankBase(t.title)) pushInto(byBoard, t.kanbanName || "My Tasks", t); }
-    for (const [, arr] of byBoard) {
-      const groups = new Map<string, Task[]>();
-      for (const t of arr) pushInto(groups, sigKey(t.title, t.due, localStatus(t)), t);
-      for (const [, g] of groups) {
-        if (g.length < 2) continue;
-        const fulls = g.map((t) => t.title.trim());
-        const allSame = new Set(fulls).size === 1;
-        const hasPlainBase = fulls.some((f) => f === baseTitle(f));
-        if (!(allSame || hasPlainBase)) continue; // e.g. "Phase 2"/"Phase 3" with no "Phase" → keep both
-        const winner = pickWinnerNote(g);
-        // Keep the most-advanced column of the group on the Winner, so collapsing a
-        // "backlog" pullCreate copy against an "in progress" note doesn't lose the column.
-        const advanced = mostAdvancedCol(g, cols);
-        if (advanced !== winner.status) {
-          try { await this.store.updateTask(winner, { status: advanced }); winner.status = advanced; }
-          catch (e) { result.errors.push(`Reconcile keep-column "${winner.title}": ${String(e)}`); }
-        }
-        for (const t of g) {
-          if (t === winner) continue;
-          if (t.googleId && t.googleId !== winner.googleId) googleDeletes.push({ listId: t.googleList || "", gtId: t.googleId });
-          noteDeletes.push(t);
-        }
+    for (const { winner, losers, column } of planNoteDuplicates(tasks, localStatus, cols)) {
+      // Keep the most-advanced column of the group on the Winner, so collapsing a "backlog"
+      // pullCreate copy against an "in progress" note doesn't lose the column.
+      if (column !== winner.status) {
+        try { await this.store.updateTask(winner, { status: column }); winner.status = column; }
+        catch (e) { result.errors.push(`Reconcile keep-column "${winner.title}": ${String(e)}`); }
+      }
+      for (const t of losers) {
+        if (t.googleId && t.googleId !== winner.googleId) googleDeletes.push({ listId: t.googleList || "", gtId: t.googleId });
+        noteDeletes.push(t);
       }
     }
 

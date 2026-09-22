@@ -6,6 +6,19 @@ export interface ChangeEntry { version: string; sections: ChangeSection[]; }
 /** Release notes shown in the "What's new" dialog, newest first. */
 export const CHANGELOG: ChangeEntry[] = [
   {
+    version: "0.7.6",
+    sections: [
+      {
+        title: "Fixed — stuck cards and lost tasks",
+        items: [
+          "Cards that refused to move between columns or be completed are unstuck. When the same vault syncs on two devices, Obsidian Sync could leave conflict markers inside a note's frontmatter, which quietly broke every update to that card. The plugin now repairs those automatically on load.",
+          "Tasks named with a trailing number (\"teste 1\", \"teste 2\", \"Cap 1\", \"Cap 2\"…) are no longer treated as duplicates of each other. They used to be collapsed and the extras deleted on sync; now only cards with the exact same title are ever merged.",
+          "Creating a note whose name differs only in capitalization from an existing one (\"teste\" next to \"Teste\") no longer collides — it becomes a separate note instead of silently failing.",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.7.5",
     sections: [
       {

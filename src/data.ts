@@ -74,6 +74,22 @@ export function planBoardDeletions(
 }
 
 /**
+ * Collision-free note path under `folder` for `base`, CASE-INSENSITIVE. macOS/Windows treat
+ * "teste.md" and "Teste.md" as the same file, but Obsidian's path cache is case-sensitive — so
+ * a naive check would try to create a colliding file and silently fail (or clobber). `takenLower`
+ * is the set of already-used FULL vault paths, lower-cased; `toFull` maps a data-root-relative
+ * path to its full vault path. Pure & deterministic so it can be unit-tested.
+ */
+export function collisionFreeRel(
+  folder: string, base: string, takenLower: Set<string>, toFull: (rel: string) => string,
+): string {
+  let rel = `${folder}/${base}.md`;
+  let n = 2;
+  while (takenLower.has(toFull(rel).toLowerCase())) { rel = `${folder}/${base} ${n}.md`; n++; }
+  return rel;
+}
+
+/**
  * True for a file a sync tool created to hold a conflict copy, so every loader can skip it.
  * These are NOT plugin data — the plugin never writes a `.conflict` file — yet without this
  * each copy is read as a real, separate item, showing up as dozens of duplicate meal logs /
@@ -554,7 +570,19 @@ export class PADataStore {
     if (closeIdx === -1) return false;
     const block = raw.slice(fmStart, closeIdx);
     let changed = false;
-    const fixedLines = block.split("\n").map((line) => {
+    // Obsidian Sync / git leave conflict markers (<<<<<<<, =======, >>>>>>>) inside the
+    // frontmatter when two devices wrote the same note. Those lines are invalid YAML, so the
+    // whole block fails to parse and the card gets STUCK — it can't change column or be
+    // completed (processFrontMatter silently fails). Drop the marker lines, keeping the content
+    // from both sides; the duplicate-key collapse below then resolves any key written twice
+    // (last value wins). Handles doubled/nested markers too, since every marker line is removed.
+    const conflictRe = /^(<{7}|={7}|>{7})/;
+    let workLines = block.split("\n");
+    if (workLines.some((l) => conflictRe.test(l))) {
+      workLines = workLines.filter((l) => !conflictRe.test(l));
+      changed = true;
+    }
+    const fixedLines = workLines.map((line) => {
       const m = line.match(/^([A-Za-z0-9_-]+):[ \t]+(.*)$/);
       if (!m) return line;
       const [, key, val] = m;
@@ -697,6 +725,21 @@ export class PADataStore {
     return fixed;
   }
 
+  /**
+   * Repair malformed YAML frontmatter (same rules as tasks — including Obsidian Sync conflict
+   * markers) in habit notes under Habits/, so a habit whose frontmatter got conflicted can be
+   * toggled again instead of being silently stuck.
+   */
+  async repairHabitFrontmatter(): Promise<number> {
+    const habitsPrefix = this.full("Habits") + "/";
+    const files = this.app.vault.getMarkdownFiles().filter((f) => f.path.startsWith(habitsPrefix));
+    let fixed = 0;
+    for (const f of files) {
+      try { if (await this.repairFrontmatterText(f)) fixed++; } catch { /* skip a bad file */ }
+    }
+    return fixed;
+  }
+
   // ============================================================
   // TASKS
   // ============================================================
@@ -813,10 +856,11 @@ export class PADataStore {
   /** A vault path under `folder` for `title` that does not collide with an existing file. */
   private uniquePath(folder: string, title: string): string {
     const base = safeName(title);
-    let rel = `${folder}/${base}.md`;
-    let n = 2;
-    while (this.fileAt(rel)) { rel = `${folder}/${base} ${n}.md`; n++; }
-    return rel;
+    // Case-insensitive collision check against every existing note's full path, so creating
+    // "teste" next to an existing "Teste.md" doesn't collide/clobber on a case-insensitive
+    // filesystem (it becomes "teste 2.md" instead).
+    const takenLower = new Set(this.app.vault.getMarkdownFiles().map((f) => f.path.toLowerCase()));
+    return collisionFreeRel(folder, base, takenLower, (r) => this.full(r));
   }
 
   async updateTask(task: Task, changes: Partial<Task>): Promise<void> {

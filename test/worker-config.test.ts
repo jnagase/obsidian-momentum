@@ -82,22 +82,16 @@ describe("plugin and Worker derive the same canonical redirect", () => {
   });
 });
 
-describe("the requested scope is exactly tasks + full drive", () => {
-  it("asks for the Google Tasks scope and the full Drive scope", () => {
+describe("the requested scope is exactly the Google Tasks scope", () => {
+  it("asks for the Google Tasks scope and nothing else", () => {
     const src = readFileSync("worker/src/index.js", "utf8");
-    // SCOPES is now an array joined with " ". Extract the individual scope string literals
-    // inside the SCOPES = [ ... ] block.
-    const block = src.match(/const SCOPES\s*=\s*\[([\s\S]*?)\]\.join/);
-    expect(block).not.toBeNull();
-    const scopes = [...block![1].matchAll(/"([^"]*)"/g)].map((m) => m[1]);
-    expect(scopes).toEqual([
-      "https://www.googleapis.com/auth/tasks",
-      "https://www.googleapis.com/auth/drive",
-    ]);
-    // The full drive scope is intentional (see spec decision D1), but these narrower/identity
-    // variants must still never appear — they would change the consent screen unexpectedly.
+    const m = src.match(/const SCOPES\s*=\s*"([^"]*)"/);
+    expect(m).not.toBeNull();
+    expect(m![1]).toBe("https://www.googleapis.com/auth/tasks");
+    // No broader or identity scopes: Drive (any variant) or userinfo/openid would widen the
+    // consent screen and drag the app into a restricted-scope verification we don't want.
+    expect(src).not.toContain("auth/drive");
     expect(src).not.toContain("tasks.readonly");
-    expect(src).not.toContain("drive.readonly");
     expect(src).not.toContain("userinfo");
     expect(src).not.toContain("openid");
   });

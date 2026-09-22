@@ -1,14 +1,12 @@
 import { ItemView, WorkspaceLeaf, TFile, TFolder, setIcon, Notice } from "obsidian";
 import { drawDonut, drawTreemap, drawLineChart, drawRing } from "./charts";
-import { DrivePanel, DriveViewConfig } from "./driveBrowser";
 
 export const VIEW_TYPE_QUICK = "momentum-quick-access";
 
-/** Config for the File Manager tab: pin persistence + the embedded Drive panel's config. */
+/** Config for the File Manager tab: pin persistence. */
 export interface QuickAccessConfig {
   getPins: () => string[];
   setPins: (paths: string[]) => Promise<void>;
-  drive: DriveViewConfig;
 }
 
 /** Palette shared across the dashboard visualizations. */
@@ -51,7 +49,6 @@ function topFolder(path: string): string {
 export class FileManagerView extends ItemView {
   private cfg: QuickAccessConfig;
   private bodyEl: HTMLElement | null = null;
-  private drivePanel: DrivePanel | null = null;
 
   constructor(leaf: WorkspaceLeaf, cfg: QuickAccessConfig) {
     super(leaf);
@@ -59,14 +56,14 @@ export class FileManagerView extends ItemView {
   }
 
   getViewType(): string { return VIEW_TYPE_QUICK; }
-  getDisplayText(): string { return "File Manager"; }
+  getDisplayText(): string { return "File manager"; }
   getIcon(): string { return "folder-open"; }
 
   async onOpen(): Promise<void> {
     const root = this.contentEl;
     root.empty();
     root.addClass("pa-quick-root");
-    root.createEl("h3", { text: "🗂️ File Manager" });
+    root.createEl("h3", { text: "🗂️ file manager" });
     this.bodyEl = root.createDiv();
     this.render();
     this.registerEvent(this.app.workspace.on("file-open", () => this.render()));
@@ -103,26 +100,6 @@ export class FileManagerView extends ItemView {
     this.renderRecent(files, cols.createDiv({ cls: "pa-panel" }));
     this.renderPinned(cols.createDiv({ cls: "pa-panel" }));
     this.renderRecents(cols.createDiv({ cls: "pa-panel" }));
-    this.renderDriveSection();
-  }
-
-  /** Google Drive as a collapsible section inside File Manager (embeds the DrivePanel). */
-  private renderDriveSection(): void {
-    const sec = this.bodyEl!.createEl("details", { cls: "pa-panel pa-fm-drive" });
-    sec.open = false;
-    const summary = sec.createEl("summary", { cls: "pa-panel-title pa-fm-drive-summary" });
-    summary.createSpan({ text: "☁️ Google Drive" });
-    const panelHost = sec.createDiv();
-    // Mount the Drive panel lazily on first expand, so an unconnected Drive doesn't hit the
-    // network until the user opens the section.
-    let mounted = false;
-    sec.ontoggle = () => {
-      if (sec.open && !mounted) {
-        mounted = true;
-        this.drivePanel = new DrivePanel(this.app, panelHost, this.cfg.drive);
-        void this.drivePanel.mount();
-      }
-    };
   }
 
   // ---- top row: storage ring + type donut + headline counters ------------------------
@@ -221,7 +198,7 @@ export class FileManagerView extends ItemView {
     sec.createEl("div", { cls: "pa-panel-title", text: "📌 Pinned" });
     const pins = this.cfg.getPins();
     if (pins.length === 0) {
-      sec.createEl("p", { cls: "pa-drive-muted", text: "Nothing pinned yet. Open a file and click 📌 in the recents list." });
+      sec.createEl("p", { cls: "pa-quick-muted", text: "Nothing pinned yet. Open a file and click 📌 in the recents list." });
       return;
     }
     const grid = sec.createDiv({ cls: "pa-quick-grid" });
@@ -233,7 +210,7 @@ export class FileManagerView extends ItemView {
       setIcon(iconEl, stale ? "alert-triangle" : "file-text");
       card.createDiv({ cls: "pa-quick-card-name", text: path.split("/").pop() ?? path });
       if (stale) { card.addClass("stale"); card.title = "File not found (moved/deleted). Click to unpin."; card.onclick = () => void this.togglePin(path); }
-      else card.onclick = () => void this.app.workspace.getLeaf(false).openFile(file as TFile);
+      else card.onclick = () => { if (file instanceof TFile) void this.app.workspace.getLeaf(false).openFile(file); };
       const unpin = card.createEl("button", { cls: "pa-quick-unpin", text: "×" });
       unpin.title = "Unpin (doesn't delete the file)";
       unpin.onclick = (e) => { e.stopPropagation(); void this.togglePin(path); };
@@ -243,7 +220,7 @@ export class FileManagerView extends ItemView {
   private renderRecents(sec: HTMLElement): void {
     sec.createEl("div", { cls: "pa-panel-title", text: "🕘 Recently opened" });
     const recents = this.app.workspace.getLastOpenFiles().slice(0, 12);
-    if (recents.length === 0) { sec.createEl("p", { cls: "pa-drive-muted", text: "No recent files." }); return; }
+    if (recents.length === 0) { sec.createEl("p", { cls: "pa-quick-muted", text: "No recent files." }); return; }
     const pins = new Set(this.cfg.getPins());
     const list = sec.createDiv({ cls: "pa-quick-list" });
     for (const path of recents) {

@@ -133,6 +133,38 @@ arquivos de forma destrutiva silenciosa.
 3. THE mudança SHALL ser transparente num upgrade: usuários sem Drive não percebem nada; sem passo
    manual, sem perda de dado.
 
+### Requisito 9 — Robustez do sync (two-way multi-device + edição direta no Drive)
+
+**User story:** Como usuário, quero editar os `.md` no Obsidian E direto no Google Drive, em
+vários dispositivos, sem perder edição nem gerar conflito falso.
+
+Baseado em referências públicas: [rclone bisync](https://rclone.org/bisync/) (estado anterior
+por lado + conflito preserva os dois), [sipamungkas/obsidian-s3-sync-plugin](https://github.com/sipamungkas/obsidian-s3-sync-plugin)
+(3 vias local×remote×lastSynced, estratégias configuráveis), [diogopalhais/obsidian-google-drive-synced-vault](https://github.com/diogopalhais/obsidian-google-drive-synced-vault)
+(content-aware, subpastas, binário), [remotely-save](https://github.com/remotely-save/remotely-save)
+(nuvem como broker multi-device), e a Google [Changes API](https://developers.google.com/workspace/drive/api/guides/manage-changes).
+
+#### Acceptance Criteria
+1. WHEN um arquivo existir nos dois lados no PRIMEIRO contato (sem baseline) com **conteúdo
+   idêntico**, THE engine SHALL tratar como no-op — NUNCA gerar `.conflict` espúrio (bug atual).
+2. THE estratégia de conflito SHALL ser configurável — `keep-both` (padrão), `local-wins`,
+   `remote-wins`, `newer-wins`, `ask` — e `keep-both` SHALL preservar as duas versões (rename),
+   nunca sobrescrever.
+3. THE detecção de mudança feita DIRETO no Drive SHALL usar `md5Checksum` vs baseline (não
+   depender de evento do Obsidian), suportando edição direta no Drive.
+4. THE engine SHALL usar a Changes API (`getStartPageToken` + `changes.list`) para detecção
+   incremental de edições/deleções no Drive, em vez de re-listar tudo a cada ciclo.
+5. WHERE um arquivo é binário (ou texto não-mergeável), THE engine SHALL tratá-lo com segurança —
+   upload/download binário real OU bloquear-e-avisar — NUNCA corromper via `TextDecoder`.
+6. THE engine SHALL preservar estrutura de **subpastas** (caminho relativo + `parents`), não só
+   pasta plana.
+7. THE engine SHALL ter guarda de **deleção em massa** (limite de deleções por ciclo) além do
+   disjuntor de writes; acima do limite, abster/pedir confirmação.
+8. THE modelo multi-device SHALL manter **baseline por dispositivo** (Drive = hub); nunca estado
+   compartilhado entre devices.
+9. THE UI SHALL avisar o usuário a fazer **backup** antes de ligar o Drive (beta), e mostrar
+   contadores de resultado (↑/↓/⇄/⚠/🗑).
+
 ## Fora de escopo
 - Mudar qualquer coisa do Google Tasks (worker, escopo, client, token, sync).
 - Escopo `drive.file` (foi descartado; o autor optou pelo `drive` full).

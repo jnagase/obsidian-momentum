@@ -64,3 +64,44 @@
 
 - [ ] 13. Build + lint + suíte de Tasks verdes a cada bloco; paridade MCP se surgir campo novo; upgrade transparente
   - _Requisitos: 8.1, 8.2, 8.3_
+
+## Bloco G — Hardening do sync (informado pelas referências públicas)
+
+### Beta-blockers (antes de conectar uma conta real)
+
+- [ ] 14. First-run content-aware — não gerar `.conflict` para arquivos idênticos sem baseline
+  - Em `runDriveSync`/`decideAction`: quando `localExists && remoteExists && !base`, comparar
+    hash/conteúdo; iguais → adotar baseline (noop); diferentes → conflito. Teste do caso.
+  - _Requisitos: 9.1_
+
+- [ ] 15. Segurança de binário — bloquear-e-avisar arquivos não-texto (beta)
+  - Detectar não-texto (extensão/tamanho) e pular com aviso, em vez de `TextDecoder`; documentar.
+  - _Requisitos: 9.5_
+
+- [ ] 16. Estratégia de conflito configurável (`keep-both` padrão)
+  - Setting `driveConflictStrategy` = keep-both|local-wins|remote-wins|newer-wins|ask; `ask` abre
+    modal de resolução. Testes das variantes de `decideAction`/aplicação.
+  - _Requisitos: 9.2_
+
+- [ ] 17. Guarda de deleção em massa (`max-delete`) separada do disjuntor de writes
+  - Acima do limite, abster/pedir confirmação (padrão do rclone `--max-delete`).
+  - _Requisitos: 9.7_
+
+- [ ] 18. Teste de integração do `runDriveSync` (VaultFS fake + Drive fake)
+  - Cobrir push/pull/merge/conflict/delete + first-run idêntico + multi-device (baseline por-device).
+  - _Requisitos: 9.1, 9.2, 9.8_
+
+### Pós-beta
+
+- [ ] 19. Changes API incremental (`getStartPageToken` + `changes.list`)
+  - Detecção de delta e de deleção no Drive sem re-listar; edição direta no Drive confiável.
+  - _Requisitos: 9.3, 9.4_
+
+- [ ] 20. Subpastas — preservar estrutura (caminho relativo + `parents`)
+  - _Requisitos: 9.6_
+
+- [ ] 21. Upload/download binário real (media upload) — remover o bloqueio da task 15
+  - _Requisitos: 9.5_
+
+- [ ] 22. Backup + status bar — aviso de backup ao ligar o beta; contadores ↑/↓/⇄/⚠/🗑
+  - _Requisitos: 9.9_

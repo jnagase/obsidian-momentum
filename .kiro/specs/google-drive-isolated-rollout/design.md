@@ -138,3 +138,43 @@ MCP não faz sync de Drive → sem paridade nova (a menos que algo do File Manag
   da produção. Local/beta não bloqueiam (Testing).
 - **Worker/client separados** dobram um pouco a infra (2 workers, 2 clients, 2 redirects), mas é o
   que garante o isolamento — o objetivo central.
+
+## Addendum — Hardening do sync (baseado em referências públicas)
+
+Pesquisa de repositórios públicos e do padrão-ouro (rclone bisync) para endurecer o
+`driveSync.ts` antes do beta. Conteúdo parafraseado das fontes.
+
+### Consenso das referências
+- **3 vias (baseline) é o padrão.** [obsidian-s3-sync](https://github.com/sipamungkas/obsidian-s3-sync-plugin)
+  compara `localHash × remoteETag × lastSyncedHash`; [rclone bisync](https://rclone.org/bisync/)
+  guarda a listagem do ciclo anterior de cada lado e compara com o atual. Nosso `driveSync.ts`
+  já faz isso (baseline por-arquivo) — **manter**.
+- **Conteúdo idêntico NÃO é conflito** ([rclone](https://rclone.org/bisync/); [diogopalhais](https://github.com/diogopalhais/obsidian-google-drive-synced-vault)
+  chama de "content-aware, prevents false conflicts"). Nosso `decideAction` no primeiro contato
+  (sem baseline, ambos existem) devolve `conflict` mesmo se idênticos → **corrigir** (comparar
+  hash/conteúdo antes de marcar conflito).
+- **Conflito preserva os dois** (renomeia o perdedor). rclone: `newer/older/larger/smaller/path1/path2`
+  + destino do perdedor `num`(.conflictN)/`pathname`/`delete`. s3-sync: `Ask/local-wins/remote-wins/keep-both/newer-wins`.
+  Adotar estratégia **configurável** com **`keep-both` como padrão**.
+- **Incremental via Changes API** (Google [manage-changes](https://developers.google.com/workspace/drive/api/guides/manage-changes),
+  padrão CDC). É o jeito confiável de pegar edição/deleção feita DIRETO no Drive. Nosso código
+  guarda o `startPageToken` mas re-lista tudo → **evoluir** para `changes.list`.
+- **Editar direto no Drive** exige detecção por `md5Checksum` (que temos) e **não** o modelo do
+  [RichardX366](https://github.com/RichardX366/Obsidian-Google-Drive), que proíbe edição fora do
+  Obsidian por rastrear via API do app. Nosso caminho suporta o requisito do autor.
+- **Broker multi-device**: [remotely-save](https://github.com/remotely-save/remotely-save) usa a
+  nuvem como broker e estado por-device no `data.json`. Igual ao nosso baseline por-device.
+
+### Decisões de hardening
+1. **First-run content-aware** (beta-blocker): antes de `conflict`, se `localExists && remoteExists && !base`,
+   baixar/heshear o remoto e comparar com o local; iguais → adotar baseline (noop); diferentes → conflito.
+2. **Binário** (beta-blocker): para o beta, **bloquear-e-avisar** arquivos não-texto (evita
+   corromper via `TextDecoder`); upload/download binário real fica pós-beta.
+3. **Estratégia de conflito configurável** com `keep-both` padrão; `ask` abre modal de resolução
+   (como s3-sync/bookbridge).
+4. **Guarda de deleção em massa** (`max-delete`), separada do disjuntor de writes.
+5. **Changes API incremental** (pós-beta, otimização + deleção confiável no Drive).
+6. **Subpastas** (pós-beta): recursão por `parents`/caminho relativo (hoje é pasta plana).
+7. **Teste de integração** do `runDriveSync` com `VaultFS` fake + Drive fake (o engine já é
+   port-agnostic — o design foi feito pra isso).
+8. **Backup + status**: aviso de backup ao ligar o beta; contadores ↑/↓/⇄/⚠/🗑.

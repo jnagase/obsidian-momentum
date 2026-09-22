@@ -689,3 +689,30 @@ button.pa-link-btn:focus-visible {
 .pa-fm-3col{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
 .pa-fm-3col > .pa-panel{margin-bottom:0;min-width:0}
 @media(max-width:900px){.pa-fm-3col{grid-template-columns:1fr}}
+/* Google Drive (beta) — browser panel + File Manager section */
+.pa-drive-root{padding:16px 20px;overflow:auto;font-size:14px}
+.pa-drive-muted{color:var(--text-faint)}
+.pa-drive-header{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}
+.pa-drive-dash{margin-bottom:10px}
+.pa-drive-dash-inner{display:flex;gap:16px;align-items:center;flex-wrap:wrap}
+.pa-drive-donut{flex:0 0 auto}
+.pa-drive-counters{flex:1;grid-template-columns:repeat(auto-fit,minmax(90px,1fr));margin-bottom:0}
+.pa-drive-controls{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:10px}
+.pa-drive-search{flex:1 1 160px;min-width:120px;padding:4px 8px;border:1px solid var(--background-modifier-border);border-radius:6px;background:var(--background-primary);color:var(--text-normal)}
+.pa-drive-filterchips{display:flex;flex-wrap:wrap;gap:6px}
+.pa-drive-filterchip{font-size:.72rem;padding:2px 8px;border:1px solid var(--background-modifier-border);border-radius:999px;background:var(--background-secondary);color:var(--text-normal);cursor:pointer}
+.pa-drive-filterchip.active{font-weight:600;color:#fff}
+.pa-drive-toggle{display:flex;align-items:center;gap:2px;font-size:.75rem;color:var(--text-muted);cursor:pointer}
+.pa-drive-cols{display:flex;flex-direction:column;gap:2px}
+.pa-drive-row{display:grid;grid-template-columns:1fr 140px 1fr;align-items:center;gap:8px;padding:4px 6px;border-bottom:1px solid var(--background-modifier-border-hover)}
+.pa-drive-head{font-weight:600;color:var(--text-muted);border-bottom:2px solid var(--background-modifier-border)}
+.pa-drive-cell{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pa-drive-mid{display:flex;align-items:center;gap:6px;justify-content:center;font-size:.75rem;color:var(--text-muted)}
+.pa-drive-mid button{font-size:.7rem;padding:1px 6px}
+.pa-drive-mid a{color:var(--text-muted);text-decoration:none}
+.pa-fm-drive{padding:0}
+.pa-fm-drive-summary{cursor:pointer;padding:12px;margin:0;list-style:none}
+.pa-fm-drive-summary::-webkit-details-marker{display:none}
+.pa-fm-drive-summary::before{content:"▸ ";color:var(--text-muted)}
+.pa-fm-drive[open] .pa-fm-drive-summary::before{content:"▾ "}
+.pa-fm-drive > div{padding:0 12px 12px}

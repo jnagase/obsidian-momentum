@@ -1,12 +1,17 @@
 import { ItemView, WorkspaceLeaf, TFile, TFolder, setIcon, Notice } from "obsidian";
 import { drawDonut, drawTreemap, drawLineChart, drawRing } from "./charts";
+import { DrivePanel, DriveViewConfig } from "./driveBrowser";
 
 export const VIEW_TYPE_QUICK = "momentum-quick-access";
 
-/** Config for the File Manager tab: pin persistence. */
+/** Config for the File Manager tab: pin persistence, plus an OPTIONAL Google Drive (beta)
+ *  section. When `driveEnabled()` is false (the default), the File Manager is a purely local
+ *  vault dashboard and no Drive code runs — the Drive parts are gated, not baked in. */
 export interface QuickAccessConfig {
   getPins: () => string[];
   setPins: (paths: string[]) => Promise<void>;
+  drive?: DriveViewConfig;
+  driveEnabled?: () => boolean;
 }
 
 /** Palette shared across the dashboard visualizations. */
@@ -49,6 +54,7 @@ function topFolder(path: string): string {
 export class FileManagerView extends ItemView {
   private cfg: QuickAccessConfig;
   private bodyEl: HTMLElement | null = null;
+  private drivePanel: DrivePanel | null = null;
 
   constructor(leaf: WorkspaceLeaf, cfg: QuickAccessConfig) {
     super(leaf);
@@ -100,6 +106,29 @@ export class FileManagerView extends ItemView {
     this.renderRecent(files, cols.createDiv({ cls: "pa-panel" }));
     this.renderPinned(cols.createDiv({ cls: "pa-panel" }));
     this.renderRecents(cols.createDiv({ cls: "pa-panel" }));
+    this.renderDriveSection();
+  }
+
+  /** OPTIONAL Google Drive (beta) section — only when Drive is enabled AND its config is
+   *  present. With Drive off (the default) this is a no-op, so the File Manager stays local. */
+  private renderDriveSection(): void {
+    if (!this.cfg.drive || !this.cfg.driveEnabled?.()) return;
+    const drive = this.cfg.drive;
+    const sec = this.bodyEl!.createEl("details", { cls: "pa-panel pa-fm-drive" });
+    sec.open = false;
+    const summary = sec.createEl("summary", { cls: "pa-panel-title pa-fm-drive-summary" });
+    summary.createSpan({ text: "☁️ google drive (beta)" });
+    const panelHost = sec.createDiv();
+    // Mount the Drive panel lazily on first expand, so an unconnected Drive doesn't hit the
+    // network until the user opens the section.
+    let mounted = false;
+    sec.ontoggle = () => {
+      if (sec.open && !mounted) {
+        mounted = true;
+        this.drivePanel = new DrivePanel(this.app, panelHost, drive);
+        void this.drivePanel.mount();
+      }
+    };
   }
 
   // ---- top row: storage ring + type donut + headline counters ------------------------

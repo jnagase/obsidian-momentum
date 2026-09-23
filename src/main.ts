@@ -1740,7 +1740,7 @@ class PASettingTab extends PluginSettingTab {
       // locked card instead of any live controls, and point to the Momentum pro section just below
       // to unlock — a non-Pro user can't even connect the Drive OAuth from here.
       const locked = containerEl.createDiv({ cls: "pa-pro-locked" });
-      locked.createEl("div", { cls: "pa-pro-locked-title", text: "🔒 Momentum pro feature" });
+      locked.createDiv({ cls: "pa-pro-locked-title", text: "🔒 Momentum pro feature" });
       locked.createEl("p", {
         cls: "pa-pro-locked-desc",
         text: "Two-way Google Drive sync — text notes plus images, pdfs and any other file type, " +
@@ -1918,7 +1918,7 @@ class PASettingTab extends PluginSettingTab {
 
     // What Pro unlocks — shown always, so people know exactly what they're getting.
     const benefits = containerEl.createDiv({ cls: "pa-pro-benefits" });
-    benefits.createEl("div", { text: "What you unlock", cls: "pa-pro-benefits-title" });
+    benefits.createDiv({ text: "What you unlock", cls: "pa-pro-benefits-title" });
     const benefitsList = benefits.createEl("ul");
     benefitsList.createEl("li", {
       text: "Google Drive sync — two-way sync between a drive folder (or your whole vault) and Obsidian, on its own Google sign-in, kept separate from tasks.",

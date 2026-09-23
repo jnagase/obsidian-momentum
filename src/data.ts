@@ -2232,10 +2232,6 @@ export class PADataStore {
   }
 }
 
-function ymdLocal(d: Date): string {
-  return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
-}
-
 const WEEKDAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
 /** Human-readable markdown body for the savings buckets file. */

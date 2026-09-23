@@ -6,6 +6,17 @@ export interface ChangeEntry { version: string; sections: ChangeSection[]; }
 /** Release notes shown in the "What's new" dialog, newest first. */
 export const CHANGELOG: ChangeEntry[] = [
   {
+    version: "0.7.11",
+    sections: [
+      {
+        title: "Maintenance",
+        items: [
+          "Internal code tidy-up to keep Momentum aligned with the Obsidian community review guidelines. No changes to features or your data.",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.7.10",
     sections: [
       {

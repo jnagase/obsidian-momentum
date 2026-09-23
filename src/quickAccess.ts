@@ -417,7 +417,7 @@ export class FileManagerView extends ItemView {
   // ---- top row: storage ring + type donut + headline counters ------------------------
   private renderTopRow(fileCount: number, totalSize: number, byType: Map<string, { count: number; size: number }>): void {
     const sec = this.bodyEl!.createDiv({ cls: "pa-panel" });
-    sec.createEl("div", { cls: "pa-panel-title", text: "Storage overview" });
+    sec.createDiv({ cls: "pa-panel-title", text: "Storage overview" });
     const row = sec.createDiv({ cls: "pa-quick-toprow" });
 
     // Ring: not a real disk quota (local vault), so show file count in the ring center with a
@@ -449,7 +449,7 @@ export class FileManagerView extends ItemView {
   // ---- treemap by top-level folder (WinDirStat style) --------------------------------
   private renderTreemap(byFolder: Map<string, { count: number; size: number }>): void {
     const sec = this.bodyEl!.createDiv({ cls: "pa-panel" });
-    sec.createEl("div", { cls: "pa-panel-title", text: "Space by folder" });
+    sec.createDiv({ cls: "pa-panel-title", text: "Space by folder" });
     const tiles = [...byFolder.entries()]
       .sort((a, b) => b[1].size - a[1].size)
       .map(([folder, v], i) => ({
@@ -464,7 +464,7 @@ export class FileManagerView extends ItemView {
   // ---- "Your Folders" cards ----------------------------------------------------------
   private renderFolderCards(byFolder: Map<string, { count: number; size: number }>): void {
     const sec = this.bodyEl!.createDiv({ cls: "pa-panel" });
-    sec.createEl("div", { cls: "pa-panel-title", text: "Your folders" });
+    sec.createDiv({ cls: "pa-panel-title", text: "Your folders" });
     const grid = sec.createDiv({ cls: "pa-quick-grid" });
     const folders = [...byFolder.entries()].sort((a, b) => b[1].count - a[1].count);
     const mirror = this.cfg.driveEnabled?.() ? normalizePath(this.cfg.drive?.mirrorDir() ?? "") : "";
@@ -483,7 +483,7 @@ export class FileManagerView extends ItemView {
   // ---- activity chart: files modified per month (last 12) ----------------------------
   private renderActivity(monthly: Map<string, number>): void {
     const sec = this.bodyEl!.createDiv({ cls: "pa-panel" });
-    sec.createEl("div", { cls: "pa-panel-title", text: "Activity — files modified per month" });
+    sec.createDiv({ cls: "pa-panel-title", text: "Activity — files modified per month" });
     const labels: string[] = [];
     const values: Array<number | null> = [];
     const now = new Date();
@@ -498,7 +498,7 @@ export class FileManagerView extends ItemView {
 
   // ---- recently modified -------------------------------------------------------------
   private renderRecent(files: TFile[], sec: HTMLElement): void {
-    sec.createEl("div", { cls: "pa-panel-title", text: "Recently modified" });
+    sec.createDiv({ cls: "pa-panel-title", text: "Recently modified" });
     const recent = files.slice().sort((a, b) => b.stat.mtime - a.stat.mtime).slice(0, 8);
     const list = sec.createDiv({ cls: "pa-quick-list" });
     for (const f of recent) {
@@ -510,7 +510,7 @@ export class FileManagerView extends ItemView {
   }
 
   private renderPinned(sec: HTMLElement): void {
-    sec.createEl("div", { cls: "pa-panel-title", text: "📌 Pinned" });
+    sec.createDiv({ cls: "pa-panel-title", text: "📌 Pinned" });
     const pins = this.cfg.getPins();
     if (pins.length === 0) {
       sec.createEl("p", { cls: "pa-quick-muted", text: "Nothing pinned yet. Open a file and click 📌 in the recents list." });
@@ -533,7 +533,7 @@ export class FileManagerView extends ItemView {
   }
 
   private renderRecents(sec: HTMLElement): void {
-    sec.createEl("div", { cls: "pa-panel-title", text: "🕘 Recently opened" });
+    sec.createDiv({ cls: "pa-panel-title", text: "🕘 Recently opened" });
     const recents = this.app.workspace.getLastOpenFiles().slice(0, 12);
     if (recents.length === 0) { sec.createEl("p", { cls: "pa-quick-muted", text: "No recent files." }); return; }
     const pins = new Set(this.cfg.getPins());

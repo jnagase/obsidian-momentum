@@ -4,11 +4,25 @@ import {
   downloadFile,
   createTextFile,
   updateTextFile,
+  createBinaryFile,
+  updateBinaryFile,
   trashFile,
+  createFolder,
+  findChildFolder,
   getStartPageToken,
+  listChanges,
   isFolder,
   isGoogleNative,
 } from "./googledrive";
+
+/** FNV-1a hash over raw bytes — a fast, non-cryptographic content fingerprint for binary files
+ *  (used only to detect local-side changes against the last-synced baseline). */
+function hashBytes(buf: ArrayBuffer): string {
+  const b = new Uint8Array(buf);
+  let h = 0x811c9dc5;
+  for (let i = 0; i < b.length; i++) { h ^= b[i]; h = Math.imul(h, 0x01000193); }
+  return `${b.length}_${(h >>> 0).toString(16)}`;
+}
 
 // ============================================================================================
 // Drive sync engine — the bidirectional motor for a Drive folder ⇄ a vault mirror folder.
@@ -27,10 +41,49 @@ import {
 /** Above this many pending writes an unconfirmed (automatic) run is blocked. */
 export const DRIVE_MAX_WRITES_PER_RUN = 50;
 
+/**
+ * Above this many DELETIONS in one cycle the run abstains (or asks, when a confirm callback is
+ * given). This is a SEPARATE guard from the write circuit breaker: a bulk deletion is far more
+ * dangerous than a bulk edit, and a sync/load glitch (a device that hasn't finished downloading)
+ * can look like a mass deletion. Mirrors rclone's `--max-delete`.
+ */
+export const DRIVE_MAX_DELETES_PER_RUN = 10;
+
 /** Text extensions eligible for line-level 3-way merge. Others conflict-duplicate instead. */
 const MERGEABLE_EXT = new Set(["md", "txt", "csv", "json", "canvas", "css", "js", "ts", "yaml", "yml"]);
 /** Max size (bytes) eligible for merge. */
 const MERGE_MAX_BYTES = 1_048_576;
+
+/**
+ * Extensions the engine is willing to move as text. Anything outside this set is treated as
+ * BINARY and — for the beta — skipped with a warning rather than round-tripped through
+ * `TextDecoder`/`text` upload, which would silently corrupt it (Req 9.5). Real binary media
+ * upload/download is a post-beta task; until then "block-and-warn" is the safe contract.
+ */
+const TEXT_EXT = new Set([
+  ...MERGEABLE_EXT,
+  "html", "htm", "xml", "svg", "markdown", "mdx", "log", "text", "tsv",
+  "toml", "ini", "conf", "env", "gitignore", "list", "org", "rst", "tex",
+]);
+
+/** True when a file name is NOT a known text type (→ treat as binary for the beta). */
+export function isBinaryName(name: string): boolean {
+  const ext = extOf(name);
+  return ext === "" || !TEXT_EXT.has(ext);
+}
+
+/** The conflict-resolution strategy applied when both sides diverged (Req 9.2). */
+export type DriveConflictStrategy =
+  | "keep-both"    // default: keep local, save the remote alongside as a .conflict copy
+  | "local-wins"   // local content wins; push it over the remote
+  | "remote-wins"  // remote content wins; pull it over the local
+  | "newer-wins"   // whichever side has the newer modified time wins
+  | "ask";         // ask the user per file (via a callback); falls back to keep-both
+
+export const DEFAULT_CONFLICT_STRATEGY: DriveConflictStrategy = "keep-both";
+
+/** Per-file resolution the `ask` strategy returns. */
+export type ConflictChoice = "local" | "remote" | "both";
 
 /** Per-file last-synced snapshot. `md5` is Drive's md5Checksum at last sync; content is the merge base. */
 export interface DriveBaseline {
@@ -61,6 +114,12 @@ export interface VaultFS {
   exists(name: string): Promise<boolean>;
   /** Soft-delete locally (move to a .trash or Obsidian trash). */
   trash(name: string): Promise<void>;
+  /** Local last-modified time in ms (optional — enables the `newer-wins` conflict strategy). */
+  mtime?(name: string): Promise<number>;
+  /** Read raw bytes (optional — required for real binary sync). */
+  readBinary?(name: string): Promise<ArrayBuffer>;
+  /** Write raw bytes, creating subfolders as needed (optional — required for real binary sync). */
+  writeBinary?(name: string, data: ArrayBuffer): Promise<void>;
 }
 
 export interface DriveSyncResult {
@@ -71,12 +130,36 @@ export interface DriveSyncResult {
   deletedLocal: number;
   deletedRemote: number;
   blocked: number;
+  /** Binary/non-text files skipped this cycle (block-and-warn, Req 9.5). */
+  skippedBinary: number;
   errors: string[];
   notes: string[];
+  /** Per-file problems this cycle (skipped or failed), with the reason — for the status panel. */
+  issues: { path: string; reason: string }[];
 }
 
 function emptyResult(): DriveSyncResult {
-  return { pushed: 0, pulled: 0, merged: 0, conflicted: 0, deletedLocal: 0, deletedRemote: 0, blocked: 0, errors: [], notes: [] };
+  return {
+    pushed: 0, pulled: 0, merged: 0, conflicted: 0, deletedLocal: 0, deletedRemote: 0,
+    blocked: 0, skippedBinary: 0, errors: [], notes: [], issues: [],
+  };
+}
+
+/** A persisted summary of the last Drive sync — drives the File Manager status panel (instant). */
+export interface DriveSyncSummary {
+  time: string;          // ISO timestamp of the run
+  scope: string;         // "whole vault" or the mirror folder
+  pushed: number;
+  pulled: number;
+  merged: number;
+  conflicted: number;
+  deletedLocal: number;
+  deletedRemote: number;
+  skippedBinary: number;
+  blocked: number;
+  errorCount: number;
+  issuesTotal: number; // total files that didn't sync (the issues list below is capped)
+  issues: { path: string; reason: string }[]; // capped list of files that didn't sync + why
 }
 
 function extOf(name: string): string {
@@ -138,15 +221,18 @@ export function decideAction(args: {
   localChanged: boolean;
   remoteChanged: boolean;
   mergeable: boolean;
+  /** First-contact-both-exist only: whether the two sides are byte-identical (Req 9.1). */
+  contentEqual?: boolean;
 }): DriveAction {
-  const { base, localExists, remoteExists, localChanged, remoteChanged, mergeable } = args;
+  const { base, localExists, remoteExists, localChanged, remoteChanged, mergeable, contentEqual } = args;
 
   // Both present.
   if (localExists && remoteExists) {
     if (!base) {
-      // First contact, both exist: same content → noop handled by caller via hash; here treat
-      // as conflict unless caller already proved equality.
-      return remoteChanged || localChanged ? "conflict" : "noop";
+      // First contact, both exist. Identical content is NOT a conflict — adopt it as the
+      // baseline (noop). Only genuinely different content conflicts (Req 9.1). The caller
+      // passes contentEqual after comparing the two sides.
+      return contentEqual ? "noop" : "conflict";
     }
     if (localChanged && remoteChanged) return mergeable ? "merge" : "conflict";
     if (remoteChanged) return "pull";
@@ -185,51 +271,178 @@ export async function runDriveSync(args: {
   fs: VaultFS;
   baselines: DriveBaselineStore;
   confirmed?: boolean;
+  /** Conflict-resolution strategy (default keep-both). */
+  conflictStrategy?: DriveConflictStrategy;
+  /** For the `ask` strategy: resolve one conflict. No callback → falls back to keep-both. */
+  resolveConflict?: (name: string) => Promise<ConflictChoice>;
+  /** Approve a mass deletion over the limit. No callback / declined → deletions are withheld. */
+  confirmDelete?: (msg: string) => Promise<boolean>;
+  /** Progress callback fired as planned operations execute (for a UI indicator). */
+  onProgress?: (p: { done: number; total: number }) => void;
+  /** Enable REAL binary upload/download (needs fs.readBinary/writeBinary). Off → block-and-warn. */
+  syncBinaries?: boolean;
+  /** Use the Changes API to skip the full tree walk when nothing changed remotely (safe: any
+   *  remote change or error falls back to a full walk). */
+  incremental?: boolean;
 }): Promise<DriveSyncResult> {
   const { token, driveFolderId, fs, baselines, confirmed } = args;
+  const strategy = args.conflictStrategy ?? DEFAULT_CONFLICT_STRATEGY;
   const result = emptyResult();
+  const rootId = driveFolderId || "root";
 
-  // ---- OBSERVATION ----------------------------------------------------------------------
-  let remoteFiles: DriveFile[];
-  try {
-    remoteFiles = (await listFiles(token, { folderId: driveFolderId })).filter(
-      (f) => !isFolder(f) && !isGoogleNative(f), // native docs are read-only export, not synced
-    );
-  } catch (e) {
-    result.errors.push(`list drive: ${e instanceof Error ? e.message : String(e)}`);
-    return result;
+  // ---- OBSERVATION (recursive: walk the Drive tree, keyed by relative path) --------------
+  let remoteByPath: Map<string, DriveFile> = new Map();
+  let folderCache: Map<string, string> = new Map();
+  let usedIncremental = false;
+
+  // INCREMENTAL (Req 9.3/9.4), opt-in and SAFE: if a cursor exists and the Changes API reports
+  // NO remote changes since it, reconstruct the remote view from the baselines and skip the full
+  // walk. ANY reported change — or any error — falls back to the authoritative full walk.
+  if (args.incremental && baselines.getCursor() && baselines.names().length > 0) {
+    try {
+      const { changes } = await listChanges(token, baselines.getCursor() as string);
+      if (changes.length === 0) {
+        remoteByPath = new Map();
+        for (const name of baselines.names()) {
+          const b = baselines.get(name);
+          if (!b) continue;
+          remoteByPath.set(name, { id: b.fileId, name: baseOf(name), mimeType: "text/plain", md5Checksum: b.md5, modifiedTime: b.modifiedTime });
+        }
+        folderCache = new Map<string, string>([["", rootId]]);
+        usedIncremental = true;
+        result.notes.push("Incremental: no remote changes since last sync (skipped full scan).");
+      }
+    } catch { /* fall through to the full walk */ }
   }
-  const remoteByName = new Map(remoteFiles.map((f) => [f.name, f]));
-  const localNames = new Set(await fs.list());
 
-  const allNames = new Set<string>([...remoteByName.keys(), ...localNames]);
+  if (!usedIncremental) {
+    let tree: RemoteTree;
+    try {
+      tree = await walkRemoteTree(token, rootId);
+    } catch (e) {
+      result.errors.push(`list drive: ${e instanceof Error ? e.message : String(e)}`);
+      return result;
+    }
+    remoteByPath = tree.files;
+    folderCache = new Map(tree.folders); // seeds push so a subfolder is created at most once/cycle
+  }
+
+  const localPaths = new Set(await fs.list());
+  const allPaths = new Set<string>([...remoteByPath.keys(), ...localPaths]);
 
   // ---- ADMISSION (decide every file, then guard) ----------------------------------------
-  interface Plan { name: string; action: DriveAction; remote?: DriveFile; }
+  interface Plan { path: string; action: DriveAction; remote?: DriveFile; remoteText?: string; binary?: boolean }
   const plans: Plan[] = [];
-  for (const name of allNames) {
-    const remote = remoteByName.get(name);
-    const base = baselines.get(name);
-    const localExists = localNames.has(name);
+  for (const path of allPaths) {
+   try {
+    const remote = remoteByPath.get(path);
+    const base = baselines.get(path);
+    const localExists = localPaths.has(path);
     const remoteExists = !!remote;
 
+    // BINARY files (Req 9.5). Two modes:
+    //  - syncBinaries OFF (default) or no binary VaultFS: BLOCK-AND-WARN — never round-trip a
+    //    non-text file through TextDecoder/text upload, which corrupts it.
+    //  - syncBinaries ON: REAL binary upload/download (bytes), change-detected by an FNV hash
+    //    (local) and md5Checksum (remote). No 3-way merge — a two-sided change is a conflict.
+    if (isBinaryName(path)) {
+      if (!args.syncBinaries || !fs.readBinary || !fs.writeBinary) {
+        const remoteChangedB = !!base && !!remote && remote.md5Checksum !== base.md5;
+        const needsWork = localExists !== remoteExists || remoteChangedB || (localExists && remoteExists && !base);
+        if (needsWork) {
+          result.skippedBinary++;
+          result.notes.push(`Skipped binary (enable "sync binaries" to include): ${path}.`);
+          result.issues.push({ path, reason: "binary skipped (enable Sync binary files)" });
+        }
+        continue;
+      }
+      const remoteChangedB = !!base && !!remote && remote.md5Checksum !== base.md5;
+      let localChangedB = false;
+      let localBuf: ArrayBuffer | undefined;
+      if (localExists) {
+        localBuf = await fs.readBinary(path);
+        if (base?.base !== undefined) localChangedB = hashBytes(localBuf) !== base.base;
+        else if (!base) localChangedB = true;
+      }
+      // First contact both exist: adopt as baseline when byte-sizes match (cheap heuristic);
+      // otherwise conflict (keep-both) — never overwrite.
+      let contentEqualB = false;
+      if (localExists && remoteExists && !base && localBuf) {
+        const rsize = remote.size ? parseInt(remote.size, 10) : -1;
+        contentEqualB = rsize === localBuf.byteLength;
+        if (contentEqualB) {
+          baselines.set(path, { fileId: remote.id, md5: remote.md5Checksum ?? "", modifiedTime: remote.modifiedTime ?? "", base: hashBytes(localBuf) });
+          result.notes.push(`Adopted identical binary as baseline (by size): ${path}.`);
+          continue;
+        }
+      }
+      const actionB = decideAction({ base, localExists, remoteExists, localChanged: localChangedB, remoteChanged: remoteChangedB, mergeable: false, contentEqual: contentEqualB });
+      if (actionB !== "noop") plans.push({ path, action: actionB, remote, binary: true });
+      continue;
+    }
+
     const remoteChanged = !!base && !!remote && remote.md5Checksum !== base.md5;
-    // local change: compare current local content hash-ish (length+content) to base content.
+    // local change: compare current local content to the baseline content.
     let localChanged = false;
     if (localExists && base?.base !== undefined) {
-      const cur = await fs.read(name);
+      const cur = await fs.read(path);
       localChanged = cur !== base.base;
     } else if (localExists && !base) {
       localChanged = true;
     }
 
     const size = remote?.size ? parseInt(remote.size, 10) : 0;
-    const mergeable = isMergeable(name, size);
+    const mergeable = isMergeable(path, size);
 
-    const action = decideAction({ base, localExists, remoteExists, localChanged, remoteChanged, mergeable });
-    if (action !== "noop") plans.push({ name, action, remote });
+    // FIRST-CONTACT CONTENT-AWARE (Req 9.1): both sides exist with no baseline. Identical content
+    // is NOT a conflict — adopt it as the baseline (noop). Only genuinely different content
+    // conflicts. We download the remote once here and cache it for the conflict handler.
+    let contentEqual = false;
+    let cachedRemoteText: string | undefined;
+    if (localExists && remoteExists && !base) {
+      const localText = await fs.read(path);
+      cachedRemoteText = new TextDecoder().decode(await downloadFile(token, remote.id));
+      contentEqual = localText === cachedRemoteText;
+      if (contentEqual) {
+        baselines.set(path, {
+          fileId: remote.id,
+          md5: remote.md5Checksum ?? "",
+          modifiedTime: remote.modifiedTime ?? "",
+          base: isMergeable(path, localText.length) ? localText : undefined,
+        });
+        result.notes.push(`Adopted identical file as baseline (no false conflict): ${path}.`);
+        continue; // noop
+      }
+    }
+
+    const action = decideAction({ base, localExists, remoteExists, localChanged, remoteChanged, mergeable, contentEqual });
+    if (action !== "noop") plans.push({ path, action, remote, remoteText: cachedRemoteText });
+   } catch (e) {
+    // One bad file must never abort the whole cycle (esp. in whole-vault mode).
+    const msg = e instanceof Error ? e.message : String(e);
+    result.errors.push(`examine ${path}: ${msg}`);
+    result.issues.push({ path, reason: `examine failed: ${msg}` });
+   }
   }
 
+  // ---- MASS-DELETE GUARD (separate from the write breaker) -------------------------------
+  const deletePlans = plans.filter((p) => p.action === "delete_local" || p.action === "delete_remote");
+  if (deletePlans.length > DRIVE_MAX_DELETES_PER_RUN) {
+    const msg =
+      `Momentum Drive: this sync wants to delete ${deletePlans.length} files ` +
+      `(limit ${DRIVE_MAX_DELETES_PER_RUN}). This is normal if you really removed that many, but a ` +
+      `sync/load glitch can look the same. Deletions go to the trash (reversible). Proceed?`;
+    const ok = args.confirmDelete ? await args.confirmDelete(msg) : false;
+    if (!ok) {
+      result.blocked += deletePlans.length;
+      result.errors.push(`Deletion guard: withheld ${deletePlans.length} deletions (over the limit of ${DRIVE_MAX_DELETES_PER_RUN}).`);
+      const kept = plans.filter((p) => p.action !== "delete_local" && p.action !== "delete_remote");
+      plans.length = 0;
+      plans.push(...kept);
+    }
+  }
+
+  // ---- WRITE CIRCUIT BREAKER (unconfirmed automatic runs) --------------------------------
   const writeOps = plans.length;
   if (!confirmed && writeOps > DRIVE_MAX_WRITES_PER_RUN) {
     result.blocked = writeOps;
@@ -241,21 +454,39 @@ export async function runDriveSync(args: {
 
   // ---- EXECUTION ------------------------------------------------------------------------
   let fatal = false;
+  const total = plans.length;
+  args.onProgress?.({ done: 0, total });
+  let done = 0;
   for (const p of plans) {
     try {
-      switch (p.action) {
-        case "pull": await this_pull(token, p.remote!, fs, baselines, result); break;
-        case "push": await this_push(token, p.name, driveFolderId, fs, baselines, result); break;
-        case "merge": await this_merge(token, p.name, p.remote!, fs, baselines, result); break;
-        case "conflict": await this_conflict(token, p.name, p.remote!, fs, baselines, result); break;
-        case "delete_local": await this_deleteLocal(p.name, fs, baselines, result); break;
-        case "delete_remote": await this_deleteRemote(token, p.name, p.remote, baselines, result); break;
-        default: break;
+      if (p.binary) {
+        switch (p.action) {
+          case "pull": await this_pullBinary(token, p.path, p.remote!, fs, baselines, result); break;
+          case "push": await this_pushBinary(token, p.path, rootId, folderCache, fs, baselines, result); break;
+          case "conflict": await this_conflictBinary(token, p.path, p.remote!, fs, baselines, result, strategy, args.resolveConflict); break;
+          case "delete_local": await this_deleteLocal(p.path, fs, baselines, result); break;
+          case "delete_remote": await this_deleteRemote(token, p.path, p.remote, baselines, result); break;
+          default: break;
+        }
+      } else {
+        switch (p.action) {
+          case "pull": await this_pull(token, p.path, p.remote!, fs, baselines, result); break;
+          case "push": await this_push(token, p.path, rootId, folderCache, fs, baselines, result); break;
+          case "merge": await this_merge(token, p.path, p.remote!, fs, baselines, result, strategy, args.resolveConflict); break;
+          case "conflict": await this_conflict(token, p.path, p.remote!, fs, baselines, result, strategy, args.resolveConflict, p.remoteText); break;
+          case "delete_local": await this_deleteLocal(p.path, fs, baselines, result); break;
+          case "delete_remote": await this_deleteRemote(token, p.path, p.remote, baselines, result); break;
+          default: break;
+        }
       }
     } catch (e) {
       fatal = true;
-      result.errors.push(`${p.action} ${p.name}: ${e instanceof Error ? e.message : String(e)}`);
+      const msg = e instanceof Error ? e.message : String(e);
+      result.errors.push(`${p.action} ${p.path}: ${msg}`);
+      result.issues.push({ path: p.path, reason: `${p.action} failed: ${msg}` });
     }
+    done++;
+    args.onProgress?.({ done, total });
   }
 
   // ---- COMMIT (advance cursor only on a clean cycle) ------------------------------------
@@ -274,72 +505,297 @@ export async function runDriveSync(args: {
   return result;
 }
 
+// ---- remote tree + folder helpers -----------------------------------------------------
+
+export interface RemoteTree {
+  /** relPath → file metadata (folders and Google-native docs excluded). */
+  files: Map<string, DriveFile>;
+  /** relDir → Drive folder id ("" maps to the root folder id). */
+  folders: Map<string, string>;
+}
+
+/** Safety cap on how many entries a single tree walk will enumerate. */
+const REMOTE_WALK_MAX = 20_000;
+
+/** Name of the cross-device advisory lock file kept in the synced Drive folder (Req: multi-device). */
+export const DRIVE_LOCK_NAME = ".momentum-drive-sync.lock";
+/** A lock older than this is considered stale (a crashed/abandoned device) and can be taken. */
+const DRIVE_LOCK_TTL_MS = 15 * 60 * 1000;
+
+interface DriveLockData { deviceId: string; ts: number }
+
+/**
+ * Try to claim the Drive-folder lock for this device (multi-device guard). Returns {ok:false,
+ * holder} when another device holds a FRESH lock. Advisory, not perfectly atomic — it drastically
+ * reduces two devices clobbering the same folder, and the content-aware/keep-both engine covers
+ * the residual race. A stale or unreadable lock is taken over.
+ */
+export async function acquireDriveLock(token: string, rootId: string, deviceId: string): Promise<{ ok: boolean; holder?: string }> {
+  const query = `name = '${DRIVE_LOCK_NAME}' and trashed = false`;
+  const found = await listFiles(token, { folderId: rootId, query });
+  const lock = found[0];
+  if (lock) {
+    try {
+      const data = JSON.parse(new TextDecoder().decode(await downloadFile(token, lock.id))) as DriveLockData;
+      if (data.deviceId && data.deviceId !== deviceId && data.ts && Date.now() - data.ts < DRIVE_LOCK_TTL_MS) {
+        return { ok: false, holder: data.deviceId };
+      }
+    } catch { /* unreadable → treat as stale and take it */ }
+    await updateTextFile(token, lock.id, JSON.stringify({ deviceId, ts: Date.now() }));
+    return { ok: true };
+  }
+  await createTextFile(token, DRIVE_LOCK_NAME, JSON.stringify({ deviceId, ts: Date.now() }), rootId === "root" ? undefined : rootId);
+  return { ok: true };
+}
+
+/** Release the Drive-folder lock if this device holds it (best-effort). */
+export async function releaseDriveLock(token: string, rootId: string, deviceId: string): Promise<void> {
+  try {
+    const found = await listFiles(token, { folderId: rootId, query: `name = '${DRIVE_LOCK_NAME}' and trashed = false` });
+    const lock = found[0];
+    if (!lock) return;
+    const data = JSON.parse(new TextDecoder().decode(await downloadFile(token, lock.id))) as DriveLockData;
+    if (!data.deviceId || data.deviceId === deviceId) await trashFile(token, lock.id);
+  } catch { /* best-effort */ }
+}
+
+/**
+ * Walk the Drive folder subtree rooted at `rootId` (a real folder id, or the "root" alias),
+ * building maps keyed by RELATIVE PATH so the engine can mirror subfolders — not just a flat
+ * folder. Google-native docs are excluded (read-only export, never synced). BFS, one listing
+ * per folder.
+ */
+export async function walkRemoteTree(token: string, rootId: string): Promise<RemoteTree> {
+  const files = new Map<string, DriveFile>();
+  const folders = new Map<string, string>([["", rootId]]);
+  const queue: { id: string; prefix: string }[] = [{ id: rootId, prefix: "" }];
+  let seen = 0;
+  while (queue.length) {
+    const { id, prefix } = queue.shift()!;
+    const children = await listFiles(token, { folderId: id });
+    for (const f of children) {
+      const rel = prefix ? `${prefix}/${f.name}` : f.name;
+      if (f.name === DRIVE_LOCK_NAME) continue; // the multi-device lock is never synced
+      if (isFolder(f)) { folders.set(rel, f.id); queue.push({ id: f.id, prefix: rel }); }
+      else if (!isGoogleNative(f)) files.set(rel, f);
+      if (++seen > REMOTE_WALK_MAX) return { files, folders };
+    }
+  }
+  return { files, folders };
+}
+
+/** Directory portion of a relative path ("a/b/c.md" → "a/b"; "c.md" → ""). */
+function dirOf(path: string): string {
+  const i = path.lastIndexOf("/");
+  return i >= 0 ? path.slice(0, i) : "";
+}
+
+/** Final segment of a path ("a/b/c.md" → "c.md"). */
+function baseOf(path: string): string {
+  const i = path.lastIndexOf("/");
+  return i >= 0 ? path.slice(i + 1) : path;
+}
+
+/**
+ * Ensure the Drive folder chain for `dir` exists under `rootId`, creating any missing segment,
+ * and return the leaf folder id. `cache` (relDir → id, seeded from the tree walk) is consulted
+ * and extended so each folder is resolved/created at most once per cycle.
+ */
+async function ensureRemoteFolderPath(
+  token: string, dir: string, rootId: string, cache: Map<string, string>,
+): Promise<string> {
+  if (!dir) return rootId;
+  const cached = cache.get(dir);
+  if (cached) return cached;
+  const parentId = await ensureRemoteFolderPath(token, dirOf(dir), rootId, cache);
+  const name = baseOf(dir);
+  let id = await findChildFolder(token, name, parentId);
+  if (!id) id = (await createFolder(token, name, parentId === "root" ? undefined : parentId)).id;
+  cache.set(dir, id);
+  return id;
+}
+
 // ---- per-action helpers (free functions; `this_` prefix avoids clashing with class methods) --
 
 async function this_pull(
-  token: string, remote: DriveFile, fs: VaultFS, baselines: DriveBaselineStore, result: DriveSyncResult,
+  token: string, path: string, remote: DriveFile, fs: VaultFS, baselines: DriveBaselineStore, result: DriveSyncResult,
 ): Promise<void> {
   const buf = await downloadFile(token, remote.id);
   const text = new TextDecoder().decode(buf);
-  await fs.write(remote.name, text);
-  baselines.set(remote.name, {
+  await fs.write(path, text); // VaultFS.write creates local subfolders as needed
+  baselines.set(path, {
     fileId: remote.id,
     md5: remote.md5Checksum ?? "",
     modifiedTime: remote.modifiedTime ?? "",
-    base: isMergeable(remote.name, text.length) ? text : undefined,
+    base: isMergeable(path, text.length) ? text : undefined,
   });
   result.pulled++;
 }
 
 async function this_push(
-  token: string, name: string, folderId: string | undefined, fs: VaultFS, baselines: DriveBaselineStore, result: DriveSyncResult,
+  token: string, path: string, rootId: string, folderCache: Map<string, string>,
+  fs: VaultFS, baselines: DriveBaselineStore, result: DriveSyncResult,
 ): Promise<void> {
-  const content = await fs.read(name);
-  const existing = baselines.get(name);
-  const meta = existing?.fileId
-    ? await updateTextFile(token, existing.fileId, content)
-    : await createTextFile(token, name, content, folderId);
-  baselines.set(name, {
+  const content = await fs.read(path);
+  const existing = baselines.get(path);
+  let meta: DriveFile;
+  if (existing?.fileId) {
+    meta = await updateTextFile(token, existing.fileId, content);
+  } else {
+    const parentId = await ensureRemoteFolderPath(token, dirOf(path), rootId, folderCache);
+    meta = await createTextFile(token, baseOf(path), content, parentId === "root" ? undefined : parentId);
+  }
+  baselines.set(path, {
     fileId: meta.id,
     md5: meta.md5Checksum ?? "",
     modifiedTime: meta.modifiedTime ?? "",
-    base: isMergeable(name, content.length) ? content : undefined,
+    base: isMergeable(path, content.length) ? content : undefined,
   });
   result.pushed++;
 }
 
 async function this_merge(
-  token: string, name: string, remote: DriveFile, fs: VaultFS, baselines: DriveBaselineStore, result: DriveSyncResult,
+  token: string, path: string, remote: DriveFile, fs: VaultFS, baselines: DriveBaselineStore, result: DriveSyncResult,
+  strategy: DriveConflictStrategy, resolveCb?: (name: string) => Promise<ConflictChoice>,
 ): Promise<void> {
-  const base = baselines.get(name);
-  const local = await fs.read(name);
+  const base = baselines.get(path);
+  const local = await fs.read(path);
   const remoteText = new TextDecoder().decode(await downloadFile(token, remote.id));
   const merged = base?.base !== undefined ? threeWayMerge(base.base, local, remoteText) : null;
   if (merged !== null) {
-    await fs.write(name, merged);
+    await fs.write(path, merged);
     const meta = await updateTextFile(token, remote.id, merged);
-    baselines.set(name, { fileId: meta.id, md5: meta.md5Checksum ?? "", modifiedTime: meta.modifiedTime ?? "", base: merged });
+    baselines.set(path, { fileId: meta.id, md5: meta.md5Checksum ?? "", modifiedTime: meta.modifiedTime ?? "", base: merged });
     result.merged++;
   } else {
-    // Merge not provable safe → keep both.
-    await this_conflict(token, name, remote, fs, baselines, result, remoteText, local);
+    // Merge not provable safe → resolve per the configured strategy.
+    await this_conflict(token, path, remote, fs, baselines, result, strategy, resolveCb, remoteText, local);
+  }
+}
+
+/** Pick the winning side for a conflict per the strategy. `both` = keep both (no overwrite). */
+async function resolveChoice(
+  strategy: DriveConflictStrategy, path: string, remote: DriveFile, fs: VaultFS,
+  resolveCb?: (name: string) => Promise<ConflictChoice>,
+): Promise<ConflictChoice> {
+  switch (strategy) {
+    case "local-wins": return "local";
+    case "remote-wins": return "remote";
+    case "newer-wins": {
+      if (!fs.mtime) return "both"; // can't compare timestamps → safe default keeps both
+      const localMs = await fs.mtime(path).catch(() => 0);
+      const remoteMs = remote.modifiedTime ? Date.parse(remote.modifiedTime) : 0;
+      if (!localMs || !remoteMs) return "both";
+      return localMs >= remoteMs ? "local" : "remote";
+    }
+    case "ask": return resolveCb ? await resolveCb(path) : "both";
+    case "keep-both":
+    default: return "both";
   }
 }
 
 async function this_conflict(
-  token: string, name: string, remote: DriveFile, fs: VaultFS, baselines: DriveBaselineStore, result: DriveSyncResult,
+  token: string, path: string, remote: DriveFile,
+  fs: VaultFS, baselines: DriveBaselineStore, result: DriveSyncResult,
+  strategy: DriveConflictStrategy, resolveCb?: (name: string) => Promise<ConflictChoice>,
   remoteTextIn?: string, localIn?: string,
 ): Promise<void> {
   const remoteText = remoteTextIn ?? new TextDecoder().decode(await downloadFile(token, remote.id));
-  void localIn;
-  // Keep local at its path; write remote copy alongside as a .conflict file. Ensure the
-  // conflict name is unique against the vault.
-  let cName = conflictName(name, () => false);
-  while (await fs.exists(cName)) cName = conflictName(cName, () => false);
+  const choice = await resolveChoice(strategy, path, remote, fs, resolveCb);
+
+  if (choice === "local") {
+    // Local wins: overwrite the remote with the local content. In every conflict path the
+    // remote file exists, so updating by its id is safe (no folder creation needed).
+    const local = localIn ?? (await fs.read(path));
+    const meta = await updateTextFile(token, remote.id, local);
+    baselines.set(path, {
+      fileId: meta.id, md5: meta.md5Checksum ?? "", modifiedTime: meta.modifiedTime ?? "",
+      base: isMergeable(path, local.length) ? local : undefined,
+    });
+    result.pushed++;
+    result.notes.push(`Conflict on ${path}: local kept (${strategy}); remote overwritten.`);
+    return;
+  }
+
+  if (choice === "remote") {
+    // Remote wins: overwrite the local with the remote content.
+    await fs.write(path, remoteText);
+    baselines.set(path, {
+      fileId: remote.id, md5: remote.md5Checksum ?? "", modifiedTime: remote.modifiedTime ?? "",
+      base: isMergeable(path, remoteText.length) ? remoteText : undefined,
+    });
+    result.pulled++;
+    result.notes.push(`Conflict on ${path}: remote kept (${strategy}); local overwritten.`);
+    return;
+  }
+
+  // "both" (keep-both, the default): keep local at its path; save the remote alongside as a
+  // unique .conflict copy. Never overwrites; the baseline stays diverged until the user resolves.
+  const taken = new Set<string>();
+  let cName = conflictName(path, (x) => taken.has(x));
+  while (await fs.exists(cName)) { taken.add(cName); cName = conflictName(path, (x) => taken.has(x)); }
   await fs.write(cName, remoteText);
   result.conflicted++;
-  result.notes.push(`Conflict on ${name}: remote copy saved as ${cName}. Your local version was kept.`);
-  // Do not update the baseline for `name` — it stays "diverged" until the user resolves it.
+  result.notes.push(`Conflict on ${path}: remote copy saved as ${cName}. Your local version was kept.`);
+}
+
+// ---- binary per-action helpers (real bytes; no 3-way merge) ---------------------------
+
+async function this_pullBinary(
+  token: string, path: string, remote: DriveFile, fs: VaultFS, baselines: DriveBaselineStore, result: DriveSyncResult,
+): Promise<void> {
+  const buf = await downloadFile(token, remote.id);
+  await fs.writeBinary!(path, buf);
+  baselines.set(path, { fileId: remote.id, md5: remote.md5Checksum ?? "", modifiedTime: remote.modifiedTime ?? "", base: hashBytes(buf) });
+  result.pulled++;
+}
+
+async function this_pushBinary(
+  token: string, path: string, rootId: string, folderCache: Map<string, string>,
+  fs: VaultFS, baselines: DriveBaselineStore, result: DriveSyncResult,
+): Promise<void> {
+  const buf = await fs.readBinary!(path);
+  const existing = baselines.get(path);
+  let meta: DriveFile;
+  if (existing?.fileId) {
+    meta = await updateBinaryFile(token, existing.fileId, buf, baseOf(path));
+  } else {
+    const parentId = await ensureRemoteFolderPath(token, dirOf(path), rootId, folderCache);
+    meta = await createBinaryFile(token, baseOf(path), buf, parentId === "root" ? undefined : parentId);
+  }
+  baselines.set(path, { fileId: meta.id, md5: meta.md5Checksum ?? "", modifiedTime: meta.modifiedTime ?? "", base: hashBytes(buf) });
+  result.pushed++;
+}
+
+async function this_conflictBinary(
+  token: string, path: string, remote: DriveFile, fs: VaultFS, baselines: DriveBaselineStore, result: DriveSyncResult,
+  strategy: DriveConflictStrategy, resolveCb?: (name: string) => Promise<ConflictChoice>,
+): Promise<void> {
+  const choice = await resolveChoice(strategy, path, remote, fs, resolveCb);
+  if (choice === "local") {
+    const buf = await fs.readBinary!(path);
+    const meta = await updateBinaryFile(token, remote.id, buf, baseOf(path));
+    baselines.set(path, { fileId: meta.id, md5: meta.md5Checksum ?? "", modifiedTime: meta.modifiedTime ?? "", base: hashBytes(buf) });
+    result.pushed++;
+    result.notes.push(`Binary conflict on ${path}: local kept (${strategy}); remote overwritten.`);
+    return;
+  }
+  if (choice === "remote") {
+    const buf = await downloadFile(token, remote.id);
+    await fs.writeBinary!(path, buf);
+    baselines.set(path, { fileId: remote.id, md5: remote.md5Checksum ?? "", modifiedTime: remote.modifiedTime ?? "", base: hashBytes(buf) });
+    result.pulled++;
+    result.notes.push(`Binary conflict on ${path}: remote kept (${strategy}); local overwritten.`);
+    return;
+  }
+  // keep-both: save the remote binary alongside as a unique .conflict copy; keep local as-is.
+  const taken = new Set<string>();
+  let cName = conflictName(path, (x) => taken.has(x));
+  while (await fs.exists(cName)) { taken.add(cName); cName = conflictName(path, (x) => taken.has(x)); }
+  const buf = await downloadFile(token, remote.id);
+  await fs.writeBinary!(cName, buf);
+  result.conflicted++;
+  result.notes.push(`Binary conflict on ${path}: remote copy saved as ${cName}. Your local version was kept.`);
 }
 
 async function this_deleteLocal(

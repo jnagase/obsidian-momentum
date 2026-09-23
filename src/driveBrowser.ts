@@ -2,15 +2,14 @@ import { App, ItemView, WorkspaceLeaf, Notice, normalizePath, TFile, TFolder } f
 import { drawDonut } from "./charts";
 import {
   DriveFile,
-  listFiles,
   downloadFile,
   exportFile,
   updateTextFile,
   createTextFile,
-  isFolder,
   isGoogleNative,
   EXPORT_MIME,
 } from "./googledrive";
+import { walkRemoteTree } from "./driveSync";
 
 export const VIEW_TYPE_DRIVE = "momentum-drive-browser";
 
@@ -20,6 +19,10 @@ export interface DriveViewConfig {
   getToken: TokenProvider;
   mirrorDir: () => string;
   driveFolderId: () => string | undefined;
+  /** Plugin data root to exclude in whole-vault mode (mirrors the engine's exclusion). */
+  dataRoot?: () => string;
+  /** Run a full bidirectional Drive sync now, reporting progress for a UI indicator. */
+  syncNow?: (onProgress?: (p: { done: number; total: number }) => void) => Promise<void>;
 }
 
 type RowStatus = "only_drive" | "only_local" | "same" | "diff" | "native";
@@ -57,55 +60,80 @@ export class DrivePanel {
   private sortDir: 1 | -1 = 1;
   private lastToken: string | null = null;
 
-  constructor(app: App, container: HTMLElement, cfg: DriveViewConfig) {
+  /** When embedded inside the File Manager, the host provides the title + refresh, so the panel
+   *  skips its own header to avoid a duplicate "Google Drive ⇄ vault" heading. */
+  private embedded: boolean;
+
+  constructor(app: App, container: HTMLElement, cfg: DriveViewConfig, opts: { embedded?: boolean } = {}) {
     this.app = app;
     this.container = container;
     this.cfg = cfg;
+    this.embedded = !!opts.embedded;
   }
 
   /** Build the panel scaffold in the container and do the first load. */
   async mount(): Promise<void> {
     this.container.empty();
-    const header = this.container.createDiv({ cls: "pa-section-head pa-drive-header" });
-    header.createEl("h3", { text: "Google Drive ⇄ vault" });
-    const refresh = header.createEl("button", { cls: "pa-mini-btn", text: "↻ refresh" });
-    refresh.onclick = () => void this.reload();
+    if (!this.embedded) {
+      const header = this.container.createDiv({ cls: "pa-section-head pa-drive-header" });
+      header.createEl("h3", { text: "Google Drive ⇄ vault" });
+      const refresh = header.createEl("button", { cls: "pa-mini-btn", text: "↻ refresh" });
+      refresh.onclick = () => void this.reload();
+    }
     this.dashEl = this.container.createDiv({ cls: "pa-drive-dash" });
     this.controlsEl = this.container.createDiv({ cls: "pa-panel pa-drive-controls" });
     this.bodyEl = this.container.createDiv({ cls: "pa-panel pa-drive-cols" });
-    await this.reload();
+    if (this.embedded) {
+      // The File Manager re-renders on every file-open, so DON'T auto-walk here (it would rescan
+      // the whole Drive each time). Paint the dashboard from local data and wait for Refresh.
+      this.renderDashboard();
+      this.renderControls();
+      this.bodyEl.empty();
+      this.bodyEl.createEl("p", { cls: "pa-drive-muted", text: "Click refresh to load the synced file list." });
+    } else {
+      await this.reload();
+    }
   }
+
+  /** Public refresh — re-scan Drive + vault (used by the File Manager's embedded refresh button). */
+  async refresh(): Promise<void> { await this.reload(); }
 
   private async reload(): Promise<void> {
     const token = await this.cfg.getToken();
     this.lastToken = token;
     if (!token) { this.rows = []; this.render(); return; }
-    let driveFiles: DriveFile[] = [];
+    // The recursive walk (one listing per folder) can take a while on a big tree, so paint the
+    // dashboard + a loading note immediately instead of leaving empty panels.
+    this.renderDashboard();
+    this.renderControls();
+    this.bodyEl.empty();
+    this.bodyEl.createEl("p", { cls: "pa-drive-muted", text: "Loading drive… (scanning folders, this can take a moment on large folders)" });
+    // Recursive, path-based view — mirrors the sync engine so the counts reflect subfolders and
+    // whole-vault mode (the old flat top-level listing showed 0 in those cases).
+    let tree: { files: Map<string, DriveFile> };
     try {
-      driveFiles = (await listFiles(token, { folderId: this.cfg.driveFolderId() || undefined })).filter((f) => !isFolder(f));
+      tree = await walkRemoteTree(token, this.cfg.driveFolderId() || "root");
     } catch (e) {
       this.rows = [];
       this.render(`Error listing Drive: ${e instanceof Error ? e.message : String(e)}`);
       return;
     }
-    const mirror = normalizePath(this.cfg.mirrorDir());
-    const localFiles = this.listLocalMirror(mirror);
-    const localByName = new Map(localFiles.map((p) => [p.split("/").pop()!, p]));
-    const byName = new Map<string, Row>();
-    for (const d of driveFiles) {
-      byName.set(d.name, {
-        name: d.name, drive: d,
+    const localByPath = this.listLocalMirror();
+    const byPath = new Map<string, Row>();
+    for (const [rel, d] of tree.files) {
+      byPath.set(rel, {
+        name: rel, drive: d,
         status: isGoogleNative(d) ? "native" : "only_drive",
         size: d.size ? parseInt(d.size, 10) : 0,
         modified: d.modifiedTime ?? "",
       });
     }
-    for (const [name, lp] of localByName) {
-      const ex = byName.get(name);
+    for (const [rel, lp] of localByPath) {
+      const ex = byPath.get(rel);
       if (ex) { ex.localPath = lp; if (ex.status !== "native") ex.status = "same"; }
-      else byName.set(name, { name, localPath: lp, status: "only_local", size: 0, modified: "" });
+      else byPath.set(rel, { name: rel, localPath: lp, status: "only_local", size: 0, modified: "" });
     }
-    this.rows = [...byName.values()];
+    this.rows = [...byPath.values()];
     this.render();
   }
 
@@ -177,7 +205,7 @@ export class DrivePanel {
     const head = this.bodyEl.createDiv({ cls: "pa-drive-row pa-drive-head" });
     head.createDiv({ cls: "pa-drive-cell", text: "Google Drive" });
     this.sortHeader(head.createDiv({ cls: "pa-drive-cell pa-drive-mid" }), "Status", "status");
-    head.createDiv({ cls: "pa-drive-cell", text: `Vault / ${normalizePath(this.cfg.mirrorDir())}` });
+    head.createDiv({ cls: "pa-drive-cell", text: this.cfg.mirrorDir() === "" ? "Vault (whole)" : `Vault / ${normalizePath(this.cfg.mirrorDir())}` });
     const rows = this.visibleRows();
     if (rows.length === 0) { this.bodyEl.createEl("p", { text: "(Nothing matches the filter)" }); return; }
     for (const r of rows) {
@@ -188,14 +216,14 @@ export class DrivePanel {
         const exp = r.status === "native" ? EXPORT_MIME[r.drive.mimeType] : undefined;
         const label = r.status === "native" ? `📄 ${r.name}${exp ? ` (→ .${exp.ext})` : ""}` : `📄 ${r.name}`;
         const a = left.createEl("a", { text: label, href: "#" });
-        a.onclick = (e) => { e.preventDefault(); void this.openFromDrive(this.lastToken!, r.drive!); };
+        a.onclick = (e) => { e.preventDefault(); void this.openFromDrive(this.lastToken!, r.drive!, r.name); };
       } else left.createSpan({ cls: "pa-drive-muted", text: "—" });
       const mid = row.createDiv({ cls: "pa-drive-cell pa-drive-mid" });
       const badge = mid.createSpan({ text: `${meta.icon} ${meta.label}` });
       badge.style.color = meta.color;
       if (r.status === "only_drive" || r.status === "native") {
         const b = mid.createEl("button", { cls: "pa-mini-btn", text: "↓" }); b.title = "Download";
-        b.onclick = () => void this.openFromDrive(this.lastToken!, r.drive!);
+        b.onclick = () => void this.openFromDrive(this.lastToken!, r.drive!, r.name);
       } else if (r.status === "only_local") {
         const b = mid.createEl("button", { cls: "pa-mini-btn", text: "↑" }); b.title = "Upload";
         b.onclick = () => void this.uploadLocal(this.lastToken!, r.localPath!);
@@ -236,24 +264,36 @@ export class DrivePanel {
     return rows;
   }
 
-  private listLocalMirror(dir: string): string[] {
-    const folder = this.app.vault.getAbstractFileByPath(dir);
-    if (!(folder instanceof TFolder)) return [];
-    return folder.children.filter((c): c is TFile => c instanceof TFile).map((f) => f.path);
+  /** Recursive local listing keyed by relative path — matches the engine's VaultFS scope
+   *  (a subfolder, or the whole vault minus the plugin's data root). */
+  private listLocalMirror(): Map<string, string> {
+    const raw = this.cfg.mirrorDir();
+    const base = raw === "" ? "" : normalizePath(raw);
+    const dataRoot = normalizePath(this.cfg.dataRoot?.() ?? "");
+    const out = new Map<string, string>();
+    for (const f of this.app.vault.getFiles()) {
+      if (base) {
+        if (f.path === base || f.path.startsWith(`${base}/`)) out.set(f.path.slice(base.length + 1), f.path);
+      } else {
+        if (dataRoot && (f.path === dataRoot || f.path.startsWith(`${dataRoot}/`))) continue;
+        out.set(f.path, f.path);
+      }
+    }
+    return out;
   }
 
-  private async openFromDrive(token: string, f: DriveFile): Promise<void> {
+  private async openFromDrive(token: string, f: DriveFile, rel: string): Promise<void> {
     try {
       if (isGoogleNative(f)) {
         const exp = EXPORT_MIME[f.mimeType];
         if (!exp) { new Notice("This Google file type can't be exported."); return; }
         const text = await exportFile(token, f.id, exp.mime);
-        const path = await this.writeMirror(`${f.name}.${exp.ext}`, text, undefined);
+        const path = await this.writeMirror(`${rel}.${exp.ext}`, text, undefined);
         await this.openInEditor(path);
         new Notice(`Exported (read-only): ${f.name} → .${exp.ext}.`);
       } else {
         const text = new TextDecoder().decode(await downloadFile(token, f.id));
-        const path = await this.writeMirror(f.name, text, f.id);
+        const path = await this.writeMirror(rel, text, f.id);
         await this.openInEditor(path);
         new Notice(`Opened ${f.name}.`);
       }
@@ -272,15 +312,24 @@ export class DrivePanel {
     } catch (e) { new Notice(`Upload failed: ${e instanceof Error ? e.message : String(e)}`); }
   }
 
-  private async writeMirror(name: string, content: string, driveId: string | undefined): Promise<string> {
-    const dir = normalizePath(this.cfg.mirrorDir());
-    if (!this.app.vault.getAbstractFileByPath(dir)) await this.app.vault.createFolder(dir).catch(() => {});
-    const path = normalizePath(`${dir}/${name}`);
-    const body = driveId && (name.endsWith(".md") || name.endsWith(".txt")) ? `---\ndrive_id: ${driveId}\n---\n${content}` : content;
-    const existing = this.app.vault.getAbstractFileByPath(path);
+  private async writeMirror(rel: string, content: string, driveId: string | undefined): Promise<string> {
+    const raw = this.cfg.mirrorDir();
+    const base = raw === "" ? "" : normalizePath(raw);
+    const full = normalizePath(base ? `${base}/${rel}` : rel);
+    const slash = full.lastIndexOf("/");
+    if (slash >= 0) {
+      const parts = full.slice(0, slash).split("/");
+      let cur = "";
+      for (const seg of parts) {
+        cur = cur ? `${cur}/${seg}` : seg;
+        if (!(this.app.vault.getAbstractFileByPath(cur) instanceof TFolder)) await this.app.vault.createFolder(cur).catch(() => {});
+      }
+    }
+    const body = driveId && (full.endsWith(".md") || full.endsWith(".txt")) ? `---\ndrive_id: ${driveId}\n---\n${content}` : content;
+    const existing = this.app.vault.getAbstractFileByPath(full);
     if (existing instanceof TFile) await this.app.vault.modify(existing, body);
-    else await this.app.vault.create(path, body);
-    return path;
+    else await this.app.vault.create(full, body);
+    return full;
   }
 
   private async openInEditor(path: string): Promise<void> {

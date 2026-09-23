@@ -151,6 +151,40 @@ export async function createTextFile(
   return r.json as DriveFile;
 }
 
+/** Escape a value for use inside a Drive query string literal ('...'). */
+function escapeQueryValue(v: string): string {
+  return v.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+}
+
+/**
+ * Create a subfolder under `parentId` (or My Drive root when omitted) and return its metadata.
+ * Used to mirror the vault's folder tree on Drive when syncing subfolders / the whole vault.
+ */
+export async function createFolder(token: string, name: string, parentId?: string): Promise<DriveFile> {
+  const metadata: Record<string, unknown> = { name, mimeType: "application/vnd.google-apps.folder" };
+  if (parentId) metadata.parents = [parentId];
+  const url = `${DRIVE}/files` + q({ fields: FILE_FIELDS });
+  const r = await requestUrl({
+    url,
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify(metadata),
+    throw: false,
+  });
+  if (r.status >= 400) throw new Error(`Drive folder.create failed: ${r.status}${fmtErr(r.text)}`);
+  return r.json as DriveFile;
+}
+
+/**
+ * Find a direct child folder named `name` under `parentId` (root when omitted). Returns its id,
+ * or undefined if there's no such folder. Used to resolve an existing folder before creating one.
+ */
+export async function findChildFolder(token: string, name: string, parentId: string): Promise<string | undefined> {
+  const query = `mimeType = 'application/vnd.google-apps.folder' and name = '${escapeQueryValue(name)}'`;
+  const matches = await listFiles(token, { folderId: parentId, query });
+  return matches.find((f) => isFolder(f))?.id;
+}
+
 /** Overwrite an existing file's text content (media upload). Returns updated metadata. */
 export async function updateTextFile(token: string, fileId: string, content: string): Promise<DriveFile> {
   const url = `${UPLOAD}/files/${fileId}` + q({ uploadType: "media", fields: FILE_FIELDS });
@@ -162,6 +196,64 @@ export async function updateTextFile(token: string, fileId: string, content: str
     throw: false,
   });
   if (r.status >= 400) throw new Error(`Drive files.update failed: ${r.status}${fmtErr(r.text)}`);
+  return r.json as DriveFile;
+}
+
+/** Best-effort MIME type from a file name (for binary uploads). */
+const MIME_BY_EXT: Record<string, string> = {
+  png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp",
+  svg: "image/svg+xml", pdf: "application/pdf", zip: "application/zip", mp3: "audio/mpeg",
+  mp4: "video/mp4", mov: "video/quicktime", docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+};
+export function mimeForName(name: string): string {
+  const i = name.lastIndexOf(".");
+  const ext = i >= 0 ? name.slice(i + 1).toLowerCase() : "";
+  return MIME_BY_EXT[ext] ?? "application/octet-stream";
+}
+
+/** Build a multipart/related body (metadata JSON + raw bytes) as a single ArrayBuffer. */
+function multipartBinaryBody(metadata: Record<string, unknown>, mime: string, data: ArrayBuffer, boundary: string): ArrayBuffer {
+  const enc = new TextEncoder();
+  const pre = enc.encode(
+    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n` +
+    `--${boundary}\r\nContent-Type: ${mime}\r\n\r\n`,
+  );
+  const post = enc.encode(`\r\n--${boundary}--`);
+  const bytes = new Uint8Array(pre.length + data.byteLength + post.length);
+  bytes.set(pre, 0);
+  bytes.set(new Uint8Array(data), pre.length);
+  bytes.set(post, pre.length + data.byteLength);
+  return bytes.buffer;
+}
+
+/** Create a new binary file (multipart upload, raw bytes). Returns the created metadata. */
+export async function createBinaryFile(token: string, name: string, data: ArrayBuffer, parentId?: string): Promise<DriveFile> {
+  const boundary = `momentum-${Date.now()}`;
+  const metadata: Record<string, unknown> = { name };
+  if (parentId) metadata.parents = [parentId];
+  const url = `${UPLOAD}/files` + q({ uploadType: "multipart", fields: FILE_FIELDS });
+  const r = await requestUrl({
+    url, method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": `multipart/related; boundary=${boundary}` },
+    body: multipartBinaryBody(metadata, mimeForName(name), data, boundary),
+    throw: false,
+  });
+  if (r.status >= 400) throw new Error(`Drive files.create(binary) failed: ${r.status}${fmtErr(r.text)}`);
+  return r.json as DriveFile;
+}
+
+/** Overwrite an existing file's binary content (media upload). Returns updated metadata. */
+export async function updateBinaryFile(token: string, fileId: string, data: ArrayBuffer, name: string): Promise<DriveFile> {
+  const url = `${UPLOAD}/files/${fileId}` + q({ uploadType: "media", fields: FILE_FIELDS });
+  const r = await requestUrl({
+    url, method: "PATCH",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": mimeForName(name) },
+    body: data,
+    throw: false,
+  });
+  if (r.status >= 400) throw new Error(`Drive files.update(binary) failed: ${r.status}${fmtErr(r.text)}`);
   return r.json as DriveFile;
 }
 

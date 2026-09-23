@@ -1,0 +1,362 @@
+import { describe, it, expect, beforeEach, vi } from "vitest";
+
+// =====================================================================================
+// Feature: google-drive-isolated-rollout — Bloco G (beta-blockers) + path-based engine.
+//
+// Integration test of the WHOLE runDriveSync cycle against an in-memory, PARENT-AWARE fake
+// Drive (vi.mock of src/googledrive) and a fake VaultFS. Covers:
+//   14) first-run content-aware (identical files must NOT conflict)
+//   15) binary block-and-warn (never round-trip a .png through TextDecoder)
+//   16) configurable conflict strategy (keep-both / local-wins / remote-wins / newer-wins / ask)
+//   17) mass-delete guard (withhold over the limit unless confirmed)
+//   +  path-based engine: subfolders (create on Drive, recreate locally) via relative paths.
+// =====================================================================================
+
+// Shared in-memory Drive (parent-aware), hoisted so the vi.mock factory can close over it.
+const D = vi.hoisted(() => {
+  interface F {
+    id: string; name: string; mimeType: string; content: string;
+    md5Checksum: string; modifiedTime: string; size: string; parents: string[]; trashed?: boolean; bin?: Uint8Array;
+  }
+  const FOLDER = "application/vnd.google-apps.folder";
+  const files = new Map<string, F>();
+  let seq = 1;
+  const hash = (s: string): string => {
+    let h = 0;
+    for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+    return `${s.length}_${h >>> 0}`;
+  };
+  const hashBuf = (u8: Uint8Array): string => {
+    let h = 0;
+    for (let i = 0; i < u8.length; i++) h = (h * 31 + u8[i]) | 0;
+    return `b${u8.length}_${h >>> 0}`;
+  };
+  const nextId = (): string => `id${seq++}`;
+  const reset = (): void => { files.clear(); seq = 1; };
+  const seed = (name: string, content: string, opts: { parent?: string; mimeType?: string; modifiedTime?: string } = {}): string => {
+    const id = nextId();
+    files.set(id, {
+      id, name, content,
+      mimeType: opts.mimeType ?? "text/plain",
+      md5Checksum: hash(content),
+      modifiedTime: opts.modifiedTime ?? "2020-01-01T00:00:00.000Z",
+      size: String(content.length),
+      parents: [opts.parent ?? "root"],
+    });
+    return id;
+  };
+  const seedFolder = (name: string, opts: { parent?: string } = {}): string => {
+    const id = nextId();
+    files.set(id, { id, name, content: "", mimeType: FOLDER, md5Checksum: "", modifiedTime: "2020-01-01T00:00:00.000Z", size: "0", parents: [opts.parent ?? "root"] });
+    return id;
+  };
+  const seedBinary = (name: string, bytes: number[], opts: { parent?: string } = {}): string => {
+    const id = nextId();
+    const u8 = new Uint8Array(bytes);
+    files.set(id, { id, name, content: "", mimeType: "application/octet-stream", md5Checksum: hashBuf(u8), modifiedTime: "2020-01-01T00:00:00.000Z", size: String(u8.length), parents: [opts.parent ?? "root"], bin: u8 });
+    return id;
+  };
+  const live = (): F[] => [...files.values()].filter((f) => !f.trashed);
+  const byName = (name: string): F | undefined => live().find((f) => f.name === name);
+  return { files, FOLDER, hash, hashBuf, nextId, reset, seed, seedFolder, seedBinary, live, byName };
+});
+
+vi.mock("../src/googledrive", () => {
+  const PREFIX = "application/vnd.google-apps.";
+  interface F { id: string; name: string; mimeType: string; content: string; md5Checksum: string; modifiedTime: string; size: string; parents: string[]; trashed?: boolean; bin?: Uint8Array }
+  const meta = (f: F) => ({ id: f.id, name: f.name, mimeType: f.mimeType, modifiedTime: f.modifiedTime, md5Checksum: f.md5Checksum, size: f.size, parents: f.parents, trashed: f.trashed });
+  return {
+    GOOGLE_NATIVE_PREFIX: PREFIX,
+    EXPORT_MIME: {},
+    listFiles: async (_t: string, opts: { folderId?: string; query?: string } = {}) => {
+      let list = D.live();
+      if (opts.folderId) list = list.filter((f) => f.parents.includes(opts.folderId as string));
+      if (opts.query && opts.query.includes("google-apps.folder")) {
+        const m = opts.query.match(/name = '(.*)'/);
+        const nm = m ? m[1].replace(/\\'/g, "'").replace(/\\\\/g, "\\") : undefined;
+        list = list.filter((f) => f.mimeType === D.FOLDER && (nm === undefined || f.name === nm));
+      }
+      return list.map(meta);
+    },
+    getFileMeta: async (_t: string, id: string) => meta(D.files.get(id) as F),
+    downloadFile: async (_t: string, id: string) => {
+      const f = D.files.get(id);
+      if (f?.bin) return f.bin.buffer.slice(f.bin.byteOffset, f.bin.byteOffset + f.bin.byteLength);
+      return new TextEncoder().encode(f?.content ?? "").buffer;
+    },
+    exportFile: async () => "",
+    mimeForName: () => "application/octet-stream",
+    createBinaryFile: async (_t: string, name: string, data: ArrayBuffer, parent?: string) => {
+      const id = D.nextId();
+      const u8 = new Uint8Array(data);
+      const f: F = { id, name, mimeType: "application/octet-stream", content: "", md5Checksum: D.hashBuf(u8), modifiedTime: new Date().toISOString(), size: String(u8.length), parents: [parent || "root"], bin: u8 };
+      D.files.set(id, f);
+      return meta(f);
+    },
+    updateBinaryFile: async (_t: string, id: string, data: ArrayBuffer) => {
+      const f = D.files.get(id);
+      if (!f) throw new Error(`updateBinaryFile: no file ${id}`);
+      const u8 = new Uint8Array(data);
+      f.bin = u8; f.md5Checksum = D.hashBuf(u8); f.modifiedTime = new Date().toISOString(); f.size = String(u8.length);
+      return meta(f);
+    },
+    createTextFile: async (_t: string, name: string, content: string, parent?: string) => {
+      const id = D.nextId();
+      const f: F = { id, name, mimeType: "text/plain", content, md5Checksum: D.hash(content), modifiedTime: new Date().toISOString(), size: String(content.length), parents: [parent || "root"] };
+      D.files.set(id, f);
+      return meta(f);
+    },
+    updateTextFile: async (_t: string, id: string, content: string) => {
+      const f = D.files.get(id);
+      if (!f) throw new Error(`updateTextFile: no file ${id}`);
+      f.content = content; f.md5Checksum = D.hash(content); f.modifiedTime = new Date().toISOString(); f.size = String(content.length);
+      return meta(f);
+    },
+    trashFile: async (_t: string, id: string) => { const f = D.files.get(id); if (f) f.trashed = true; },
+    createFolder: async (_t: string, name: string, parent?: string) => {
+      const id = D.nextId();
+      const f: F = { id, name, mimeType: D.FOLDER, content: "", md5Checksum: "", modifiedTime: new Date().toISOString(), size: "0", parents: [parent || "root"] };
+      D.files.set(id, f);
+      return meta(f);
+    },
+    findChildFolder: async (_t: string, name: string, parent: string) =>
+      D.live().find((f) => f.mimeType === D.FOLDER && f.name === name && f.parents.includes(parent))?.id,
+    getStartPageToken: async () => "cursor-1",
+    listChanges: async () => ({ changes: [], newStartPageToken: "cursor-1" }),
+    isFolder: (f: F) => f.mimeType === D.FOLDER,
+    isGoogleNative: (f: F) => typeof f.mimeType === "string" && f.mimeType.startsWith(PREFIX),
+  };
+});
+
+import { runDriveSync, DriveBaseline, DriveBaselineStore, VaultFS, DriveConflictStrategy } from "../src/driveSync";
+
+function makeVault(init: Record<string, string> = {}, binInit: Record<string, number[]> = {}) {
+  const map = new Map(Object.entries(init));
+  const mtimes = new Map<string, number>();
+  const bin = new Map<string, Uint8Array>(Object.entries(binInit).map(([k, v]) => [k, new Uint8Array(v)]));
+  const fs: VaultFS = {
+    list: async () => [...new Set([...map.keys(), ...bin.keys()])],
+    read: async (n) => map.get(n) ?? "",
+    write: async (n, c) => { map.set(n, c); mtimes.set(n, Date.now()); },
+    exists: async (n) => map.has(n) || bin.has(n),
+    trash: async (n) => { map.delete(n); bin.delete(n); },
+    mtime: async (n) => mtimes.get(n) ?? 0,
+    readBinary: async (n) => { const u = bin.get(n) ?? new Uint8Array(0); return u.buffer.slice(u.byteOffset, u.byteOffset + u.byteLength); },
+    writeBinary: async (n, data) => { bin.set(n, new Uint8Array(data)); mtimes.set(n, Date.now()); },
+  };
+  return { fs, map, mtimes, bin };
+}
+
+function makeBaselines(seed: Record<string, DriveBaseline> = {}) {
+  const m = new Map(Object.entries(seed));
+  let cursor: string | undefined;
+  const store: DriveBaselineStore = {
+    get: (n) => m.get(n),
+    set: (n, b) => { m.set(n, b); },
+    remove: (n) => { m.delete(n); },
+    names: () => [...m.keys()],
+    getCursor: () => cursor,
+    setCursor: (t) => { cursor = t; },
+    save: async () => {},
+  };
+  return { store, m };
+}
+
+const run = (fs: VaultFS, baselines: DriveBaselineStore, extra: Partial<Parameters<typeof runDriveSync>[0]> = {}) =>
+  runDriveSync({ token: "tok", fs, baselines, confirmed: true, ...extra });
+
+beforeEach(() => D.reset());
+
+describe("runDriveSync — core push/pull", () => {
+  it("pushes a brand-new local file up to Drive", async () => {
+    const v = makeVault({ "a.md": "hello" });
+    const b = makeBaselines();
+    const r = await run(v.fs, b.store);
+    expect(r.pushed).toBe(1);
+    expect(D.byName("a.md")?.content).toBe("hello");
+    expect(b.m.get("a.md")?.fileId).toBeTruthy();
+  });
+
+  it("pulls a brand-new remote file into the vault", async () => {
+    D.seed("b.md", "from drive");
+    const v = makeVault();
+    const b = makeBaselines();
+    const r = await run(v.fs, b.store);
+    expect(r.pulled).toBe(1);
+    expect(v.map.get("b.md")).toBe("from drive");
+  });
+});
+
+describe("path-based engine — subfolders", () => {
+  it("pulls a remote file that lives in a subfolder, preserving the relative path", async () => {
+    const sub = D.seedFolder("notes");
+    D.seed("deep.md", "nested", { parent: sub });
+    const v = makeVault();
+    const b = makeBaselines();
+    const r = await run(v.fs, b.store);
+    expect(r.pulled).toBe(1);
+    expect(v.map.get("notes/deep.md")).toBe("nested");
+    expect(b.m.get("notes/deep.md")).toBeTruthy();
+  });
+
+  it("pushes a local file in a subfolder, creating the folder chain on Drive", async () => {
+    const v = makeVault({ "proj/sub/y.md": "body" });
+    const b = makeBaselines();
+    const r = await run(v.fs, b.store);
+    expect(r.pushed).toBe(1);
+    const file = D.byName("y.md");
+    expect(file?.content).toBe("body");
+    // Its parent must be the "sub" folder, whose parent is "proj" under root.
+    const sub = D.live().find((f) => f.mimeType === D.FOLDER && f.name === "sub");
+    const proj = D.live().find((f) => f.mimeType === D.FOLDER && f.name === "proj");
+    expect(sub && file?.parents.includes(sub.id)).toBeTruthy();
+    expect(proj && sub?.parents.includes(proj.id)).toBeTruthy();
+  });
+});
+
+describe("first-run content-aware (Req 9.1, task 14)", () => {
+  it("adopts identical files as baseline — NO spurious .conflict", async () => {
+    D.seed("c.md", "same text");
+    const v = makeVault({ "c.md": "same text" });
+    const b = makeBaselines();
+    const r = await run(v.fs, b.store);
+    expect(r.conflicted).toBe(0);
+    expect(r.pushed).toBe(0);
+    expect(r.pulled).toBe(0);
+    expect(v.map.has("c.conflict.md")).toBe(false);
+    expect(b.m.get("c.md")).toBeTruthy();
+  });
+
+  it("conflicts when first-contact content differs (keep-both default)", async () => {
+    D.seed("d.md", "REMOTE version");
+    const v = makeVault({ "d.md": "LOCAL version" });
+    const b = makeBaselines();
+    const r = await run(v.fs, b.store);
+    expect(r.conflicted).toBe(1);
+    expect(v.map.get("d.md")).toBe("LOCAL version");
+    expect(v.map.get("d.conflict.md")).toBe("REMOTE version");
+  });
+});
+
+describe("binary block-and-warn (Req 9.5, task 15)", () => {
+  it("skips a new remote binary instead of corrupting it", async () => {
+    D.seed("pic.png", "\u0000\u0001binary", { mimeType: "image/png" });
+    const v = makeVault();
+    const b = makeBaselines();
+    const r = await run(v.fs, b.store);
+    expect(r.skippedBinary).toBe(1);
+    expect(r.pulled).toBe(0);
+    expect(v.map.has("pic.png")).toBe(false);
+  });
+});
+
+describe("binary sync (opt-in, task 21)", () => {
+  it("blocks-and-warns binaries when syncBinaries is off (default)", async () => {
+    const v = makeVault({}, { "img.png": [1, 2, 3, 4] });
+    const b = makeBaselines();
+    const r = await run(v.fs, b.store); // syncBinaries defaults off
+    expect(r.pushed).toBe(0);
+    expect(r.skippedBinary).toBe(1);
+    expect(D.byName("img.png")).toBeUndefined();
+  });
+
+  it("pushes a local binary when syncBinaries is on", async () => {
+    const v = makeVault({}, { "img.png": [1, 2, 3, 4] });
+    const b = makeBaselines();
+    const r = await run(v.fs, b.store, { syncBinaries: true });
+    expect(r.pushed).toBe(1);
+    expect(r.skippedBinary).toBe(0);
+    expect(D.byName("img.png")?.size).toBe("4");
+  });
+
+  it("pulls a remote binary when syncBinaries is on", async () => {
+    D.seedBinary("photo.jpg", [9, 8, 7]);
+    const v = makeVault();
+    const b = makeBaselines();
+    const r = await run(v.fs, b.store, { syncBinaries: true });
+    expect(r.pulled).toBe(1);
+    expect([...(v.bin.get("photo.jpg") ?? [])]).toEqual([9, 8, 7]);
+  });
+});
+
+describe("configurable conflict strategy (Req 9.2, task 16)", () => {
+  const setup = () => {
+    D.seed("e.md", "REMOTE", { modifiedTime: "2020-01-01T00:00:00.000Z" });
+    const v = makeVault({ "e.md": "LOCAL" });
+    v.mtimes.set("e.md", Date.parse("2024-01-01T00:00:00.000Z")); // local newer
+    return { v, b: makeBaselines() };
+  };
+
+  it("local-wins overwrites the remote with the local content", async () => {
+    const { v, b } = setup();
+    const r = await run(v.fs, b.store, { conflictStrategy: "local-wins" });
+    expect(r.conflicted).toBe(0);
+    expect(r.pushed).toBe(1);
+    expect(D.byName("e.md")?.content).toBe("LOCAL");
+    expect(v.map.has("e.conflict.md")).toBe(false);
+  });
+
+  it("remote-wins overwrites the local with the remote content", async () => {
+    const { v, b } = setup();
+    const r = await run(v.fs, b.store, { conflictStrategy: "remote-wins" });
+    expect(r.pulled).toBe(1);
+    expect(v.map.get("e.md")).toBe("REMOTE");
+  });
+
+  it("newer-wins keeps the side with the newer timestamp (local here)", async () => {
+    const { v, b } = setup();
+    const r = await run(v.fs, b.store, { conflictStrategy: "newer-wins" });
+    expect(r.pushed).toBe(1);
+    expect(D.byName("e.md")?.content).toBe("LOCAL");
+  });
+
+  it("ask uses the resolver callback (choose remote)", async () => {
+    const { v, b } = setup();
+    const r = await run(v.fs, b.store, { conflictStrategy: "ask", resolveConflict: async () => "remote" });
+    expect(r.pulled).toBe(1);
+    expect(v.map.get("e.md")).toBe("REMOTE");
+  });
+});
+
+describe("mass-delete guard (Req 9.7, task 17)", () => {
+  const setupDeletions = (count: number) => {
+    const baseSeed: Record<string, DriveBaseline> = {};
+    for (let i = 0; i < count; i++) {
+      const content = `file ${i}`;
+      const name = `del${i}.md`;
+      const id = D.seed(name, content);
+      baseSeed[name] = { fileId: id, md5: D.hash(content), modifiedTime: "2020-01-01T00:00:00.000Z", base: content };
+    }
+    return { v: makeVault(), b: makeBaselines(baseSeed) };
+  };
+
+  it("withholds deletions over the limit when not confirmed", async () => {
+    const { v, b } = setupDeletions(12);
+    const r = await run(v.fs, b.store, { confirmDelete: async () => false });
+    expect(r.deletedRemote).toBe(0);
+    expect(r.blocked).toBe(12);
+    expect(D.live().length).toBe(12);
+  });
+
+  it("performs the deletions when the guard is confirmed", async () => {
+    const { v, b } = setupDeletions(12);
+    const r = await run(v.fs, b.store, { confirmDelete: async () => true });
+    expect(r.deletedRemote).toBe(12);
+    expect(D.live().length).toBe(0);
+  });
+
+  it("does not trigger the guard below the limit", async () => {
+    const { v, b } = setupDeletions(3);
+    const declineSpy = vi.fn(async () => false);
+    const r = await run(v.fs, b.store, { confirmDelete: declineSpy });
+    expect(declineSpy).not.toHaveBeenCalled();
+    expect(r.deletedRemote).toBe(3);
+  });
+});
+
+describe("strategy typing sanity", () => {
+  it("accepts every documented strategy value", () => {
+    const all: DriveConflictStrategy[] = ["keep-both", "local-wins", "remote-wins", "newer-wins", "ask"];
+    expect(all).toHaveLength(5);
+  });
+});

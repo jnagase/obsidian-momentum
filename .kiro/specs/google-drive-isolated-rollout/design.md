@@ -165,6 +165,33 @@ Pesquisa de repositórios públicos e do padrão-ouro (rclone bisync) para endur
 - **Broker multi-device**: [remotely-save](https://github.com/remotely-save/remotely-save) usa a
   nuvem como broker e estado por-device no `data.json`. Igual ao nosso baseline por-device.
 
+### Addendum 2 — Motor path-based, subpastas, vault-inteiro e seletor de pasta (Req 10)
+
+Implementado (antecipando as tasks 20 de subpastas) para atender ao pedido de "vault inteiro":
+
+- **Identidade por caminho relativo.** O motor (`driveSync.ts`) passou a chavear tudo por
+  **relPath** (ex.: `sub/nota.md`), não mais por nome plano. Baselines, planos, conflitos e
+  deleções usam o caminho. `conflictName` já é path-safe (o último ponto está no basename).
+- **Observação recursiva.** `walkRemoteTree(token, rootId)` faz BFS a partir de
+  `driveFolderId || "root"`, listando cada pasta (`listFiles({folderId})`) e montando dois mapas:
+  `files: relPath→DriveFile` e `folders: relDir→folderId` (com `""→rootId`). Docs nativos do
+  Google são excluídos.
+- **Subpastas no push/pull.** `ensureRemoteFolderPath(dir)` cria a cadeia de pastas no Drive
+  (reusando `findChildFolder`, criando com `createFolder`) e cacheia `relDir→id`. No pull, o
+  `VaultFS.write` cria as subpastas locais (`ensureFolders`).
+- **`VaultFS` por caminho.** `main.ts` reescreveu o port: `list()` varre `vault.getFiles()` e
+  devolve caminhos relativos à base; `read/write/exists/trash/mtime` operam por relPath.
+- **Vault inteiro (`driveMirrorDir === ""`).** Sincroniza tudo, **exceto** `dataRoot` (a pasta do
+  próprio plugin) — proteção contra loop de feedback (logs/notas do Momentum) e contra um pull
+  sobrescrever o estado vivo. Binário segue block-and-warn (a maior parte do vault do autor é
+  binária), então no vault-inteiro só o texto sobe no beta.
+- **Seletor de pasta próprio** (`driveFolderPicker.ts`): modal que navega o Drive com a própria
+  Drive API (sem o Google Picker widget, que é ruim no Electron e exige API key/appId extra),
+  permite criar subpasta e devolve `{id, name}`. Guardado em `driveFolderId` + `driveFolderName`.
+  Settings: dropdown "Vault folder to sync" (com "Whole vault") + botão "Choose folder…".
+- **Guardas mantidas** no modo vault-inteiro: deleção em massa, disjuntor de writes, 3-way merge,
+  first-run content-aware, block-and-warn de binário.
+
 ### Decisões de hardening
 1. **First-run content-aware** (beta-blocker): antes de `conflict`, se `localExists && remoteExists && !base`,
    baixar/heshear o remoto e comparar com o local; iguais → adotar baseline (noop); diferentes → conflito.

@@ -5,7 +5,7 @@ import { PANavView, VIEW_TYPE_PA_NAV } from "./nav";
 import { PASideView, VIEW_TYPE_PA_SIDE, momentumNoteType } from "./side";
 import { WhatsNewModal, CHANGELOG, cmpVersion } from "./whatsnew";
 import { CustomPage } from "./types";
-import { FormModal, ConfirmModal, FieldSpec } from "./ui";
+import { FormModal, ConfirmModal, ChoiceModal, FieldSpec } from "./ui";
 import {
   GoogleToken, authorizeGoogle, completeGoogleAuth, GOOGLE_PROTOCOL_ACTION,
   GoogleAuthExpiredError, revokeGoogleToken, redactSecrets, isUserCapError,
@@ -13,8 +13,10 @@ import {
 import { GTSyncService } from "./gtSync";
 import { FileManagerView, VIEW_TYPE_QUICK } from "./quickAccess";
 import { DriveBrowserView, VIEW_TYPE_DRIVE, DriveViewConfig } from "./driveBrowser";
-import { runDriveSync, DriveBaselineStore, VaultFS } from "./driveSync";
+import { runDriveSync, DriveBaselineStore, VaultFS, DriveConflictStrategy, DEFAULT_CONFLICT_STRATEGY, ConflictChoice, DriveSyncResult, DriveSyncSummary, acquireDriveLock, releaseDriveLock } from "./driveSync";
 import { authorizeDrive, completeDriveAuth, ensureFreshDriveToken, revokeDriveToken, DriveAuthExpiredError, DRIVE_PROTOCOL_ACTION } from "./driveAuth";
+import { DriveFolderPicker } from "./driveFolderPicker";
+import { isProActive, proNeedsRecheck, validateLicense, PRO_BETA_FREE, PRO_PRICE, PRO_CHECKOUT_URL, PRO_BETA_OFFER, ProState } from "./pro";
 interface PASettings {
   dataRoot: string;
   notifyTasks: boolean;
@@ -33,9 +35,22 @@ interface PASettings {
   googleDriveEnabled?: boolean;
   driveToken?: GoogleToken | null; // separate from googleToken — Drive auth never touches Tasks
   driveFolderId?: string;          // the Drive folder synced (empty = My Drive root)
+  driveFolderName?: string;        // human display name of the chosen Drive folder
   driveMirrorDir?: string;         // the local vault folder mirrored against Drive
   driveSyncInterval?: number;      // 0=manual, or minutes
   driveBaselines?: Record<string, { fileId: string; md5: string; modifiedTime: string; base?: string }>;
+  driveConflictStrategy?: DriveConflictStrategy; // how two-sided conflicts resolve (default keep-both)
+  driveSyncOnStartup?: boolean;   // run a Drive sync shortly after launch
+  driveSyncOnChange?: boolean;    // event-driven: sync (debounced) when vault files change
+  driveSyncBinaries?: boolean;    // include binary files (real upload/download) instead of skipping
+  driveIncremental?: boolean;     // use Changes API to skip the full scan when remote is unchanged
+  driveDeviceId?: string;         // stable per-device id for the multi-device Drive lock
+  driveLastSync?: DriveSyncSummary; // persisted summary of the last sync (status panel)
+  // Momentum Pro (one-time unlock; license key validated against the store, see pro.ts).
+  // Beta-free for now (see pro.ts PRO_BETA_FREE).
+  proLicenseKey?: string;
+  proValid?: boolean;
+  proCheckedAt?: number;
   driveCursor?: string;            // Changes API page token (last clean cycle)
 }
 const DEFAULT_SETTINGS: PASettings = {
@@ -54,10 +69,16 @@ const DEFAULT_SETTINGS: PASettings = {
   googleDriveEnabled: false,
   driveToken: null,
   driveFolderId: "",
+  driveFolderName: "",
   driveMirrorDir: "Drive",
   driveSyncInterval: 0,
   driveBaselines: {},
   driveCursor: "",
+  driveConflictStrategy: DEFAULT_CONFLICT_STRATEGY,
+  driveSyncOnStartup: false,
+  driveSyncOnChange: false,
+  driveSyncBinaries: false,
+  driveIncremental: false,
 };
 const LEGACY_DATA_ROOT = "Personal Assistant";
 /** Bump when the readable-notes migration changes so the guarded auto-run re-triggers. */
@@ -101,7 +122,13 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       setPins: async (paths) => { this.settings.quickAccessPins = paths; await this.saveSettings(); },
       drive: this.driveViewConfig(),
       driveEnabled: () => !!this.settings.googleDriveEnabled,
+      openDriveBrowser: () => void this.activateDriveView(),
+      driveStatus: () => this.getDriveStatus(),
     }));
+
+    // Drive (beta) status bar — shows the last sync's counters; empty when Drive is off.
+    this.driveStatusEl = this.addStatusBarItem();
+    this.updateDriveStatus(this.settings.googleDriveEnabled ? "Drive: idle" : "");
 
     // Google Tasks OAuth returns here: the Cloudflare Worker deep-links obsidian://momentum-google
     // with the auth code, which completes the pending authorization (desktop and mobile).
@@ -288,6 +315,14 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       // Start the periodic sync interval if a non-manual frequency is configured.
       this.resetGoogleSyncInterval();
       this.resetDriveSyncInterval();
+      // Optional Drive sync on startup (off by default; unconfirmed so its guards still apply).
+      if (this.settings.driveSyncOnStartup && this.settings.googleDriveEnabled && this.settings.driveToken) {
+        window.setTimeout(() => void this.syncGoogleDrive(false), 4000);
+      }
+      // Optional event-driven Drive sync: watch vault changes and sync (debounced).
+      this.registerDriveChangeWatcher();
+      // Background license re-check (no-op during the free beta).
+      window.setTimeout(() => void this.maybeRecheckPro(), 8000);
       // Once the vault has settled, seed the known-boards registry and (on later launches)
       // catch boards deleted while this device was closed. First ever run only initializes.
       window.setTimeout(() => void this.detectDeletedBoards(), 6000);
@@ -625,6 +660,37 @@ export default class MomentumPlugin extends Plugin implements PAHost {
 
   /** A fresh Drive access_token, or null when Drive is off/disconnected. Reads ONLY driveToken
    *  (never googleToken) and refreshes through the Drive broker — Tasks is never touched. */
+  /** Public accessor for a fresh Drive access token (used by the settings folder picker). */
+  async getDriveToken(): Promise<string | null> { return this.driveAccessToken(); }
+
+  // ---- Momentum Pro (one-time unlock) ----
+  private proState(): ProState {
+    return { key: this.settings.proLicenseKey, valid: this.settings.proValid, checkedAt: this.settings.proCheckedAt };
+  }
+  /** Is a Pro feature unlocked? True during the closed beta (PRO_BETA_FREE) or with a valid license. */
+  isProEnabled(): boolean { return isProActive(this.proState()); }
+
+  /** Activate Pro with the license key from the store checkout (validated against the store's API). */
+  async activatePro(key: string): Promise<void> {
+    const ok = await validateLicense(key);
+    this.settings.proLicenseKey = key.trim();
+    this.settings.proValid = ok;
+    this.settings.proCheckedAt = Date.now();
+    await this.saveSettings();
+    new Notice(ok ? "✓ Momentum Pro activated — thank you!" : "That license key couldn't be verified.");
+  }
+
+  /** Background re-validation of the license when the last check is stale (no-op during beta). */
+  private async maybeRecheckPro(): Promise<void> {
+    if (!proNeedsRecheck(this.proState()) || !this.settings.proLicenseKey) return;
+    try {
+      const ok = await validateLicense(this.settings.proLicenseKey);
+      this.settings.proValid = ok;
+      this.settings.proCheckedAt = Date.now();
+      await this.saveSettings();
+    } catch { /* keep the last known state offline */ }
+  }
+
   private async driveAccessToken(): Promise<string | null> {
     const tok = this.settings.driveToken;
     if (!this.settings.googleDriveEnabled || !tok) return null;
@@ -644,6 +710,8 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       getToken: () => this.driveAccessToken(),
       mirrorDir: () => this.settings.driveMirrorDir ?? "Drive",
       driveFolderId: () => this.settings.driveFolderId ?? "",
+      dataRoot: () => this.settings.dataRoot ?? "",
+      syncNow: (onProgress) => this.syncGoogleDrive(true, onProgress),
     };
   }
 
@@ -661,50 +729,166 @@ export default class MomentumPlugin extends Plugin implements PAHost {
     };
   }
 
-  /** VaultFS over the configured mirror folder. */
+  /**
+   * VaultFS over the mirror scope, keyed by RELATIVE PATH (so subfolders sync, not just a flat
+   * folder). `driveMirrorDir` = "" means WHOLE VAULT — in that mode the plugin's own data root
+   * (dataRoot) is excluded, to avoid a feedback loop with its own logs/notes and to never let a
+   * Drive pull overwrite the app's live state mid-operation.
+   */
   private driveVaultFS(): VaultFS {
-    const dir = normalizePath(this.settings.driveMirrorDir || "Drive");
-    const p = (name: string) => normalizePath(`${dir}/${name}`);
+    const raw = this.settings.driveMirrorDir ?? "Drive";
+    const base = raw === "" ? "" : normalizePath(raw); // "" = whole vault
+    const dataRoot = normalizePath(this.settings.dataRoot || "");
+    const toFull = (rel: string) => normalizePath(base ? `${base}/${rel}` : rel);
+    const inScope = (path: string): boolean => {
+      if (base) return path === base || path.startsWith(`${base}/`);
+      if (dataRoot && (path === dataRoot || path.startsWith(`${dataRoot}/`))) return false; // exclude plugin data
+      return true;
+    };
+    const ensureFolders = async (fullPath: string): Promise<void> => {
+      const slash = fullPath.lastIndexOf("/");
+      if (slash < 0) return;
+      const parts = fullPath.slice(0, slash).split("/");
+      let cur = "";
+      for (const seg of parts) {
+        cur = cur ? `${cur}/${seg}` : seg;
+        if (!(this.app.vault.getAbstractFileByPath(cur) instanceof TFolder)) {
+          await this.app.vault.createFolder(cur).catch(() => {});
+        }
+      }
+    };
     return {
       list: async () => {
-        const folder = this.app.vault.getAbstractFileByPath(dir);
-        if (!(folder instanceof TFolder)) return [];
-        return folder.children.filter((c): c is TFile => c instanceof TFile).map((f) => f.name);
+        const out: string[] = [];
+        for (const f of this.app.vault.getFiles()) {
+          if (!inScope(f.path)) continue;
+          out.push(base ? f.path.slice(base.length + 1) : f.path);
+        }
+        return out;
       },
-      read: async (name) => {
-        const f = this.app.vault.getAbstractFileByPath(p(name));
+      read: async (rel) => {
+        const f = this.app.vault.getAbstractFileByPath(toFull(rel));
         return f instanceof TFile ? this.app.vault.read(f) : "";
       },
-      write: async (name, content) => {
-        if (!this.app.vault.getAbstractFileByPath(dir)) await this.app.vault.createFolder(dir).catch(() => {});
-        const f = this.app.vault.getAbstractFileByPath(p(name));
+      write: async (rel, content) => {
+        const full = toFull(rel);
+        await ensureFolders(full);
+        const f = this.app.vault.getAbstractFileByPath(full);
         if (f instanceof TFile) await this.app.vault.modify(f, content);
-        else await this.app.vault.create(p(name), content);
+        else await this.app.vault.create(full, content);
       },
-      exists: async (name) => this.app.vault.getAbstractFileByPath(p(name)) instanceof TFile,
-      trash: async (name) => {
-        const f = this.app.vault.getAbstractFileByPath(p(name));
+      exists: async (rel) => this.app.vault.getAbstractFileByPath(toFull(rel)) instanceof TFile,
+      trash: async (rel) => {
+        const f = this.app.vault.getAbstractFileByPath(toFull(rel));
         if (f instanceof TFile) await this.app.fileManager.trashFile(f); // reversible, respects user preference
+      },
+      mtime: async (rel) => {
+        const f = this.app.vault.getAbstractFileByPath(toFull(rel));
+        return f instanceof TFile ? f.stat.mtime : 0;
+      },
+      readBinary: async (rel) => {
+        const f = this.app.vault.getAbstractFileByPath(toFull(rel));
+        return f instanceof TFile ? this.app.vault.readBinary(f) : new ArrayBuffer(0);
+      },
+      writeBinary: async (rel, data) => {
+        const full = toFull(rel);
+        await ensureFolders(full);
+        const f = this.app.vault.getAbstractFileByPath(full);
+        if (f instanceof TFile) await this.app.vault.modifyBinary(f, data);
+        else await this.app.vault.createBinary(full, data);
       },
     };
   }
 
+  /** Confirm a Drive mass deletion (over the safety limit). Resolves true only on explicit OK. */
+  private confirmDriveDeletion(msg: string): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      let done = false;
+      const modal = new ConfirmModal(this.app, msg, () => { done = true; resolve(true); });
+      modal.onClose = () => { modal.contentEl.empty(); if (!done) resolve(false); };
+      modal.open();
+    });
+  }
+
+  /** Ask the user how to resolve one Drive conflict (the `ask` strategy). Defaults to keep-both. */
+  private askDriveConflict(name: string): Promise<ConflictChoice> {
+    return new Promise<ConflictChoice>((resolve) => {
+      new ChoiceModal<ConflictChoice>(
+        this.app,
+        `Drive conflict on "${name}": local and remote both changed. Which version do you want to keep?`,
+        [
+          { label: "Keep both", value: "both", cta: true },
+          { label: "Keep local", value: "local" },
+          { label: "Keep remote", value: "remote" },
+        ],
+        "both",
+        (choice) => resolve(choice),
+      ).open();
+    });
+  }
+
   /** Run one bidirectional Drive sync cycle. `confirmed` (manual) bypasses the mass-change guard.
    *  Any Drive error is contained here and never affects the Tasks sync. */
-  async syncGoogleDrive(confirmed = false): Promise<void> {
+  async syncGoogleDrive(confirmed = false, onProgress?: (p: { done: number; total: number }) => void): Promise<void> {
+    if (this.driveSyncing) { new Notice("Drive: a sync is already running."); return; }
+    // Google Drive sync is the Momentum Pro feature (single choke point: covers the manual
+    // button, command, startup, interval and on-change paths). No-op while PRO_BETA_FREE.
+    if (!this.isProEnabled()) { new Notice("Google Drive sync is a momentum pro feature. Unlock it in settings."); return; }
     const token = await this.driveAccessToken();
     if (!token) { new Notice("Google Drive: not connected."); return; }
+    this.driveSyncing = true;
+    this.updateDriveStatus("Drive: syncing…");
+    const progress = (p: { done: number; total: number }): void => {
+      this.updateDriveStatus(p.total ? `Drive: syncing ${p.done}/${p.total}` : "Drive: syncing…");
+      onProgress?.(p);
+    };
+    const rootId = this.settings.driveFolderId || "root";
+    const deviceId = this.getDriveDeviceId();
+    let locked = false;
     try {
+      // Multi-device guard: claim the Drive-folder lock so two devices don't clobber each other.
+      const lock = await acquireDriveLock(token, rootId, deviceId);
+      if (!lock.ok) {
+        this.updateDriveStatus("Drive: locked (other device)");
+        new Notice(`Drive: another device is syncing this folder. Try again in a moment.`);
+        return;
+      }
+      locked = true;
       const result = await runDriveSync({
         token,
         driveFolderId: this.settings.driveFolderId || undefined,
         fs: this.driveVaultFS(),
         baselines: this.driveBaselineStore(),
         confirmed,
+        conflictStrategy: this.settings.driveConflictStrategy ?? DEFAULT_CONFLICT_STRATEGY,
+        resolveConflict: (name) => this.askDriveConflict(name),
+        confirmDelete: (msg) => this.confirmDriveDeletion(msg),
+        onProgress: progress,
+        syncBinaries: !!this.settings.driveSyncBinaries,
+        incremental: !!this.settings.driveIncremental,
       });
+      this.settings.driveLastSync = {
+        time: new Date().toISOString(),
+        scope: this.settings.driveMirrorDir === "" ? "whole vault" : (this.settings.driveMirrorDir || "Drive"),
+        pushed: result.pushed, pulled: result.pulled, merged: result.merged, conflicted: result.conflicted,
+        deletedLocal: result.deletedLocal, deletedRemote: result.deletedRemote, skippedBinary: result.skippedBinary,
+        blocked: result.blocked, errorCount: result.errors.length,
+        issuesTotal: result.issues.length,
+        issues: result.issues.slice(0, 100),
+      };
       await this.saveSettings();
+      void this.writeDriveDebugLog(result);
+      const summary = [
+        result.pushed ? `↑${result.pushed}` : "",
+        result.pulled ? `↓${result.pulled}` : "",
+        result.merged ? `⇄${result.merged}` : "",
+        result.conflicted ? `⚠︎${result.conflicted}` : "",
+        (result.deletedLocal + result.deletedRemote) ? `🗑${result.deletedLocal + result.deletedRemote}` : "",
+        result.skippedBinary ? `⊘${result.skippedBinary}` : "",
+      ].filter(Boolean).join(" ");
+      this.updateDriveStatus(`Drive: ${summary || "idle"}`);
       if (result.blocked) {
-        new Notice(`Drive: ${result.blocked} pending changes (over the limit). Use "Sync now" to confirm.`);
+        new Notice(`Drive: ${result.blocked} pending changes (over a safety limit). Use "Sync now" to confirm.`);
       } else {
         const parts = [
           result.pushed ? `↑${result.pushed}` : "",
@@ -712,12 +896,126 @@ export default class MomentumPlugin extends Plugin implements PAHost {
           result.merged ? `⇄${result.merged}` : "",
           result.conflicted ? `⚠︎${result.conflicted}` : "",
           (result.deletedLocal + result.deletedRemote) ? `🗑${result.deletedLocal + result.deletedRemote}` : "",
+          result.skippedBinary ? `⊘${result.skippedBinary}` : "",
         ].filter(Boolean).join(" ");
         new Notice(`Drive sync: ${parts || "nothing to do"}${result.errors.length ? ` (${result.errors.length} errors)` : ""}.`);
       }
     } catch (e) {
-      new Notice(`Drive sync failed: ${e instanceof Error ? e.message : String(e)}`);
+      const msg = e instanceof Error ? e.message : String(e);
+      void this.writeDriveDebugLog(null, msg);
+      this.updateDriveStatus("Drive: error");
+      new Notice(`Drive sync failed: ${msg}`);
+    } finally {
+      if (locked) await releaseDriveLock(token, rootId, deviceId).catch(() => {});
+      // Keep the guard up briefly after the run so the sync's own trailing write events don't
+      // immediately re-trigger the event-driven watcher.
+      window.setTimeout(() => { this.driveSyncing = false; }, 1500);
     }
+  }
+
+  /** Append a human-readable Drive sync entry to Config/google-drive-debug.md (diagnostics). */
+  private async writeDriveDebugLog(result: DriveSyncResult | null, fatal?: string): Promise<void> {
+    try {
+      const path = `${this.settings.dataRoot}/Config/google-drive-debug.md`;
+      const scope = this.settings.driveMirrorDir === "" ? "whole vault" : (this.settings.driveMirrorDir || "Drive");
+      const lines: string[] = [];
+      lines.push(`## ${new Date().toISOString()}`);
+      lines.push(`- scope: ${scope} · driveFolder: ${this.settings.driveFolderName || "My Drive root"} (${this.settings.driveFolderId || "root"})`);
+      if (fatal) lines.push(`- FATAL: ${fatal}`);
+      if (result) {
+        lines.push(`- pushed=${result.pushed} pulled=${result.pulled} merged=${result.merged} conflicted=${result.conflicted} deletedLocal=${result.deletedLocal} deletedRemote=${result.deletedRemote} skippedBinary=${result.skippedBinary} blocked=${result.blocked}`);
+        if (result.errors.length) lines.push(`- errors (${result.errors.length}):`, ...result.errors.slice(0, 30).map((e) => `  - ${e}`));
+        if (result.notes.length) lines.push(`- notes (${result.notes.length}):`, ...result.notes.slice(0, 30).map((n) => `  - ${n}`));
+      }
+      lines.push("");
+      const dir = `${this.settings.dataRoot}/Config`;
+      if (!(this.app.vault.getAbstractFileByPath(dir) instanceof TFolder)) await this.app.vault.createFolder(dir).catch(() => {});
+      const existing = this.app.vault.getAbstractFileByPath(path);
+      const block = lines.join("\n");
+      if (existing instanceof TFile) {
+        const prev = await this.app.vault.read(existing);
+        await this.app.vault.modify(existing, `${block}\n${prev}`); // newest on top
+      } else {
+        await this.app.vault.create(path, `# Google Drive sync log\n\n${block}\n`);
+      }
+    } catch { /* logging must never break the sync */ }
+  }
+
+  private driveStatusEl: HTMLElement | null = null;
+  /** Update the Drive status-bar item (no-op if it doesn't exist). */
+  private updateDriveStatus(text: string): void {
+    if (this.driveStatusEl) this.driveStatusEl.setText(text);
+  }
+
+  /** True while a Drive sync is running — used to ignore the sync's OWN vault writes in the
+   *  event-driven watcher (otherwise a pull would re-trigger a sync in a loop). */
+  private driveSyncing = false;
+  private driveChangeTimer: number | null = null;
+
+  /** Instant Drive status for the File Manager panel: last-sync summary + compliance counts
+   *  (baselines that are still in-scope local files vs total in-scope files). No network. */
+  getDriveStatus(): { last?: DriveSyncSummary; tracked: number; inScope: number; logPath: string; files: { path: string; status: "synced" | "local"; at?: string; mtime: number }[] } {
+    const raw = this.settings.driveMirrorDir ?? "Drive";
+    const base = raw === "" ? "" : normalizePath(raw);
+    const dataRoot = normalizePath(this.settings.dataRoot || "");
+    const inScope: { rel: string; mtime: number }[] = [];
+    for (const f of this.app.vault.getFiles()) {
+      if (base) {
+        if (f.path === base || f.path.startsWith(`${base}/`)) inScope.push({ rel: f.path.slice(base.length + 1), mtime: f.stat.mtime });
+      } else {
+        if (dataRoot && (f.path === dataRoot || f.path.startsWith(`${dataRoot}/`))) continue;
+        inScope.push({ rel: f.path, mtime: f.stat.mtime });
+      }
+    }
+    const baselines = this.settings.driveBaselines ?? {};
+    let tracked = 0;
+    const files = inScope.map(({ rel, mtime }) => {
+      const b = baselines[rel];
+      if (b) { tracked++; return { path: rel, status: "synced" as const, at: b.modifiedTime, mtime }; }
+      return { path: rel, status: "local" as const, mtime };
+    });
+    // Local-only first (the actionable ones), then alphabetical.
+    files.sort((a, b2) => (a.status === b2.status ? a.path.localeCompare(b2.path) : a.status === "local" ? -1 : 1));
+    const logPath = `${this.settings.dataRoot}/Config/google-drive-debug.md`;
+    return { last: this.settings.driveLastSync, tracked, inScope: inScope.length, logPath, files };
+  }
+
+  /** Stable per-device id for the multi-device Drive lock (generated once, then persisted). */
+  private getDriveDeviceId(): string {
+    if (!this.settings.driveDeviceId) {
+      this.settings.driveDeviceId = (window.crypto?.randomUUID?.() ?? `dev-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+      void this.saveSettings();
+    }
+    return this.settings.driveDeviceId;
+  }
+
+  /** Is `path` inside the current Drive sync scope (a subfolder, or whole vault minus dataRoot)? */
+  private pathInDriveScope(path: string): boolean {
+    const raw = this.settings.driveMirrorDir ?? "Drive";
+    if (raw === "") {
+      const dr = this.settings.dataRoot || "";
+      return !(dr && (path === dr || path.startsWith(`${dr}/`)));
+    }
+    return path === raw || path.startsWith(`${raw}/`);
+  }
+
+  /** Event-driven Drive sync: on any in-scope vault change, schedule a debounced sync. Gated by
+   *  driveSyncOnChange; skips the sync's own writes via driveSyncing. */
+  private registerDriveChangeWatcher(): void {
+    const schedule = (path: string): void => {
+      if (!this.settings.driveSyncOnChange || !this.settings.googleDriveEnabled || !this.settings.driveToken) return;
+      if (this.driveSyncing) return; // our own writes during a sync must not re-trigger it
+      if (!this.pathInDriveScope(path)) return;
+      if (this.driveChangeTimer !== null) window.clearTimeout(this.driveChangeTimer);
+      this.driveChangeTimer = window.setTimeout(() => {
+        this.driveChangeTimer = null;
+        void this.syncGoogleDrive(false);
+      }, 8000); // debounce: wait for a lull in edits before syncing
+    };
+    this.registerEvent(this.app.vault.on("modify", (f) => schedule(f.path)));
+    this.registerEvent(this.app.vault.on("create", (f) => schedule(f.path)));
+    this.registerEvent(this.app.vault.on("delete", (f) => schedule(f.path)));
+    this.registerEvent(this.app.vault.on("rename", (f) => schedule(f.path)));
   }
 
   private driveSyncTimer: number | null = null;
@@ -740,7 +1038,9 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       this.settings.googleDriveEnabled = true;
       await this.saveSettings();
       this.resetDriveSyncInterval();
+      this.updateDriveStatus("Drive: idle");
       new Notice("✓ connected to Google Drive (beta).");
+      new Notice("⚠ Drive is beta: back up your vault before the first sync. Binary files are skipped for now.", 10000);
       const settingTab = (this.app as unknown as { setting?: { open: () => void; openTabById: (id: string) => void } }).setting;
       if (settingTab) { settingTab.open(); settingTab.openTabById(this.manifest.id); }
     } catch (e) {
@@ -768,6 +1068,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
     this.settings.driveToken = null;
     await this.saveSettings();
     this.resetDriveSyncInterval();
+    this.updateDriveStatus("");
     new Notice(outcome.ok
       ? "✓ Google Drive: access revoked and disconnected."
       : "Google Drive: disconnected locally; revocation wasn't confirmed. You can also remove access at myaccount.google.com/permissions.");
@@ -1429,7 +1730,7 @@ class PASettingTab extends PluginSettingTab {
       .setDesc(
         "Browse and sync files between a drive folder and a vault folder. Uses a SEPARATE Google " +
         "sign-in from Tasks. Full drive access is in Google verification — until it completes, " +
-        "connect with a test-user account.",
+        "connect with a test-user account. Syncing is a Momentum Pro feature (free during the beta).",
       )
       .addToggle((t) =>
         t.setValue(!!this.plugin.settings.googleDriveEnabled).onChange(async (v) => {
@@ -1456,16 +1757,43 @@ class PASettingTab extends PluginSettingTab {
           }
         });
 
+      // Local scope: a vault folder, or the whole vault.
       new Setting(containerEl)
-        .setName("Vault mirror folder")
-        .setDesc("Local folder where drive files are mirrored for editing.")
-        .addText((t) =>
-          t.setPlaceholder("Drive")
-            .setValue(this.plugin.settings.driveMirrorDir ?? "Drive")
-            .onChange(async (v) => {
-              this.plugin.settings.driveMirrorDir = v.trim() || "Drive";
-              await this.plugin.saveSettings();
-            })
+        .setName("Vault folder to sync")
+        .setDesc("Which local folder mirrors drive. Choose \"whole vault\" to sync everything (the plugin's own data folder is excluded to stay safe).")
+        .addDropdown((d) => {
+          d.addOption("", "🗂️ whole vault");
+          const cur = this.plugin.settings.driveMirrorDir ?? "Drive";
+          const folders = this.app.vault.getRoot().children
+            .filter((c): c is TFolder => c instanceof TFolder)
+            .map((f) => f.name)
+            .sort((a, b) => a.localeCompare(b));
+          if (cur && !folders.includes(cur)) folders.push(cur); // keep a custom/nested value visible
+          for (const name of folders) d.addOption(name, name);
+          d.setValue(cur);
+          d.onChange(async (v) => {
+            this.plugin.settings.driveMirrorDir = v; // "" = whole vault
+            await this.plugin.saveSettings();
+          });
+        });
+
+      // Remote scope: which Drive folder, via the in-plugin picker.
+      new Setting(containerEl)
+        .setName("Google Drive folder")
+        .setDesc(`Currently: ${this.plugin.settings.driveFolderName || "My Drive (root)"}. Files sync into this folder on Drive.`)
+        .addButton((b) =>
+          b.setButtonText("Choose folder…").onClick(() => {
+            void (async () => {
+              const token = await this.plugin.getDriveToken();
+              if (!token) { new Notice("Connect Google Drive first."); return; }
+              new DriveFolderPicker(this.app, token, async (choice) => {
+                this.plugin.settings.driveFolderId = choice.id;
+                this.plugin.settings.driveFolderName = choice.name;
+                await this.plugin.saveSettings();
+                rerender();
+              }).open();
+            })();
+          })
         );
 
       new Setting(containerEl)
@@ -1495,12 +1823,104 @@ class PASettingTab extends PluginSettingTab {
           });
 
         new Setting(containerEl)
+          .setName("Conflict resolution")
+          .setDesc("What happens when a file changed on both sides. Keep both is the safest: it never overwrites.")
+          .addDropdown((d) => {
+            d.addOption("keep-both", "Keep both (recommended)");
+            d.addOption("newer-wins", "Newer wins");
+            d.addOption("local-wins", "Local wins");
+            d.addOption("remote-wins", "Remote wins");
+            d.addOption("ask", "Ask me each time");
+            d.setValue(this.plugin.settings.driveConflictStrategy ?? DEFAULT_CONFLICT_STRATEGY);
+            d.onChange(async (v) => {
+              this.plugin.settings.driveConflictStrategy = v as DriveConflictStrategy;
+              await this.plugin.saveSettings();
+            });
+          });
+
+        new Setting(containerEl)
+          .setName("Sync on startup")
+          .setDesc("Run a drive sync a few seconds after Obsidian launches.")
+          .addToggle((t) =>
+            t.setValue(!!this.plugin.settings.driveSyncOnStartup).onChange(async (v) => {
+              this.plugin.settings.driveSyncOnStartup = v;
+              await this.plugin.saveSettings();
+            })
+          );
+
+        new Setting(containerEl)
+          .setName("Sync on change")
+          .setDesc("Automatically sync a few seconds after you edit files in scope (event-driven, debounced).")
+          .addToggle((t) =>
+            t.setValue(!!this.plugin.settings.driveSyncOnChange).onChange(async (v) => {
+              this.plugin.settings.driveSyncOnChange = v;
+              await this.plugin.saveSettings();
+            })
+          );
+
+        new Setting(containerEl)
+          .setName("Sync binary files")
+          .setDesc("Upload/download images, pdfs and other binaries too (off = text/Markdown only, binaries skipped).")
+          .addToggle((t) =>
+            t.setValue(!!this.plugin.settings.driveSyncBinaries).onChange(async (v) => {
+              this.plugin.settings.driveSyncBinaries = v;
+              await this.plugin.saveSettings();
+            })
+          );
+
+        new Setting(containerEl)
+          .setName("Incremental sync")
+          .setDesc("Skip the full scan when nothing changed on drive (faster). Falls back to a full scan on any remote change.")
+          .addToggle((t) =>
+            t.setValue(!!this.plugin.settings.driveIncremental).onChange(async (v) => {
+              this.plugin.settings.driveIncremental = v;
+              await this.plugin.saveSettings();
+            })
+          );
+
+        new Setting(containerEl)
           .setName("Sync drive now")
           .setDesc("Bidirectional sync: push, pull, 3-way merge, and safe deletion.")
           .addButton((b) =>
             b.setButtonText("Sync now").setCta().onClick(() => { void this.plugin.syncGoogleDrive(true); })
           );
       }
+    }
+
+    // ── Momentum Pro ──────────────────────────────────────────────────────
+    new Setting(containerEl).setName("Momentum pro").setHeading();
+    const proOn = this.plugin.isProEnabled();
+    new Setting(containerEl)
+      .setName(PRO_BETA_FREE ? "Status: beta — free" : proOn ? "Status: active" : "Status: not active")
+      .setDesc(
+        PRO_BETA_FREE
+          ? "During the closed beta, all Pro features (like Google Drive sync) are unlocked for free."
+          : proOn
+            ? "Active — thank you!"
+            : `A one-time unlock (${PRO_PRICE}) for Google Drive sync and other extras.`,
+      );
+
+    if (!PRO_BETA_FREE && !proOn) {
+      new Setting(containerEl)
+        .setName(PRO_BETA_OFFER ? "Get momentum pro — free for the first 100 beta users" : "Buy momentum pro")
+        .setDesc(
+          PRO_BETA_OFFER
+            ? "Free while the beta lasts (first 100 sign-ups), then a one-time " + PRO_PRICE + ". " +
+              "Checkout opens in your browser and gives you a license key to paste below."
+            : `One-time ${PRO_PRICE}, handled by the store (tax included). Opens checkout in your browser.`,
+        )
+        .addButton((b) =>
+          b.setButtonText(PRO_BETA_OFFER ? "Get it free" : "Buy").setCta().onClick(() => {
+            if (PRO_CHECKOUT_URL) window.open(PRO_CHECKOUT_URL, "_blank");
+            else new Notice("Checkout link isn't configured yet.");
+          }),
+        );
+      let keyInput = this.plugin.settings.proLicenseKey ?? "";
+      new Setting(containerEl)
+        .setName("Activate with your license key")
+        .setDesc("After checkout, your license key is shown on screen and emailed to you. Paste it here and activate. Only the key is sent to the store to verify it — nothing else.")
+        .addText((t) => t.setPlaceholder("Your license key").setValue(keyInput).onChange((v) => { keyInput = v; }))
+        .addButton((b) => b.setButtonText("Activate").onClick(() => { void this.plugin.activatePro(keyInput).then(() => rerender()); }));
     }
   }
 }

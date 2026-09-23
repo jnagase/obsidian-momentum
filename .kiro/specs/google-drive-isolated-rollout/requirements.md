@@ -165,7 +165,31 @@ por lado + conflito preserva os dois), [sipamungkas/obsidian-s3-sync-plugin](htt
 9. THE UI SHALL avisar o usuário a fazer **backup** antes de ligar o Drive (beta), e mostrar
    contadores de resultado (↑/↓/⇄/⚠/🗑).
 
+### Requisito 10 — Escopo de sync configurável (pasta local + pasta do Drive) e subpastas
+
+**User story:** Como usuário, quero escolher **qual pasta local** sincronizar (ou o **vault inteiro**)
+e **qual pasta no Google Drive** é o destino, navegando o Drive por um seletor — e quero que
+**subpastas** sejam preservadas nos dois lados.
+
+#### Acceptance Criteria
+1. THE motor SHALL sincronizar por **caminho relativo** (não só nome), preservando a árvore de
+   **subpastas** — criando as pastas que faltam no Drive (no push) e no vault (no pull).
+2. THE UI SHALL ter **dois campos**: a **pasta local** (`driveMirrorDir`) via dropdown das pastas
+   do vault, incluindo a opção **"Vault inteiro"**; e a **pasta do Drive** (`driveFolderId`),
+   escolhida por um **seletor próprio** do plugin (navega o Drive via a Drive API já existente,
+   sem o Google Picker widget), guardando o id + um nome legível (`driveFolderName`).
+3. WHEN a pasta local for **"Vault inteiro"** (`driveMirrorDir` = ""), THE engine SHALL sincronizar
+   todos os arquivos do vault, **exceto** a pasta de dados do próprio plugin (`dataRoot`), para
+   evitar loop de feedback com os próprios logs/notas e nunca deixar um pull sobrescrever o estado
+   vivo do plugin.
+4. THE guardas de segurança (deleção em massa, disjuntor de writes, block-and-warn de binário,
+   3-way merge) SHALL continuar valendo no modo vault-inteiro.
+5. WHERE o seletor cria uma nova subpasta no Drive, THE plugin SHALL usar `files.create`
+   (mimeType folder) e reaproveitar a pasta existente de mesmo nome quando houver.
+
 ## Fora de escopo
 - Mudar qualquer coisa do Google Tasks (worker, escopo, client, token, sync).
 - Escopo `drive.file` (foi descartado; o autor optou pelo `drive` full).
 - Sync de tipos nativos do Google (Docs/Sheets) além de export para leitura (herdado do backup).
+- **Upload/download binário real no modo vault-inteiro** (binário segue block-and-warn até a task 21);
+  o vault do autor é majoritariamente binário (pdf/jpg/docx), que fica pulado com aviso no beta.

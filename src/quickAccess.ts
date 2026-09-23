@@ -1,6 +1,11 @@
-import { ItemView, WorkspaceLeaf, TFile, TFolder, setIcon, Notice } from "obsidian";
-import { drawDonut, drawTreemap, drawLineChart, drawRing } from "./charts";
-import { DrivePanel, DriveViewConfig } from "./driveBrowser";
+import { ItemView, WorkspaceLeaf, TFile, TFolder, setIcon, Notice, normalizePath } from "obsidian";
+import { drawDonut, drawTreemap, drawLineChart, drawRing, drawClockProgress } from "./charts";
+import { DriveViewConfig } from "./driveBrowser";
+import { DriveSyncSummary, walkRemoteTree } from "./driveSync";
+
+/** Enriched per-file status after an on-demand "Check Drive" (adds drive-only / diverged / remote). */
+type CheckStatus = "synced" | "local" | "pending" | "diverged" | "remote" | "drive";
+interface CheckedFile { path: string; cstatus: CheckStatus; mtime: number; at?: string }
 
 export const VIEW_TYPE_QUICK = "momentum-quick-access";
 
@@ -12,6 +17,10 @@ export interface QuickAccessConfig {
   setPins: (paths: string[]) => Promise<void>;
   drive?: DriveViewConfig;
   driveEnabled?: () => boolean;
+  /** Open the full standalone Drive browser view. */
+  openDriveBrowser?: () => void;
+  /** Instant Drive status (last-sync summary + compliance counts + per-file table). No network. */
+  driveStatus?: () => { last?: DriveSyncSummary; tracked: number; inScope: number; logPath: string; files: { path: string; status: "synced" | "local"; at?: string; mtime: number }[] };
 }
 
 /** Palette shared across the dashboard visualizations. */
@@ -54,7 +63,12 @@ function topFolder(path: string): string {
 export class FileManagerView extends ItemView {
   private cfg: QuickAccessConfig;
   private bodyEl: HTMLElement | null = null;
-  private drivePanel: DrivePanel | null = null;
+  /** The "Your folders" card for the Drive mirror folder — target for the sync clock overlay. */
+  private mirrorCardEl: HTMLElement | null = null;
+  private driveSyncing = false;
+  /** Result of the last on-demand "Check Drive" walk (enriched statuses incl. drive-only/diverged). */
+  private driveCheck: { files: CheckedFile[]; at: number } | null = null;
+  private driveChecking = false;
 
   constructor(leaf: WorkspaceLeaf, cfg: QuickAccessConfig) {
     super(leaf);
@@ -62,14 +76,15 @@ export class FileManagerView extends ItemView {
   }
 
   getViewType(): string { return VIEW_TYPE_QUICK; }
-  getDisplayText(): string { return "File manager"; }
+  getDisplayText(): string { return "File manager (beta)"; }
   getIcon(): string { return "folder-open"; }
 
   async onOpen(): Promise<void> {
     const root = this.contentEl;
     root.empty();
     root.addClass("pa-quick-root");
-    root.createEl("h3", { text: "🗂️ file manager" });
+    const h = root.createEl("h3", { text: "🗂️ file manager " });
+    h.createSpan({ cls: "pa-beta-tag", text: "beta" });
     this.bodyEl = root.createDiv();
     this.render();
     this.registerEvent(this.app.workspace.on("file-open", () => this.render()));
@@ -114,21 +129,227 @@ export class FileManagerView extends ItemView {
   private renderDriveSection(): void {
     if (!this.cfg.drive || !this.cfg.driveEnabled?.()) return;
     const drive = this.cfg.drive;
-    const sec = this.bodyEl!.createEl("details", { cls: "pa-panel pa-fm-drive" });
-    sec.open = false;
-    const summary = sec.createEl("summary", { cls: "pa-panel-title pa-fm-drive-summary" });
-    summary.createSpan({ text: "☁️ google drive (beta)" });
-    const panelHost = sec.createDiv();
-    // Mount the Drive panel lazily on first expand, so an unconnected Drive doesn't hit the
-    // network until the user opens the section.
-    let mounted = false;
-    sec.ontoggle = () => {
-      if (sec.open && !mounted) {
-        mounted = true;
-        this.drivePanel = new DrivePanel(this.app, panelHost, drive);
-        void this.drivePanel.mount();
+    const sec = this.bodyEl!.createDiv({ cls: "pa-panel pa-fm-drive" });
+
+    const head = sec.createDiv({ cls: "pa-fm-drive-head" });
+    head.createSpan({ cls: "pa-panel-title", text: "☁️ google drive " });
+    head.createSpan({ cls: "pa-beta-tag", text: "beta" });
+    const actions = head.createDiv({ cls: "pa-fm-drive-actions" });
+    if (drive.syncNow) {
+      const btn = actions.createEl("button", { cls: "pa-fm-drive-sync", text: "🔄 Sync now" });
+      btn.onclick = () => void this.runDriveSyncFromFileManager(btn);
+    }
+    const check = actions.createEl("button", { cls: "pa-fm-drive-open", text: this.driveChecking ? "Checking…" : "↯ Check drive" });
+    check.disabled = this.driveChecking;
+    check.onclick = () => void this.checkDrive(check);
+    // Persistent status + per-file table (instant, no network) — driven by the last sync + baselines.
+    // The old live browser (which zeroed out between syncs) was removed.
+    this.renderDriveStatus(sec.createDiv({ cls: "pa-drive-status" }));
+  }
+
+  /** On-demand: walk the Drive folder and enrich the table with drive-only / diverged / remote
+   *  statuses, WITHOUT zeroing the persistent card. Compares remote modifiedTime vs the baseline
+   *  and local mtime vs the last sync — no downloads. */
+  private async checkDrive(btn: HTMLButtonElement): Promise<void> {
+    if (this.driveChecking || !this.cfg.drive) return;
+    const status = this.cfg.driveStatus?.();
+    if (!status) return;
+    this.driveChecking = true;
+    btn.disabled = true;
+    btn.setText("Checking…");
+    try {
+      const token = await this.cfg.drive.getToken();
+      if (!token) { new Notice("Connect Google Drive first."); return; }
+      const tree = await walkRemoteTree(token, this.cfg.drive.driveFolderId() || "root");
+      const localByPath = new Map(status.files.map((f) => [f.path, f]));
+      const merged: CheckedFile[] = [];
+      for (const f of status.files) {
+        const rf = tree.files.get(f.path);
+        if (!rf) { merged.push({ path: f.path, cstatus: "local", mtime: f.mtime, at: f.at }); continue; }
+        const remoteChanged = f.at ? rf.modifiedTime !== f.at : true;
+        const localChanged = f.at ? f.mtime > Date.parse(f.at) : true;
+        let cstatus: CheckStatus;
+        if (f.status === "local") cstatus = "diverged"; // exists both sides but never synced
+        else if (localChanged && remoteChanged) cstatus = "diverged";
+        else if (remoteChanged) cstatus = "remote";
+        else if (localChanged) cstatus = "pending";
+        else cstatus = "synced";
+        merged.push({ path: f.path, cstatus, mtime: f.mtime, at: f.at });
       }
+      for (const [path, rf] of tree.files) {
+        if (!localByPath.has(path)) merged.push({ path, cstatus: "drive", mtime: 0, at: rf.modifiedTime });
+      }
+      this.driveCheck = { files: merged, at: Date.now() };
+      new Notice("Drive check complete.");
+      this.render();
+    } catch (e) {
+      new Notice(`Drive check failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      this.driveChecking = false;
+    }
+  }
+
+  /** Instant Drive status card: last sync, compliance %, counters, files that didn't sync, and a
+   *  persistent per-file table (synced / local only) — all from the last sync + baselines, no walk. */
+  private renderDriveStatus(el: HTMLElement): void {
+    const info = this.cfg.driveStatus?.();
+    if (!info) return;
+    const { last, tracked, inScope, files, logPath } = info;
+
+    // Header: "when" + compliance % on one line, then the progress bar.
+    const pct = inScope ? Math.round((tracked / inScope) * 100) : 0;
+    const scope = last?.scope ?? (this.cfg.drive?.mirrorDir() === "" ? "whole vault" : (this.cfg.drive?.mirrorDir() || "Drive"));
+    const hdr = el.createDiv({ cls: "pa-drive-status-row" });
+    hdr.createSpan({ cls: "pa-drive-status-when", text: last ? `Last sync ${relTime(Date.parse(last.time))}` : "Not synced yet" });
+    hdr.createSpan({ cls: "pa-drive-status-pct", text: `${pct}% in sync` });
+    const bar = el.createDiv({ cls: "pa-drive-bar" });
+    bar.createDiv({ cls: "pa-drive-bar-fill" }).style.width = `${pct}%`;
+    el.createDiv({ cls: "pa-drive-muted", text: `${tracked} of ${inScope} files synced · scope: ${scope}` });
+
+    // Counters from the last run, as labelled pills (non-zero highlighted).
+    if (last) {
+      const pills = el.createDiv({ cls: "pa-drive-pills" });
+      // Always show every counter (persisted last-sync status); color the ones that happened.
+      const pill = (glyph: string, count: number, label: string, color: string) => {
+        const p = pills.createSpan({ cls: `pa-drive-pill${count > 0 ? " hot" : ""}` });
+        if (count > 0) p.style.setProperty("--pill", color);
+        p.createSpan({ cls: "pa-drive-pill-n", text: `${glyph} ${count}` });
+        p.createSpan({ cls: "pa-drive-pill-l", text: label });
+      };
+      pill("↑", last.pushed, "pushed", "#3b82f6");
+      pill("↓", last.pulled, "pulled", "#16a34a");
+      pill("⇄", last.merged, "merged", "#7c3aed");
+      pill("⚠", last.conflicted, "conflicts", "#f59e0b");
+      pill("🗑", last.deletedLocal + last.deletedRemote, "deleted", "#ef4444");
+      pill("⊘", last.skippedBinary, "skipped", "#0ea5e9");
+      pill("✕", last.errorCount, "errors", "#e11d48");
+
+      // Files that didn't sync — real total (the stored list is capped).
+      if (last.issuesTotal) {
+        const det = el.createEl("details", { cls: "pa-drive-issues" });
+        det.createEl("summary", { text: `${last.issuesTotal} file${last.issuesTotal === 1 ? "" : "s"} not synced — why` });
+        const dl = det.createDiv({ cls: "pa-drive-issues-list" });
+        for (const iss of last.issues) {
+          const r = dl.createDiv({ cls: "pa-drive-issue" });
+          r.createSpan({ cls: "pa-drive-issue-path", text: iss.path });
+          r.createSpan({ cls: "pa-drive-issue-reason", text: iss.reason });
+        }
+        if (last.issuesTotal > last.issues.length) {
+          dl.createDiv({ cls: "pa-drive-muted", text: `… and ${last.issuesTotal - last.issues.length} more (see full log).` });
+        }
+      }
+
+      const logLine = el.createDiv({ cls: "pa-drive-muted pa-drive-loglink" });
+      const link = logLine.createEl("a", { text: "Open full sync log ↗", href: "#" });
+      link.onclick = (e) => {
+        e.preventDefault();
+        const f = this.app.vault.getAbstractFileByPath(logPath);
+        if (f instanceof TFile) void this.app.workspace.getLeaf(false).openFile(f);
+        else new Notice("No sync log yet.");
+      };
+    }
+
+    // ---- Per-file table (persistent; enriched by "Check drive" when available) ----
+    const STMETA: Record<CheckStatus, { label: string; cls: string }> = {
+      synced:   { label: "✓ Synced",      cls: "is-synced" },
+      pending:  { label: "● Pending",     cls: "is-pending" },
+      diverged: { label: "⚠ Diverged",    cls: "is-diverged" },
+      remote:   { label: "↓ Drive newer", cls: "is-remote" },
+      local:    { label: "💾 Local only",  cls: "is-local" },
+      drive:    { label: "☁ Drive only",   cls: "is-drive" },
     };
+    // Fresh check (drive-only/diverged/…) if available; else baseline-derived (synced/local + pending).
+    const rows0: CheckedFile[] = this.driveCheck
+      ? this.driveCheck.files
+      : files.map((f) => {
+          const pending = f.status === "synced" && !!f.at && f.mtime > Date.parse(f.at);
+          const cstatus: CheckStatus = f.status === "local" ? "local" : pending ? "pending" : "synced";
+          return { path: f.path, cstatus, mtime: f.mtime, at: f.at };
+        });
+
+    const wrap = el.createDiv({ cls: "pa-drive-table-wrap" });
+    wrap.createDiv({
+      cls: "pa-drive-muted",
+      text: this.driveCheck
+        ? `Checked Drive ${relTime(this.driveCheck.at)} — live status (drive-only & diverged included).`
+        : "Showing last-sync status. Use \"Check drive\" for drive-only / diverged.",
+    });
+    const controls = wrap.createDiv({ cls: "pa-drive-table-controls" });
+    const search = controls.createEl("input", { cls: "pa-drive-search", type: "text", placeholder: "Search files…" });
+    let filter: "all" | CheckStatus = "all";
+    let query = "";
+    const chipRow = controls.createDiv({ cls: "pa-drive-filterchips" });
+    const chips: Record<string, HTMLElement> = {};
+    const count = (s: CheckStatus) => rows0.filter((r) => r.cstatus === s).length;
+    const mkChip = (key: "all" | CheckStatus, label: string) => {
+      const c = chipRow.createEl("button", { cls: "pa-drive-filterchip", text: label });
+      c.onclick = () => { filter = key; for (const k in chips) chips[k].toggleClass("active", k === key); renderRows(); };
+      chips[key] = c;
+    };
+    mkChip("all", `All (${rows0.length})`);
+    for (const s of ["synced", "pending", "diverged", "remote", "local", "drive"] as CheckStatus[]) {
+      const n = count(s);
+      if (n > 0) mkChip(s, `${STMETA[s].label} (${n})`);
+    }
+    chips.all.addClass("active");
+
+    const listEl = wrap.createDiv({ cls: "pa-drive-table" });
+    const base = this.cfg.drive?.mirrorDir() === "" ? "" : normalizePath(this.cfg.drive?.mirrorDir() ?? "");
+    const CAP = 400;
+    const renderRows = (): void => {
+      listEl.empty();
+      let rows = rows0;
+      if (filter !== "all") rows = rows.filter((r) => r.cstatus === filter);
+      if (query) rows = rows.filter((r) => r.path.toLowerCase().includes(query));
+      const head = listEl.createDiv({ cls: "pa-drive-trow pa-drive-thead" });
+      head.createSpan({ cls: "pa-drive-tname", text: "File" });
+      head.createSpan({ cls: "pa-drive-tstatus", text: "Status" });
+      head.createSpan({ cls: "pa-drive-twhen", text: "Modified" });
+      head.createSpan({ cls: "pa-drive-twhen", text: "Synced" });
+      if (rows.length === 0) { listEl.createDiv({ cls: "pa-drive-muted", text: "(none)" }); return; }
+      for (const f of rows.slice(0, CAP)) {
+        const r = listEl.createDiv({ cls: "pa-drive-trow" });
+        if (f.cstatus === "pending" || f.cstatus === "diverged") r.addClass("pa-drive-pending-row");
+        const name = r.createEl("a", { cls: "pa-drive-tname", text: f.path, href: "#" });
+        name.onclick = (e) => {
+          e.preventDefault();
+          const full = normalizePath(base ? `${base}/${f.path}` : f.path);
+          const file = this.app.vault.getAbstractFileByPath(full);
+          if (file instanceof TFile) void this.app.workspace.getLeaf(false).openFile(file);
+        };
+        const meta = STMETA[f.cstatus];
+        r.createSpan({ cls: `pa-drive-tstatus ${meta.cls}`, text: meta.label });
+        r.createSpan({ cls: "pa-drive-twhen", text: f.mtime ? relTime(f.mtime) : "—" });
+        r.createSpan({ cls: "pa-drive-twhen", text: f.at ? relTime(Date.parse(f.at)) : "—" });
+      }
+      if (rows.length > CAP) listEl.createDiv({ cls: "pa-drive-muted", text: `… and ${rows.length - CAP} more (use search to narrow).` });
+    };
+    search.oninput = () => { query = search.value.toLowerCase(); renderRows(); };
+    renderRows();
+  }
+
+  /** Trigger a Drive sync from the File Manager, showing a clockwise-filling clock on the mirror
+   *  folder card (or beside the button) as it progresses. */
+  private async runDriveSyncFromFileManager(btn: HTMLButtonElement): Promise<void> {
+    if (this.driveSyncing || !this.cfg.drive?.syncNow) return;
+    this.driveSyncing = true;
+    btn.disabled = true;
+    btn.addClass("is-syncing");
+
+    // Prefer overlaying the clock on the mirror folder card; fall back to beside the button.
+    const host = this.mirrorCardEl
+      ? this.mirrorCardEl.createDiv({ cls: "pa-clock-overlay" })
+      : btn.parentElement!.createSpan({ cls: "pa-clock-inline" });
+    const clock = drawClockProgress(host, this.mirrorCardEl ? 48 : 22);
+
+    try {
+      await this.cfg.drive.syncNow((p) => clock.update(p.total ? p.done / p.total : 1));
+      clock.update(1);
+    } finally {
+      this.driveSyncing = false;
+      // A short beat so a fast sync still flashes a full clock, then refresh the dashboard.
+      window.setTimeout(() => { host.remove(); this.render(); }, 350);
+    }
   }
 
   // ---- top row: storage ring + type donut + headline counters ------------------------
@@ -184,6 +405,8 @@ export class FileManagerView extends ItemView {
     sec.createEl("div", { cls: "pa-panel-title", text: "Your folders" });
     const grid = sec.createDiv({ cls: "pa-quick-grid" });
     const folders = [...byFolder.entries()].sort((a, b) => b[1].count - a[1].count);
+    const mirror = this.cfg.driveEnabled?.() ? normalizePath(this.cfg.drive?.mirrorDir() ?? "") : "";
+    this.mirrorCardEl = null;
     for (const [folder, v] of folders) {
       const card = grid.createDiv({ cls: "pa-quick-card pa-clickable" });
       const iconEl = card.createDiv({ cls: "pa-quick-card-icon" });
@@ -191,6 +414,7 @@ export class FileManagerView extends ItemView {
       card.createDiv({ cls: "pa-quick-card-name", text: folder });
       card.createDiv({ cls: "pa-stat-label", text: `${v.count} items · ${humanSize(v.size)}` });
       card.onclick = () => this.openFolder(folder);
+      if (mirror && normalizePath(folder) === mirror) this.mirrorCardEl = card;
     }
   }
 

@@ -71,6 +71,17 @@ describe("decideAction — the 3-way decision matrix", () => {
     expect(decideAction({ base: B, localExists: false, remoteExists: true, localChanged: false, remoteChanged: false, mergeable: true }))
       .toBe("delete_remote");
   });
+
+  // First-contact, both exist, no baseline (Req 9.1): identical content is NOT a conflict.
+  it("first-contact both-exist, identical content → noop (no false conflict)", () => {
+    expect(decideAction({ localExists: true, remoteExists: true, localChanged: false, remoteChanged: false, mergeable: true, contentEqual: true }))
+      .toBe("noop");
+  });
+
+  it("first-contact both-exist, different content → conflict", () => {
+    expect(decideAction({ localExists: true, remoteExists: true, localChanged: true, remoteChanged: false, mergeable: true, contentEqual: false }))
+      .toBe("conflict");
+  });
 });
 
 describe("threeWayMerge — conservative, never fabricates", () => {

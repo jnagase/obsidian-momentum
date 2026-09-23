@@ -130,6 +130,23 @@ consent flow — no "unverified app" warning and no account limit:
    asks for Google Tasks access only — and click **Continue**.
 3. You're returned to Obsidian and the plugin confirms it's connected.
 
+## Momentum Pro
+
+Momentum is **free**, and the whole life dashboard (habits, tasks, fitness, nutrition, studies,
+finances, file manager, Google Tasks sync, and Markdown/text Google Drive sync) stays free.
+
+**Momentum Pro** is an optional **one-time US$10 unlock** for the heavier extras — currently
+**binary file sync** on Google Drive (images, PDFs, and other non-text files). During the closed
+beta, Pro features are unlocked for everyone at no cost.
+
+- Payment is handled **outside Obsidian** by a merchant-of-record store (Gumroad / Lemon Squeezy),
+  which collects tax and issues a **license key**. There is no in-app purchase and no server of ours.
+- To activate, you paste the **license key** in **Settings → Momentum pro**. The plugin sends only
+  that key to the store's verify API to confirm the purchase — nothing else (see
+  [Network use & privacy](#network-use--privacy)).
+- The plugin's source is fully public; the license check lives in the open code. That's expected
+  for a community plugin.
+
 ## Install (dev)
 1. `npm install`
 2. `npm run dev` (watch) or `npm run build` (production, one-off).
@@ -140,7 +157,7 @@ consent flow — no "unverified app" warning and no account limit:
 5. Open via the command palette → "Momentum Life: Open" (panel in the left sidebar).
 
 ## Network use & privacy
-Momentum works offline by default. It only reaches the network in two optional
+Momentum works offline by default. It only reaches the network in these optional
 cases, and only when you actively use them:
 
 - **Nutrition food search** — queries the
@@ -151,6 +168,14 @@ cases, and only when you actively use them:
   to Google's Tasks API and to a small OAuth broker (a Cloudflare Worker) that holds the
   app credentials server-side. Only your task titles, status and due dates plus your Google
   auth tokens are sent, and only for the tasks you sync. Disabled by default.
+- **Google Drive sync (beta, opt-in)** — when you enable and connect it, the plugin talks
+  to Google's Drive API and to a **separate** OAuth broker (its own Cloudflare Worker,
+  isolated from Tasks). Only the files in the folder/scope you chose are synced, plus your
+  Drive auth tokens. Disabled by default.
+- **Momentum Pro license check (only if you buy Pro)** — to unlock paid features, the plugin
+  sends **only your license key** to the store's public verify API (Gumroad/Lemon Squeezy),
+  which answers whether the key is a valid purchase. No other data is sent, there is no server
+  of ours involved, and this never runs unless you activate a license.
 
 No personal data, vault content, or telemetry is transmitted otherwise. If you do
 not use these features, the plugin makes no network requests.

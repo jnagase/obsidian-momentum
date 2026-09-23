@@ -710,9 +710,69 @@ button.pa-link-btn:focus-visible {
 .pa-drive-mid{display:flex;align-items:center;gap:6px;justify-content:center;font-size:.75rem;color:var(--text-muted)}
 .pa-drive-mid button{font-size:.7rem;padding:1px 6px}
 .pa-drive-mid a{color:var(--text-muted);text-decoration:none}
-.pa-fm-drive{padding:0}
+.pa-fm-drive{margin-top:14px}
 .pa-fm-drive-summary{cursor:pointer;padding:12px;margin:0;list-style:none}
 .pa-fm-drive-summary::-webkit-details-marker{display:none}
 .pa-fm-drive-summary::before{content:"▸ ";color:var(--text-muted)}
 .pa-fm-drive[open] .pa-fm-drive-summary::before{content:"▾ "}
 .pa-fm-drive > div{padding:0 12px 12px}
+
+/* --- Drive (beta) File Manager: beta tag, sync button, clock progress --- */
+.pa-beta-tag{display:inline-block;font-size:.6rem;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:#fff;background:#e11d48;border-radius:6px;padding:1px 6px;vertical-align:middle}
+.pa-fm-drive-head{display:flex;align-items:center;gap:8px}
+.pa-fm-drive-actions{margin-left:auto;display:flex;gap:6px;align-items:center}
+.pa-fm-drive-sync,.pa-fm-drive-open{font-size:.72rem;padding:2px 10px;border:1px solid var(--background-modifier-border);border-radius:6px;background:var(--background-secondary);cursor:pointer}
+.pa-fm-drive-sync:hover,.pa-fm-drive-open:hover{border-color:var(--interactive-accent)}
+.pa-fm-drive-sync:disabled,.pa-fm-drive-sync.is-syncing{opacity:.6;cursor:default}
+.pa-clock-wrap{display:inline-flex;line-height:0}
+.pa-clock-inline{display:inline-flex;align-items:center;margin-left:6px;vertical-align:middle}
+.pa-clock-overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:color-mix(in srgb, var(--background-secondary) 70%, transparent);border-radius:10px}
+
+/* --- Drive folder picker modal --- */
+.pa-drive-picker-crumb{font-size:.8rem;color:var(--text-muted);margin:4px 0 10px}
+.pa-drive-picker-crumb a{color:var(--text-accent);text-decoration:none}
+.pa-drive-picker-list{display:flex;flex-direction:column;gap:4px;max-height:320px;overflow:auto;margin-bottom:10px}
+.pa-drive-picker-item{display:block;width:100%;text-align:left;padding:6px 10px;border:1px solid var(--background-modifier-border);border-radius:6px;background:var(--background-secondary);cursor:pointer}
+.pa-drive-picker-item:hover{border-color:var(--interactive-accent)}
+.pa-drive-picker-muted{color:var(--text-faint);font-size:.85rem;padding:4px 2px}
+
+/* --- Drive status card (File Manager) --- */
+.pa-drive-status{margin:8px 0}
+.pa-drive-status-row{display:flex;align-items:baseline;justify-content:space-between;gap:8px}
+.pa-drive-status-when{font-size:.8rem;color:var(--text-muted)}
+.pa-drive-status-pct{font-size:.9rem;font-weight:700;color:var(--text-normal)}
+.pa-drive-bar{height:8px;border-radius:5px;background:var(--background-modifier-border);overflow:hidden;margin:6px 0}
+.pa-drive-bar-fill{height:100%;background:var(--interactive-accent);border-radius:5px;transition:width .3s}
+.pa-drive-pills{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0 4px}
+.pa-drive-pill{display:inline-flex;align-items:baseline;gap:5px;padding:3px 10px;border-radius:999px;background:var(--background-primary);color:var(--text-faint);font-size:.75rem;box-shadow:inset 0 0 0 1px var(--background-modifier-border)}
+.pa-drive-pill.hot{color:var(--pill);background:color-mix(in srgb, var(--pill) 12%, var(--background-primary));box-shadow:inset 0 0 0 1px var(--pill)}
+.pa-drive-pill-n{font-weight:700}
+.pa-drive-pill.hot .pa-drive-pill-l{opacity:.9}
+.pa-drive-pill-l{opacity:.7}
+.pa-drive-loglink a{color:var(--text-accent);text-decoration:none;font-size:.8rem}
+.pa-drive-loglink a:hover{text-decoration:underline}
+.pa-drive-issues{margin-top:8px}
+.pa-drive-issues summary{cursor:pointer;font-size:.82rem;color:var(--text-muted)}
+.pa-drive-issues-list{max-height:220px;overflow:auto;margin-top:6px;display:flex;flex-direction:column;gap:3px}
+.pa-drive-issue{display:flex;justify-content:space-between;gap:10px;font-size:.78rem;padding:2px 0;border-bottom:1px solid var(--background-modifier-border)}
+.pa-drive-issue-path{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.pa-drive-issue-reason{color:var(--text-faint);flex-shrink:0}
+
+/* --- Drive persistent file table (File Manager) --- */
+.pa-drive-table-wrap{margin-top:10px}
+.pa-drive-table-controls{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:6px}
+.pa-drive-table-controls .pa-drive-search{flex:1;min-width:160px}
+.pa-drive-table{max-height:340px;overflow:auto;border:1px solid var(--background-modifier-border);border-radius:8px}
+.pa-drive-trow{display:grid;grid-template-columns:1fr 110px 90px 90px;gap:8px;align-items:center;padding:5px 10px;border-bottom:1px solid var(--background-modifier-border);font-size:.8rem}
+.pa-drive-trow:last-child{border-bottom:none}
+.pa-drive-thead{position:sticky;top:0;background:var(--background-secondary);font-weight:600;color:var(--text-muted)}
+.pa-drive-tname{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-decoration:none;color:var(--text-normal)}
+a.pa-drive-tname:hover{color:var(--text-accent)}
+.pa-drive-tstatus.is-synced{color:#16a34a}
+.pa-drive-tstatus.is-local{color:#0ea5e9}
+.pa-drive-tstatus.is-pending{color:#f59e0b;font-weight:600}
+.pa-drive-tstatus.is-diverged{color:#ef4444;font-weight:600}
+.pa-drive-tstatus.is-remote{color:#3b82f6}
+.pa-drive-tstatus.is-drive{color:#64748b}
+.pa-drive-pending-row{background:color-mix(in srgb, #f59e0b 8%, transparent)}
+.pa-drive-twhen{color:var(--text-faint);text-align:right}

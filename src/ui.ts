@@ -340,3 +340,39 @@ export class ConfirmModal extends Modal {
 
   onClose(): void { this.contentEl.empty(); }
 }
+
+/** Modal offering a fixed set of choices; resolves with the chosen value (or a fallback on close). */
+export class ChoiceModal<T extends string> extends Modal {
+  private message: string;
+  private choices: { label: string; value: T; cta?: boolean }[];
+  private fallback: T;
+  private onPick: (value: T) => void;
+  private picked = false;
+
+  constructor(app: App, message: string, choices: { label: string; value: T; cta?: boolean }[], fallback: T, onPick: (value: T) => void) {
+    super(app);
+    this.message = message;
+    this.choices = choices;
+    this.fallback = fallback;
+    this.onPick = onPick;
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("p", { text: this.message });
+    const setting = new Setting(contentEl);
+    for (const c of this.choices) {
+      setting.addButton((b) => {
+        b.setButtonText(c.label).onClick(() => { this.picked = true; this.onPick(c.value); this.close(); });
+        if (c.cta) b.setCta();
+        return b;
+      });
+    }
+  }
+
+  onClose(): void {
+    if (!this.picked) this.onPick(this.fallback);
+    this.contentEl.empty();
+  }
+}

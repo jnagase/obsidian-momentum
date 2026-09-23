@@ -16,3 +16,6 @@ custom_domain = true
 # Secrets (set with wrangler, NOT here) — these hold the Obsidian-GDrive client, NOT production:
 #   npx wrangler secret put GOOGLE_CLIENT_ID       (the Obsidian-GDrive Web client ID)
 #   npx wrangler secret put GOOGLE_CLIENT_SECRET   (its secret)
+#
+# Momentum Pro licensing needs NO worker/infra — it uses the store's (Gumroad/Lemon Squeezy)
+# public license-verify API directly from the plugin. See docs/pro-license-setup.md.

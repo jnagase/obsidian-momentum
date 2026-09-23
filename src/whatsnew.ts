@@ -6,6 +6,19 @@ export interface ChangeEntry { version: string; sections: ChangeSection[]; }
 /** Release notes shown in the "What's new" dialog, newest first. */
 export const CHANGELOG: ChangeEntry[] = [
   {
+    version: "0.7.9",
+    sections: [
+      {
+        title: "New — Google Drive sync (beta, Pro)",
+        items: [
+          "Two-way sync between a Google Drive folder and a folder in your vault (or your whole vault). It uses a separate Google sign-in from Tasks and never touches your Tasks data — the plugin's own data folder is always excluded to stay safe.",
+          "Text notes sync on every plan. With Momentum Pro, images, PDFs and any other file type sync too, as real binary uploads/downloads.",
+          "Momentum Pro is a one-time unlock for Drive sync. It's free for the first 100 beta testers — open Settings → Momentum pro to grab your license key.",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.7.6",
     sections: [
       {

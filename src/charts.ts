@@ -68,6 +68,46 @@ export function drawRing(
   if (label) wrap.createDiv({ text: label, cls: "pa-ring-label" });
 }
 
+/** SVG path for a pie wedge sweeping CLOCKWISE from 12 o'clock, covering `fraction` (0..1). */
+function wedgePath(cx: number, cy: number, r: number, fraction: number): string {
+  const f = Math.max(0, Math.min(1, fraction));
+  if (f <= 0) return "";
+  if (f >= 1) {
+    // Two half-arcs make a full disc (a single arc can't close a 360° sweep).
+    return `M ${cx} ${cy - r} A ${r} ${r} 0 1 1 ${cx - 0.001} ${cy - r} Z`;
+  }
+  const angle = f * 2 * Math.PI;
+  const endX = cx + r * Math.sin(angle);
+  const endY = cy - r * Math.cos(angle);
+  const large = f > 0.5 ? 1 : 0;
+  return `M ${cx} ${cy} L ${cx} ${cy - r} A ${r} ${r} 0 ${large} 1 ${endX} ${endY} Z`;
+}
+
+/**
+ * A clock-style progress disc: a circular track that fills with color CLOCKWISE from the top
+ * as work completes. Returns an `update(fraction)` so a caller can drive it live during a sync.
+ */
+export function drawClockProgress(
+  parent: HTMLElement,
+  size = 40,
+  color = "#7c3aed",
+): { el: HTMLElement; update: (fraction: number) => void } {
+  const r = size / 2 - 2;
+  const cx = size / 2;
+  const cy = size / 2;
+  const wrap = parent.createDiv({ cls: "pa-clock-wrap" });
+  const svg = svgEl("svg", { width: size, height: size, viewBox: `0 0 ${size} ${size}` });
+  svg.appendChild(svgEl("circle", {
+    cx, cy, r, fill: "var(--background-modifier-border)", stroke: color, "stroke-width": 1.5,
+  }));
+  const wedge = svgEl("path", { d: "", fill: color });
+  svg.appendChild(wedge);
+  wrap.appendChild(svg);
+  const update = (fraction: number): void => { wedge.setAttribute("d", wedgePath(cx, cy, r, fraction)); };
+  update(0);
+  return { el: wrap, update };
+}
+
 /** A simple vertical bar chart.
  *
  *  Supports negative values: when any value is below zero the chart grows a zero baseline

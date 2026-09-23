@@ -951,6 +951,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
         onProgress: progress,
         syncBinaries: proBinaries,
         incremental: !!this.settings.driveIncremental,
+        lastSyncMs: (() => { const t = Date.parse(this.settings.driveLastSync?.time ?? ""); return Number.isFinite(t) ? t : undefined; })(),
       });
       this.settings.driveLastSync = {
         time: new Date().toISOString(),

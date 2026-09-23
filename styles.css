@@ -671,8 +671,21 @@ button.pa-link-btn:focus-visible {
 .pa-quick-legend-item{display:flex;align-items:center;gap:4px}
 .pa-quick-dot{width:10px;height:10px;border-radius:3px;display:inline-block}
 .pa-quick-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:10px}
-.pa-quick-card{position:relative;display:flex;flex-direction:column;align-items:center;gap:6px;padding:12px 8px;border:1px solid var(--background-modifier-border);border-radius:10px;background:var(--background-secondary);cursor:pointer}
+.pa-quick-card{position:relative;overflow:hidden;display:flex;flex-direction:column;align-items:center;gap:6px;padding:12px 8px;border:1px solid var(--background-modifier-border);border-radius:10px;background:var(--background-secondary);cursor:pointer}
 .pa-quick-card:hover{border-color:var(--interactive-accent)}
+/* Per-folder Drive sync fill: a left-anchored bar behind the card. Advances (dark green) while
+   a sync runs, then settles: green = fully synced, yellow = has differences, red = errored. */
+.pa-quick-card-fill{position:absolute;left:0;top:0;bottom:0;width:0;opacity:.16;pointer-events:none;transition:width .25s ease;z-index:0}
+.pa-quick-card-fill.is-green{background:#16a34a}
+.pa-quick-card-fill.is-yellow{background:#eab308}
+.pa-quick-card-fill.is-red{background:#ef4444}
+.pa-quick-card-fill.is-progress{background:#15803d}
+.pa-quick-card > *:not(.pa-quick-card-fill){position:relative;z-index:1}
+/* "Your folders" moved inside the Drive card: a Syncing/Synced header above the grid. */
+.pa-fm-drive-folders{margin-top:10px}
+.pa-fm-drive-folders-label{font-size:.8rem;font-weight:600;margin:0 0 6px}
+.pa-fm-drive-folders-label.is-syncing{color:var(--text-accent)}
+.pa-fm-drive-folders-label.is-synced{color:#16a34a}
 .pa-quick-card.stale{opacity:.55}
 .pa-quick-card-name{font-size:.75rem;text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
 .pa-quick-unpin{position:absolute;top:2px;right:4px;background:transparent;border:none;color:var(--text-faint);cursor:pointer;font-size:.9rem}

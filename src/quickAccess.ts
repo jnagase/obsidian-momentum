@@ -73,6 +73,11 @@ export class FileManagerView extends ItemView {
   /** Result of the last on-demand "Check Drive" walk (enriched statuses incl. drive-only/diverged). */
   private driveCheck: { files: CheckedFile[]; at: number } | null = null;
   private driveChecking = false;
+  /** Per top-level folder: the sync-fill + label elements + counts, so a running sync can advance
+   *  each folder card's background/legend and settle it green/yellow/red at the end. Rebuilt every render. */
+  private folderFills: Map<string, { el: HTMLElement; labelEl: HTMLElement; total: number; done: number; sizeText: string }> = new Map();
+  /** The "⏳ Syncing… / ✓ Synced" header above the folder grid inside the Drive section. */
+  private folderSyncLabelEl: HTMLElement | null = null;
 
   constructor(leaf: WorkspaceLeaf, cfg: QuickAccessConfig) {
     super(leaf);
@@ -116,21 +121,24 @@ export class FileManagerView extends ItemView {
       monthly.set(key, (monthly.get(key) ?? 0) + 1);
     }
 
+    const driveOn = !!(this.cfg.drive && this.cfg.driveEnabled?.());
     this.renderTopRow(files.length, totalSize, byType);
     this.renderTreemap(byFolder);
-    this.renderFolderCards(byFolder);
+    // "Your folders" lives in the main flow only when Drive is off; when Drive is on it moves
+    // INTO the Google Drive section (below the status) so its per-folder sync colours sit in context.
+    if (!driveOn) this.renderFolderCards(byFolder);
     this.renderActivity(monthly);
     // Recently modified · Pinned · Recently opened — side by side in a 3-column row.
     const cols = this.bodyEl.createDiv({ cls: "pa-fm-3col" });
     this.renderRecent(files, cols.createDiv({ cls: "pa-panel" }));
     this.renderPinned(cols.createDiv({ cls: "pa-panel" }));
     this.renderRecents(cols.createDiv({ cls: "pa-panel" }));
-    this.renderDriveSection();
+    this.renderDriveSection(byFolder);
   }
 
   /** OPTIONAL Google Drive (beta) section — only when Drive is enabled AND its config is
    *  present. With Drive off (the default) this is a no-op, so the File Manager stays local. */
-  private renderDriveSection(): void {
+  private renderDriveSection(byFolder: Map<string, { count: number; size: number }>): void {
     if (!this.cfg.drive || !this.cfg.driveEnabled?.()) return;
     const drive = this.cfg.drive;
     const sec = this.bodyEl!.createDiv({ cls: "pa-panel pa-fm-drive" });
@@ -151,6 +159,21 @@ export class FileManagerView extends ItemView {
     // Persistent status + per-file table (instant, no network) — driven by the last sync + baselines.
     // The old live browser (which zeroed out between syncs) was removed.
     this.renderDriveStatus(sec.createDiv({ cls: "pa-drive-status" }));
+
+    // "Your folders" moved in here, each card colour-coded by its Drive sync status. A header
+    // shows "⏳ Syncing…" while a sync runs and "✓ Synced" when it's done.
+    const foldersWrap = sec.createDiv({ cls: "pa-fm-drive-folders" });
+    this.folderSyncLabelEl = foldersWrap.createDiv({ cls: "pa-fm-drive-folders-label" });
+    this.setFolderSyncLabel();
+    this.renderFolderCards(byFolder, foldersWrap);
+  }
+
+  /** Set the folder-block header: hourglass while syncing, green check when idle/done. */
+  private setFolderSyncLabel(): void {
+    if (!this.folderSyncLabelEl) return;
+    this.folderSyncLabelEl.removeClasses(["is-syncing", "is-synced"]);
+    if (this.driveSyncing) { this.folderSyncLabelEl.addClass("is-syncing"); this.folderSyncLabelEl.setText("⏳ Syncing…"); }
+    else { this.folderSyncLabelEl.addClass("is-synced"); this.folderSyncLabelEl.setText("✓ synced"); }
   }
 
   /** On-demand: walk the Drive folder and enrich the table with drive-only / diverged / remote
@@ -404,6 +427,7 @@ export class FileManagerView extends ItemView {
     // Live line + bar in the status card, updated per phase as the sync progresses.
     if (this.driveLiveEl) this.driveLiveEl.addClass("on");
     this.driveLiveBarEl?.parentElement?.addClass("on");
+    this.setFolderSyncLabel(); // flip the folder-block header to "⏳ Syncing…"
     const setLive = (text: string, frac: number | null): void => {
       if (this.driveLiveEl) this.driveLiveEl.setText(text);
       if (this.driveLiveBarEl) {
@@ -418,6 +442,18 @@ export class FileManagerView extends ItemView {
       await this.cfg.drive.syncNow((p) => {
         const frac = p.total ? p.done / p.total : null;
         clock.update(frac ?? 0.15);
+        // Advance the per-folder fill (dark green) as each file is examined/applied. It settles
+        // to green/yellow/red on the re-render at the end (durable status from getDriveStatus).
+        if (p.path) {
+          const fe = this.folderFills.get(topFolder(p.path));
+          if (fe) {
+            fe.done = Math.min(fe.total, fe.done + 1);
+            fe.el.removeClasses(["is-green", "is-yellow", "is-red"]);
+            fe.el.addClass("is-progress");
+            fe.el.setCssStyles({ width: `${Math.round((fe.done / Math.max(1, fe.total)) * 100)}%` });
+            fe.labelEl.setText(`${fe.total} / ${fe.done} items · ${fe.sizeText}`);
+          }
+        }
         if (p.phase === "scanning") {
           setLive(p.incremental ? "Checking for changes… (incremental)" : "Scanning Drive… (full)", null);
         } else if (p.phase === "planning") {
@@ -486,22 +522,67 @@ export class FileManagerView extends ItemView {
   }
 
   // ---- "Your Folders" cards ----------------------------------------------------------
-  private renderFolderCards(byFolder: Map<string, { count: number; size: number }>): void {
-    const sec = this.bodyEl!.createDiv({ cls: "pa-panel" });
-    sec.createDiv({ cls: "pa-panel-title", text: "Your folders" });
-    const grid = sec.createDiv({ cls: "pa-quick-grid" });
+  private renderFolderCards(byFolder: Map<string, { count: number; size: number }>, container?: HTMLElement): void {
+    // Render into the given container (the Drive section) or, when Drive is off, a standalone panel.
+    let grid: HTMLElement;
+    if (container) {
+      grid = container.createDiv({ cls: "pa-quick-grid" });
+    } else {
+      const sec = this.bodyEl!.createDiv({ cls: "pa-panel" });
+      sec.createDiv({ cls: "pa-panel-title", text: "Your folders" });
+      grid = sec.createDiv({ cls: "pa-quick-grid" });
+    }
     const folders = [...byFolder.entries()].sort((a, b) => b[1].count - a[1].count);
     const mirror = this.cfg.driveEnabled?.() ? normalizePath(this.cfg.drive?.mirrorDir() ?? "") : "";
     this.mirrorCardEl = null;
+    // Per-folder Drive sync status (green = fully synced, yellow = has differences, red = error),
+    // shown as a fill behind each card that a running sync advances (see runDriveSyncFromFileManager).
+    const fsync = this.cfg.driveEnabled?.() ? this.computeFolderSync()
+      : new Map<string, { total: number; synced: number; error: boolean }>();
+    this.folderFills = new Map();
     for (const [folder, v] of folders) {
       const card = grid.createDiv({ cls: "pa-quick-card pa-clickable" });
+      const st = fsync.get(folder);
       const iconEl = card.createDiv({ cls: "pa-quick-card-icon" });
       setIcon(iconEl, "folder");
       card.createDiv({ cls: "pa-quick-card-name", text: folder });
-      card.createDiv({ cls: "pa-stat-label", text: `${v.count} items · ${humanSize(v.size)}` });
+      // Legend: for a synced folder show "local / drive items" (how many of the folder's files
+      // have reached Drive); otherwise the plain local count.
+      const sizeText = humanSize(v.size);
+      const labelEl = card.createDiv({ cls: "pa-stat-label" });
+      if (st && st.total > 0) {
+        labelEl.setText(`${st.total} / ${st.synced} items · ${sizeText}`);
+        const cls = st.error ? "is-red" : st.synced < st.total ? "is-yellow" : "is-green";
+        const fill = card.createDiv({ cls: `pa-quick-card-fill ${cls}` });
+        fill.setCssStyles({ width: `${Math.round((st.synced / st.total) * 100)}%` });
+        this.folderFills.set(folder, { el: fill, labelEl, total: st.total, done: 0, sizeText });
+        card.setAttr("title", st.error
+          ? "Google Drive: this folder had a sync error"
+          : st.synced < st.total ? `Google Drive: ${st.synced} of ${st.total} files synced`
+          : "Google Drive: fully in sync");
+      } else {
+        labelEl.setText(`${v.count} items · ${sizeText}`);
+      }
       card.onclick = () => this.openFolder(folder);
       if (mirror && normalizePath(folder) === mirror) this.mirrorCardEl = card;
     }
+  }
+
+  /** Aggregate the Drive per-file status into per-top-folder counts, so each "Your folders" card
+   *  can show whether that folder is fully synced (green), has differences (yellow) or errored
+   *  (red). Derived from the instant status (last sync + baselines) — no network. */
+  private computeFolderSync(): Map<string, { total: number; synced: number; error: boolean }> {
+    const out = new Map<string, { total: number; synced: number; error: boolean }>();
+    const info = this.cfg.driveStatus?.();
+    if (!info) return out;
+    const bump = (folder: string) => {
+      let e = out.get(folder);
+      if (!e) { e = { total: 0, synced: 0, error: false }; out.set(folder, e); }
+      return e;
+    };
+    for (const f of info.files) { const e = bump(topFolder(f.path)); e.total++; if (f.status === "synced") e.synced++; }
+    for (const it of info.last?.issues ?? []) { if (it.category === "error") bump(topFolder(it.path)).error = true; }
+    return out;
   }
 
   // ---- activity chart: files modified per month (last 12) ----------------------------

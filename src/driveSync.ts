@@ -83,6 +83,8 @@ export interface DriveProgress {
   done: number;
   total: number;
   incremental?: boolean;
+  /** The vault-relative path being examined/applied this tick (lets the UI colour per folder). */
+  path?: string;
 }
 
 /** The conflict-resolution strategy applied when both sides diverged (Req 9.2). */
@@ -302,6 +304,11 @@ export async function runDriveSync(args: {
   /** Use the Changes API to skip the full tree walk when nothing changed remotely (safe: any
    *  remote change or error falls back to a full walk). */
   incremental?: boolean;
+  /** Skip the content read for a baselined file whose local mtime is strictly older than this
+   *  (ms since epoch): it can't have changed since the last successful sync, so its baseline
+   *  still holds. Safety net: any file touched at/after this time is read and compared normally.
+   *  Cuts the per-file local reads that dominate a large-vault sync. */
+  lastSyncMs?: number;
 }): Promise<DriveSyncResult> {
   const { token, driveFolderId, fs, baselines, confirmed } = args;
   const strategy = args.conflictStrategy ?? DEFAULT_CONFLICT_STRATEGY;
@@ -357,11 +364,21 @@ export async function runDriveSync(args: {
   interface Plan { path: string; action: DriveAction; remote?: DriveFile; remoteText?: string; binary?: boolean; create?: boolean }
   const isCreate = (action: DriveAction, localExists: boolean, remoteExists: boolean): boolean =>
     (action === "push" && !remoteExists) || (action === "pull" && !localExists);
+  // mtime fast-path: a baselined file whose local mtime predates the last successful sync can't
+  // have changed since — skip reading its (possibly large) content. Falls back to a real read
+  // whenever mtime is unavailable, the file was touched at/after the last sync, or there's no
+  // baselineMs yet. Only LOCAL-change detection is gated; remote changes still come from md5.
+  const unchangedSinceLastSync = async (p: string): Promise<boolean> => {
+    if (args.lastSyncMs === undefined || !fs.mtime) return false;
+    const mt = await fs.mtime(p);
+    return mt > 0 && mt < args.lastSyncMs;
+  };
+
   const plans: Plan[] = [];
   const planTotal = allPaths.size;
   let planned = 0;
   for (const path of allPaths) {
-   args.onProgress?.({ phase: "planning", done: planned++, total: planTotal });
+   args.onProgress?.({ phase: "planning", done: planned++, total: planTotal, path });
    try {
     const remote = remoteByPath.get(path);
     const base = baselines.get(path);
@@ -388,9 +405,13 @@ export async function runDriveSync(args: {
       let localChangedB = false;
       let localBuf: ArrayBuffer | undefined;
       if (localExists) {
-        localBuf = await fs.readBinary(path);
-        if (base?.base !== undefined) localChangedB = hashBytes(localBuf) !== base.base;
-        else if (!base) localChangedB = true;
+        if (base?.base !== undefined && await unchangedSinceLastSync(path)) {
+          localChangedB = false; // unchanged since last sync — skip the (potentially large) read
+        } else {
+          localBuf = await fs.readBinary(path);
+          if (base?.base !== undefined) localChangedB = hashBytes(localBuf) !== base.base;
+          else if (!base) localChangedB = true;
+        }
       }
       // First contact both exist: adopt as baseline when byte-sizes match (cheap heuristic);
       // otherwise conflict (keep-both) — never overwrite.
@@ -410,11 +431,16 @@ export async function runDriveSync(args: {
     }
 
     const remoteChanged = !!base && !!remote && remote.md5Checksum !== base.md5;
-    // local change: compare current local content to the baseline content.
+    // local change: compare current local content to the baseline content — unless mtime proves
+    // it hasn't changed since the last sync (then skip the read).
     let localChanged = false;
     if (localExists && base?.base !== undefined) {
-      const cur = await fs.read(path);
-      localChanged = cur !== base.base;
+      if (await unchangedSinceLastSync(path)) {
+        localChanged = false;
+      } else {
+        const cur = await fs.read(path);
+        localChanged = cur !== base.base;
+      }
     } else if (localExists && !base) {
       localChanged = true;
     }
@@ -539,7 +565,7 @@ export async function runDriveSync(args: {
       }
     }
     done++;
-    args.onProgress?.({ phase: "applying", done, total });
+    args.onProgress?.({ phase: "applying", done, total, path: p.path });
   }
 
   // ---- COMMIT (advance cursor only on a clean cycle) ------------------------------------

@@ -6,6 +6,19 @@ export interface ChangeEntry { version: string; sections: ChangeSection[]; }
 /** Release notes shown in the "What's new" dialog, newest first. */
 export const CHANGELOG: ChangeEntry[] = [
   {
+    version: "0.7.16",
+    sections: [
+      {
+        title: "Improved — Google Drive sync",
+        items: [
+          "Your folders now live inside the Google Drive card, each colour-coded by sync status: the fill advances as it syncs and settles green (fully synced), yellow (has differences) or red (error). A header shows \"Syncing…\" while it runs and \"synced\" when done.",
+          "Each folder's legend shows how many of its files have reached Drive, as \"local / drive items\".",
+          "Faster syncs on large vaults: a file that hasn't changed since the last sync is no longer re-read to check it — the mtime is enough — so a routine sync does far less work.",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.7.15",
     sections: [
       {

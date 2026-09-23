@@ -122,6 +122,10 @@ export interface VaultFS {
   writeBinary?(name: string, data: ArrayBuffer): Promise<void>;
 }
 
+/** Per-file outcome bucket, so the status panel can show WHICH files fell into each pill. */
+export type DriveIssueCategory = "held" | "skipped" | "error" | "conflict" | "deleted";
+export interface DriveIssue { path: string; reason: string; category: DriveIssueCategory }
+
 export interface DriveSyncResult {
   pushed: number;
   pulled: number;
@@ -134,8 +138,9 @@ export interface DriveSyncResult {
   skippedBinary: number;
   errors: string[];
   notes: string[];
-  /** Per-file problems this cycle (skipped or failed), with the reason — for the status panel. */
-  issues: { path: string; reason: string }[];
+  /** Per-file outcomes worth surfacing (held / skipped / error / conflict / deleted), with the
+   *  reason and category — powers the clickable status pills + per-file table. */
+  issues: DriveIssue[];
 }
 
 function emptyResult(): DriveSyncResult {
@@ -158,8 +163,8 @@ export interface DriveSyncSummary {
   skippedBinary: number;
   blocked: number;
   errorCount: number;
-  issuesTotal: number; // total files that didn't sync (the issues list below is capped)
-  issues: { path: string; reason: string }[]; // capped list of files that didn't sync + why
+  issuesTotal: number; // total per-file outcomes recorded (the issues list below is capped)
+  issues: DriveIssue[]; // capped list of per-file outcomes + reason + category
 }
 
 function extOf(name: string): string {
@@ -331,7 +336,11 @@ export async function runDriveSync(args: {
   const allPaths = new Set<string>([...remoteByPath.keys(), ...localPaths]);
 
   // ---- ADMISSION (decide every file, then guard) ----------------------------------------
-  interface Plan { path: string; action: DriveAction; remote?: DriveFile; remoteText?: string; binary?: boolean }
+  // `create` = a brand-new file on the destination side (safe, non-destructive). The mass-change
+  // guard ignores creates so a first sync / enabling binaries / adding a big folder flows freely.
+  interface Plan { path: string; action: DriveAction; remote?: DriveFile; remoteText?: string; binary?: boolean; create?: boolean }
+  const isCreate = (action: DriveAction, localExists: boolean, remoteExists: boolean): boolean =>
+    (action === "push" && !remoteExists) || (action === "pull" && !localExists);
   const plans: Plan[] = [];
   for (const path of allPaths) {
    try {
@@ -352,7 +361,7 @@ export async function runDriveSync(args: {
         if (needsWork) {
           result.skippedBinary++;
           result.notes.push(`Skipped binary (enable "sync binaries" to include): ${path}.`);
-          result.issues.push({ path, reason: "binary skipped (enable Sync binary files)" });
+          result.issues.push({ path, reason: "binary skipped (enable Sync binary files)", category: "skipped" });
         }
         continue;
       }
@@ -377,7 +386,7 @@ export async function runDriveSync(args: {
         }
       }
       const actionB = decideAction({ base, localExists, remoteExists, localChanged: localChangedB, remoteChanged: remoteChangedB, mergeable: false, contentEqual: contentEqualB });
-      if (actionB !== "noop") plans.push({ path, action: actionB, remote, binary: true });
+      if (actionB !== "noop") plans.push({ path, action: actionB, remote, binary: true, create: isCreate(actionB, localExists, remoteExists) });
       continue;
     }
 
@@ -416,12 +425,12 @@ export async function runDriveSync(args: {
     }
 
     const action = decideAction({ base, localExists, remoteExists, localChanged, remoteChanged, mergeable, contentEqual });
-    if (action !== "noop") plans.push({ path, action, remote, remoteText: cachedRemoteText });
+    if (action !== "noop") plans.push({ path, action, remote, remoteText: cachedRemoteText, create: isCreate(action, localExists, remoteExists) });
    } catch (e) {
     // One bad file must never abort the whole cycle (esp. in whole-vault mode).
     const msg = e instanceof Error ? e.message : String(e);
     result.errors.push(`examine ${path}: ${msg}`);
-    result.issues.push({ path, reason: `examine failed: ${msg}` });
+    result.issues.push({ path, reason: `examine failed: ${msg}`, category: "error" });
    }
   }
 
@@ -436,6 +445,13 @@ export async function runDriveSync(args: {
     if (!ok) {
       result.blocked += deletePlans.length;
       result.errors.push(`Deletion guard: withheld ${deletePlans.length} deletions (over the limit of ${DRIVE_MAX_DELETES_PER_RUN}).`);
+      for (const dp of deletePlans) {
+        result.issues.push({
+          path: dp.path,
+          reason: dp.action === "delete_local" ? "deletion held — gone on Drive, would delete locally" : "deletion held — gone locally, would delete on Drive",
+          category: "held",
+        });
+      }
       const kept = plans.filter((p) => p.action !== "delete_local" && p.action !== "delete_remote");
       plans.length = 0;
       plans.push(...kept);
@@ -443,12 +459,18 @@ export async function runDriveSync(args: {
   }
 
   // ---- WRITE CIRCUIT BREAKER (unconfirmed automatic runs) --------------------------------
-  const writeOps = plans.length;
-  if (!confirmed && writeOps > DRIVE_MAX_WRITES_PER_RUN) {
-    result.blocked = writeOps;
+  // Only DATA-CHANGING ops count: overwrites, merges and deletions. Brand-new creates and
+  // keep-both conflicts never lose data, so a first sync / enabling binaries / adding a big
+  // folder flows freely even on an automatic run. (Deletions also have their own guard above.)
+  const riskyWrites = plans.filter((p) => !p.create && p.action !== "conflict").length;
+  if (!confirmed && riskyWrites > DRIVE_MAX_WRITES_PER_RUN) {
+    result.blocked = plans.length;
     result.errors.push(
-      `Mass-change guard: ${writeOps} changes pending (limit ${DRIVE_MAX_WRITES_PER_RUN}). Run "Sync now" manually to confirm.`,
+      `Mass-change guard: ${riskyWrites} changes to existing files pending (limit ${DRIVE_MAX_WRITES_PER_RUN}). Run "Sync now" manually to confirm.`,
     );
+    for (const pp of plans) {
+      result.issues.push({ path: pp.path, reason: `held (${pp.action}) — run Sync now to confirm`, category: "held" });
+    }
     return result; // do NOT advance the cursor
   }
 
@@ -458,6 +480,7 @@ export async function runDriveSync(args: {
   args.onProgress?.({ done: 0, total });
   let done = 0;
   for (const p of plans) {
+    let okThis = true;
     try {
       if (p.binary) {
         switch (p.action) {
@@ -480,10 +503,21 @@ export async function runDriveSync(args: {
         }
       }
     } catch (e) {
+      okThis = false;
       fatal = true;
       const msg = e instanceof Error ? e.message : String(e);
       result.errors.push(`${p.action} ${p.path}: ${msg}`);
-      result.issues.push({ path: p.path, reason: `${p.action} failed: ${msg}` });
+      result.issues.push({ path: p.path, reason: `${p.action} failed: ${msg}`, category: "error" });
+    }
+    // Record the successful per-file outcomes the user asked to see by name.
+    if (okThis) {
+      if (p.action === "conflict") {
+        result.issues.push({ path: p.path, reason: "changed on both sides — kept both copies", category: "conflict" });
+      } else if (p.action === "delete_local") {
+        result.issues.push({ path: p.path, reason: "deleted locally (gone on Drive)", category: "deleted" });
+      } else if (p.action === "delete_remote") {
+        result.issues.push({ path: p.path, reason: "deleted on Drive (gone locally)", category: "deleted" });
+      }
     }
     done++;
     args.onProgress?.({ done, total });

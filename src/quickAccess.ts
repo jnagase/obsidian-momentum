@@ -1,7 +1,7 @@
 import { ItemView, WorkspaceLeaf, TFile, TFolder, setIcon, Notice, normalizePath } from "obsidian";
 import { drawDonut, drawTreemap, drawLineChart, drawRing, drawClockProgress } from "./charts";
 import { DriveViewConfig } from "./driveBrowser";
-import { DriveSyncSummary, walkRemoteTree } from "./driveSync";
+import { DriveSyncSummary, DriveIssueCategory, walkRemoteTree } from "./driveSync";
 
 /** Enriched per-file status after an on-demand "Check Drive" (adds drive-only / diverged / remote). */
 type CheckStatus = "synced" | "local" | "pending" | "diverged" | "remote" | "drive";
@@ -66,6 +66,8 @@ export class FileManagerView extends ItemView {
   /** The "Your folders" card for the Drive mirror folder — target for the sync clock overlay. */
   private mirrorCardEl: HTMLElement | null = null;
   private driveSyncing = false;
+  /** Live "Syncing… X/Y" line in the Drive card, updated from the sync's onProgress callback. */
+  private driveLiveEl: HTMLElement | null = null;
   /** Result of the last on-demand "Check Drive" walk (enriched statuses incl. drive-only/diverged). */
   private driveCheck: { files: CheckedFile[]; at: number } | null = null;
   private driveChecking = false;
@@ -189,55 +191,106 @@ export class FileManagerView extends ItemView {
     }
   }
 
-  /** Instant Drive status card: last sync, compliance %, counters, files that didn't sync, and a
-   *  persistent per-file table (synced / local only) — all from the last sync + baselines, no walk. */
+  /** Open a synced file by its Drive-relative path (resolves through the mirror-folder base). */
+  private openDriveFile(relPath: string): void {
+    const base = this.cfg.drive?.mirrorDir() === "" ? "" : normalizePath(this.cfg.drive?.mirrorDir() ?? "");
+    const full = normalizePath(base ? `${base}/${relPath}` : relPath);
+    const f = this.app.vault.getAbstractFileByPath(full);
+    if (f instanceof TFile) void this.app.workspace.getLeaf(false).openFile(f);
+  }
+
+  /** Instant Drive status card: last sync, honest %, clickable category pills (with per-file
+   *  drill-down), a live "Syncing…" line, and a persistent per-file table — no network. */
   private renderDriveStatus(el: HTMLElement): void {
     const info = this.cfg.driveStatus?.();
     if (!info) return;
-    const { last, tracked, inScope, files, logPath } = info;
+    const { last, inScope, files, logPath } = info;
 
-    // Header: "when" + compliance % on one line, then the progress bar.
-    const pct = inScope ? Math.round((tracked / inScope) * 100) : 0;
     const scope = last?.scope ?? (this.cfg.drive?.mirrorDir() === "" ? "whole vault" : (this.cfg.drive?.mirrorDir() || "Drive"));
+
+    // Authoritative per-category counts (NOT the capped issues list). The issues list only
+    // supplies the file NAMES shown when a pill is expanded.
+    const held = last?.blocked ?? 0;
+    const errs = last?.errorCount ?? 0;
+    const skip = last?.skippedBinary ?? 0;
+    const conf = last?.conflicted ?? 0;
+    const del = (last?.deletedLocal ?? 0) + (last?.deletedRemote ?? 0);
+    const attention = held + errs + skip + conf;         // files not fully in sync
+    const synced = Math.max(0, inScope - attention);
+    const pct = inScope ? Math.round((synced / inScope) * 100) : 0;
+
+    // Header: when + an HONEST % (drops below 100 whenever anything needs attention).
     const hdr = el.createDiv({ cls: "pa-drive-status-row" });
     hdr.createSpan({ cls: "pa-drive-status-when", text: last ? `Last sync ${relTime(Date.parse(last.time))}` : "Not synced yet" });
     hdr.createSpan({ cls: "pa-drive-status-pct", text: `${pct}% in sync` });
-    const bar = el.createDiv({ cls: "pa-drive-bar" });
-    bar.createDiv({ cls: "pa-drive-bar-fill" }).style.width = `${pct}%`;
-    el.createDiv({ cls: "pa-drive-muted", text: `${tracked} of ${inScope} files synced · scope: ${scope}` });
 
-    // Counters from the last run, as labelled pills (non-zero highlighted).
+    // Live progress line (point 1) — filled while a sync runs (updated from onProgress), else empty.
+    this.driveLiveEl = el.createDiv({ cls: `pa-drive-live${this.driveSyncing ? " on" : ""}` });
+    if (this.driveSyncing) this.driveLiveEl.setText("Syncing…");
+
+    // Multi-colour stacked bar (point 3): synced + held + errors + skipped + conflicts.
+    const segs: Array<[number, string]> = [
+      [synced, "#14b8a6"], [held, "#a855f7"], [errs, "#e11d48"], [skip, "#0ea5e9"], [conf, "#f59e0b"],
+    ];
+    const denom = Math.max(1, synced + attention);
+    const bar = el.createDiv({ cls: "pa-drive-bar pa-drive-bar-stacked" });
+    for (const [n, color] of segs) {
+      if (n <= 0) continue;
+      const s = bar.createDiv({ cls: "pa-drive-bar-seg" });
+      s.style.width = `${(n / denom) * 100}%`;
+      s.style.background = color;
+    }
+    el.createDiv({ cls: "pa-drive-muted", text: `${synced} of ${inScope} files in sync · scope: ${scope}` });
+
     if (last) {
+      // Clickable category pills. The "attention" ones (with a category) expand a per-file list.
       const pills = el.createDiv({ cls: "pa-drive-pills" });
-      // Always show every counter (persisted last-sync status); color the ones that happened.
-      const pill = (glyph: string, count: number, label: string, color: string) => {
-        const p = pills.createSpan({ cls: `pa-drive-pill${count > 0 ? " hot" : ""}` });
+      const detail = el.createDiv({ cls: "pa-drive-catfiles" });
+      let openCat: DriveIssueCategory | null = null;
+      const pillByCat: Partial<Record<DriveIssueCategory, HTMLElement>> = {};
+
+      const renderCat = (cat: DriveIssueCategory, label: string): void => {
+        detail.empty();
+        const rows = (last.issues || []).filter((i) => i.category === cat);
+        detail.createDiv({
+          cls: "pa-drive-catfiles-head",
+          text: rows.length ? `${label}: ${rows.length} file${rows.length === 1 ? "" : "s"}` : `${label}: no per-file detail recorded`,
+        });
+        for (const it of rows) {
+          const r = detail.createDiv({ cls: "pa-drive-catfile" });
+          const a = r.createEl("a", { cls: "pa-drive-catfile-path", text: it.path, href: "#" });
+          a.onclick = (e) => { e.preventDefault(); this.openDriveFile(it.path); };
+          r.createSpan({ cls: "pa-drive-catfile-reason", text: it.reason });
+        }
+        if (last.issuesTotal > last.issues.length) {
+          detail.createDiv({ cls: "pa-drive-muted", text: "(list capped — see full sync log for the rest.)" });
+        }
+      };
+
+      const pill = (glyph: string, count: number, label: string, color: string, cat?: DriveIssueCategory) => {
+        const p = pills.createSpan({ cls: `pa-drive-pill${count > 0 ? " hot" : ""}${cat && count > 0 ? " pa-clickable" : ""}` });
         if (count > 0) p.style.setProperty("--pill", color);
         p.createSpan({ cls: "pa-drive-pill-n", text: `${glyph} ${count}` });
         p.createSpan({ cls: "pa-drive-pill-l", text: label });
+        if (cat) {
+          pillByCat[cat] = p;
+          if (count > 0) {
+            p.onclick = () => {
+              if (openCat === cat) { openCat = null; detail.empty(); p.removeClass("active"); return; }
+              for (const el2 of Object.values(pillByCat)) el2?.removeClass("active");
+              openCat = cat; p.addClass("active"); renderCat(cat, label);
+            };
+          }
+        }
       };
       pill("↑", last.pushed, "pushed", "#3b82f6");
       pill("↓", last.pulled, "pulled", "#16a34a");
       pill("⇄", last.merged, "merged", "#7c3aed");
-      pill("⚠", last.conflicted, "conflicts", "#f59e0b");
-      pill("🗑", last.deletedLocal + last.deletedRemote, "deleted", "#ef4444");
-      pill("⊘", last.skippedBinary, "skipped", "#0ea5e9");
-      pill("✕", last.errorCount, "errors", "#e11d48");
-
-      // Files that didn't sync — real total (the stored list is capped).
-      if (last.issuesTotal) {
-        const det = el.createEl("details", { cls: "pa-drive-issues" });
-        det.createEl("summary", { text: `${last.issuesTotal} file${last.issuesTotal === 1 ? "" : "s"} not synced — why` });
-        const dl = det.createDiv({ cls: "pa-drive-issues-list" });
-        for (const iss of last.issues) {
-          const r = dl.createDiv({ cls: "pa-drive-issue" });
-          r.createSpan({ cls: "pa-drive-issue-path", text: iss.path });
-          r.createSpan({ cls: "pa-drive-issue-reason", text: iss.reason });
-        }
-        if (last.issuesTotal > last.issues.length) {
-          dl.createDiv({ cls: "pa-drive-muted", text: `… and ${last.issuesTotal - last.issues.length} more (see full log).` });
-        }
-      }
+      pill("⚠", conf, "conflicts", "#f59e0b", "conflict");
+      pill("🗑", del, "deleted", "#ef4444", "deleted");
+      pill("⛔", held, "held", "#a855f7", "held");
+      pill("⊘", skip, "skipped", "#0ea5e9", "skipped");
+      pill("✕", errs, "errors", "#e11d48", "error");
 
       const logLine = el.createDiv({ cls: "pa-drive-muted pa-drive-loglink" });
       const link = logLine.createEl("a", { text: "Open full sync log ↗", href: "#" });
@@ -341,10 +394,19 @@ export class FileManagerView extends ItemView {
       ? this.mirrorCardEl.createDiv({ cls: "pa-clock-overlay" })
       : btn.parentElement!.createSpan({ cls: "pa-clock-inline" });
     const clock = drawClockProgress(host, this.mirrorCardEl ? 48 : 22);
+    // Live text in the status card (point 1), updated as the sync progresses.
+    if (this.driveLiveEl) { this.driveLiveEl.addClass("on"); this.driveLiveEl.setText("Syncing…"); }
 
     try {
-      await this.cfg.drive.syncNow((p) => clock.update(p.total ? p.done / p.total : 1));
+      await this.cfg.drive.syncNow((p) => {
+        clock.update(p.total ? p.done / p.total : 1);
+        if (this.driveLiveEl) {
+          const pc = p.total ? Math.round((p.done / p.total) * 100) : 0;
+          this.driveLiveEl.setText(p.total ? `Syncing… ${p.done}/${p.total} (${pc}%)` : "Syncing…");
+        }
+      });
       clock.update(1);
+      if (this.driveLiveEl) this.driveLiveEl.setText("Sync complete ✓");
     } finally {
       this.driveSyncing = false;
       // A short beat so a fast sync still flashes a full clock, then refresh the dashboard.

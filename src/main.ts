@@ -265,7 +265,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       // Promote any items added externally (e.g. a mobile widget) while the app was
       // closed BEFORE regenerating the mirrors, so those additions are not wiped.
       // Guarded so the mirror rewrites below don't re-trigger the modify listener.
-      void (async () => {
+      window.setTimeout(() => void (async () => {
         this.mirrorSyncing = true;
         try {
           // One-time migration of legacy mirror layout (Tasks/Lists/<board>/tasks.md)
@@ -304,7 +304,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
         } finally {
           window.setTimeout(() => { this.mirrorSyncing = false; }, 1000);
         }
-      })();
+      })(), 1500);
       this.maybeShowWhatsNew();
       // Adopt any tasks that arrived via sync without frontmatter.
       void this.adoptOrphanTasks();
@@ -321,6 +321,9 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       }
       // Optional event-driven Drive sync: watch vault changes and sync (debounced).
       this.registerDriveChangeWatcher();
+      // Adopt hand-dropped task notes — registered here (post layout-ready) so the initial
+      // vault-load "create" flood never runs it once per existing file.
+      this.registerTaskInboxListener();
       // Background license re-check (no-op during the free beta).
       window.setTimeout(() => void this.maybeRecheckPro(), 8000);
       // Once the vault has settled, seed the known-boards registry and (on later launches)
@@ -402,9 +405,16 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       })();
     }));
 
-    // Inbox: normalise any .md file created in Tasks/ (but NOT in Tasks/Lists/) that
-    // doesn't yet have a valid Momentum frontmatter. This lets other plugins, widgets,
-    // or manual edits drop files there and have the plugin adopt them automatically.
+    // NOTE: the vault "create" listener is registered inside onLayoutReady (see
+    // registerTaskInboxListener), NOT here. Obsidian fires a "create" for EVERY existing file
+    // when the vault first loads; a handler registered in onload would run once per file on
+    // startup (a real slowdown on big vaults). Registering after layout-ready skips that flood.
+  }
+
+  /** Inbox: adopt any .md dropped into Tasks/ (not Lists/ or _orphaned/) that lacks valid task
+   *  frontmatter. Registered AFTER layout-ready so the initial vault-load "create" flood — one
+   *  event per existing file — never reaches it. */
+  private registerTaskInboxListener(): void {
     this.registerEvent(this.app.vault.on("create", (file) => {
       if (!(file instanceof TFile)) return;
       if (!file.path.endsWith(".md")) return;
@@ -1725,6 +1735,20 @@ class PASettingTab extends PluginSettingTab {
     const driveConnected = !!this.plugin.settings.driveToken;
     new Setting(containerEl).setName("Google Drive (beta)").setHeading();
 
+    if (!this.plugin.isProEnabled()) {
+      // The whole Drive sync is a Momentum Pro feature (scope B). Without an active license, show a
+      // locked card instead of any live controls, and point to the Momentum pro section just below
+      // to unlock — a non-Pro user can't even connect the Drive OAuth from here.
+      const locked = containerEl.createDiv({ cls: "pa-pro-locked" });
+      locked.createEl("div", { cls: "pa-pro-locked-title", text: "🔒 Momentum pro feature" });
+      locked.createEl("p", {
+        cls: "pa-pro-locked-desc",
+        text: "Two-way Google Drive sync — text notes plus images, pdfs and any other file type, " +
+          "between a drive folder (or your whole vault) and Obsidian. Unlock it in the momentum pro " +
+          "section just below.",
+      });
+    } else {
+
     new Setting(containerEl)
       .setName("Enable Google Drive (beta)")
       .setDesc(
@@ -1886,10 +1910,29 @@ class PASettingTab extends PluginSettingTab {
           );
       }
     }
+    }
 
     // ── Momentum Pro ──────────────────────────────────────────────────────
     new Setting(containerEl).setName("Momentum pro").setHeading();
     const proOn = this.plugin.isProEnabled();
+
+    // What Pro unlocks — shown always, so people know exactly what they're getting.
+    const benefits = containerEl.createDiv({ cls: "pa-pro-benefits" });
+    benefits.createEl("div", { text: "What you unlock", cls: "pa-pro-benefits-title" });
+    const benefitsList = benefits.createEl("ul");
+    benefitsList.createEl("li", {
+      text: "Google Drive sync — two-way sync between a drive folder (or your whole vault) and Obsidian, on its own Google sign-in, kept separate from tasks.",
+    });
+    benefitsList.createEl("li", {
+      text: "Any file type — images, pdfs and other binaries sync too, not just Markdown and text.",
+    });
+    benefitsList.createEl("li", {
+      text: "Multi-device — phone and desktop stay in step, with a safe keep-both conflict mode and a lock so two devices never clobber each other.",
+    });
+    benefitsList.createEl("li", {
+      text: "One-time purchase, no subscription — what you unlock stays yours.",
+    });
+
     new Setting(containerEl)
       .setName(PRO_BETA_FREE ? "Status: beta — free" : proOn ? "Status: active" : "Status: not active")
       .setDesc(
@@ -1897,7 +1940,7 @@ class PASettingTab extends PluginSettingTab {
           ? "During the closed beta, all Pro features (like Google Drive sync) are unlocked for free."
           : proOn
             ? "Active — thank you!"
-            : `A one-time unlock (${PRO_PRICE}) for Google Drive sync and other extras.`,
+            : `A one-time unlock (${PRO_PRICE}) for the features above.`,
       );
 
     if (!PRO_BETA_FREE && !proOn) {

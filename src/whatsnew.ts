@@ -6,6 +6,26 @@ export interface ChangeEntry { version: string; sections: ChangeSection[]; }
 /** Release notes shown in the "What's new" dialog, newest first. */
 export const CHANGELOG: ChangeEntry[] = [
   {
+    version: "0.7.10",
+    sections: [
+      {
+        title: "Improved — Google Drive sync",
+        items: [
+          "The Drive status card now tells the whole story: a multi-colour bar and clickable pills for synced, held, errors, skipped and conflicts. Click any pill to see exactly which files fell into it, and why.",
+          "Live progress while syncing (\"Syncing… 12/40\"), and an honest in-sync percentage that no longer shows 100% when something is still held back.",
+          "A first sync, or turning on binary files, no longer trips the safety pause: brand-new uploads flow freely, and only bulk overwrites or deletions ask you to confirm.",
+          "Google Drive sync now clearly shows as a Momentum Pro feature, with a plain list of what Pro unlocks.",
+        ],
+      },
+      {
+        title: "Fixed — faster startup",
+        items: [
+          "Momentum no longer runs its task-inbox check once per existing file when Obsidian first loads, and defers its background housekeeping a moment so the app opens quicker on large vaults.",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.7.9",
     sections: [
       {

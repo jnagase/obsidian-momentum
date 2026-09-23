@@ -776,3 +776,31 @@ a.pa-drive-tname:hover{color:var(--text-accent)}
 .pa-drive-tstatus.is-drive{color:#64748b}
 .pa-drive-pending-row{background:color-mix(in srgb, #f59e0b 8%, transparent)}
 .pa-drive-twhen{color:var(--text-faint);text-align:right}
+
+/* ===== Momentum Pro benefits ===== */
+.pa-pro-benefits{margin:4px 0 10px;padding:10px 12px;background:var(--background-secondary);border:1px solid var(--background-modifier-border);border-radius:10px}
+.pa-pro-benefits-title{font-size:.72rem;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--text-accent);margin-bottom:6px}
+.pa-pro-benefits ul{margin:0;padding-left:18px}
+.pa-pro-benefits li{font-size:.82rem;color:var(--text-muted);margin:3px 0;line-height:1.45}
+
+/* ===== Momentum Pro locked feature card ===== */
+.pa-pro-locked{margin:4px 0 10px;padding:12px 14px;background:var(--background-secondary);border:1px solid var(--background-modifier-border);border-radius:10px}
+.pa-pro-locked-title{font-weight:700;color:var(--text-accent);margin-bottom:4px}
+.pa-pro-locked-desc{font-size:.85rem;color:var(--text-muted);margin:0}
+
+/* --- Drive card: stacked multi-colour bar, live line, clickable pills, per-category files --- */
+.pa-drive-bar-stacked{display:flex;gap:0}
+.pa-drive-bar-seg{height:100%;transition:width .3s}
+.pa-drive-bar-seg:first-child{border-top-left-radius:5px;border-bottom-left-radius:5px}
+.pa-drive-bar-seg:last-child{border-top-right-radius:5px;border-bottom-right-radius:5px}
+.pa-drive-live{font-size:.8rem;color:var(--text-accent);font-weight:600;margin:2px 0;min-height:0;opacity:0}
+.pa-drive-live.on{opacity:1;min-height:1.1em}
+.pa-drive-pill.pa-clickable{cursor:pointer}
+.pa-drive-pill.pa-clickable:hover{filter:brightness(1.08)}
+.pa-drive-pill.active{outline:2px solid var(--pill);outline-offset:1px}
+.pa-drive-catfiles{margin:6px 0;display:flex;flex-direction:column;gap:3px;max-height:240px;overflow:auto}
+.pa-drive-catfiles-head{font-size:.78rem;font-weight:600;color:var(--text-muted);margin-bottom:2px}
+.pa-drive-catfile{display:flex;justify-content:space-between;gap:10px;font-size:.78rem;padding:2px 0;border-bottom:1px solid var(--background-modifier-border)}
+.pa-drive-catfile-path{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;color:var(--text-accent);text-decoration:none}
+.pa-drive-catfile-path:hover{text-decoration:underline}
+.pa-drive-catfile-reason{color:var(--text-faint);flex-shrink:0}

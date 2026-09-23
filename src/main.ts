@@ -51,6 +51,7 @@ interface PASettings {
   proLicenseKey?: string;
   proValid?: boolean;
   proCheckedAt?: number;
+  proLicenseSeeded?: boolean; // true once the key has been mirrored into the vault (Config/pro.md)
   driveCursor?: string;            // Changes API page token (last clean cycle)
 }
 const DEFAULT_SETTINGS: PASettings = {
@@ -324,8 +325,10 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       // Adopt hand-dropped task notes — registered here (post layout-ready) so the initial
       // vault-load "create" flood never runs it once per existing file.
       this.registerTaskInboxListener();
-      // Background license re-check (no-op during the free beta).
-      window.setTimeout(() => void this.maybeRecheckPro(), 8000);
+      // Bridge the Pro license with the vault (Config/pro.md) so it syncs across devices, then
+      // run the background re-check (no-op during the free beta). Reconcile first so an adopted
+      // key is in place before the re-check validates it.
+      void this.reconcileProLicense().then(() => window.setTimeout(() => void this.maybeRecheckPro(), 8000));
       // Once the vault has settled, seed the known-boards registry and (on later launches)
       // catch boards deleted while this device was closed. First ever run only initializes.
       window.setTimeout(() => void this.detectDeletedBoards(), 6000);
@@ -651,7 +654,9 @@ export default class MomentumPlugin extends Plugin implements PAHost {
     const { workspace } = this.app;
     const existing = workspace.getLeavesOfType(VIEW_TYPE_QUICK)[0];
     if (existing) { void workspace.revealLeaf(existing); return; }
-    const leaf = workspace.getLeaf("tab");
+    // Reuse the center Momentum tab (swap its content in place) like every other page —
+    // only fall back to a new tab when there's no Momentum view open in the center yet.
+    const leaf = this.findCenterMomentumLeaf() ?? workspace.getLeaf("tab");
     await leaf.setViewState({ type: VIEW_TYPE_QUICK, active: true });
     void workspace.revealLeaf(leaf);
   }
@@ -663,7 +668,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
     const { workspace } = this.app;
     const existing = workspace.getLeavesOfType(VIEW_TYPE_DRIVE)[0];
     if (existing) { void workspace.revealLeaf(existing); return; }
-    const leaf = workspace.getLeaf("tab");
+    const leaf = this.findCenterMomentumLeaf() ?? workspace.getLeaf("tab");
     await leaf.setViewState({ type: VIEW_TYPE_DRIVE, active: true });
     void workspace.revealLeaf(leaf);
   }
@@ -686,8 +691,37 @@ export default class MomentumPlugin extends Plugin implements PAHost {
     this.settings.proLicenseKey = key.trim();
     this.settings.proValid = ok;
     this.settings.proCheckedAt = Date.now();
+    this.settings.proLicenseSeeded = true;
     await this.saveSettings();
+    // Mirror the key into the vault so it syncs to your other devices (unlock once, everywhere).
+    if (this.settings.proLicenseKey) await this.store.saveProLicenseKey(this.settings.proLicenseKey);
     new Notice(ok ? "✓ Momentum Pro activated — thank you!" : "That license key couldn't be verified.");
+  }
+
+  /**
+   * Bridge the Pro license with the vault (Config/pro.md) so it rides Obsidian Sync. Runs on
+   * startup: adopt a key that synced in from another device (validated in the background), or —
+   * one time — seed the vault from a license this device activated before the vault-synced model.
+   */
+  private async reconcileProLicense(): Promise<void> {
+    if (PRO_BETA_FREE) return;
+    const vaultKey = this.store.loadProLicenseKey();
+    const localKey = (this.settings.proLicenseKey ?? "").trim();
+    if (vaultKey && vaultKey !== localKey) {
+      // A key arrived (or changed) on another device → adopt it here; the background re-check
+      // (0 = stale) validates it against the store so Pro unlocks once we're online.
+      this.settings.proLicenseKey = vaultKey;
+      this.settings.proValid = false;
+      this.settings.proCheckedAt = 0;
+      this.settings.proLicenseSeeded = true;
+      await this.saveSettings();
+    } else if (localKey && !vaultKey && !this.settings.proLicenseSeeded) {
+      // Existing user, activated before this change → write the key into the vault once so it
+      // starts syncing. Guarded by the seeded flag so a later manual delete isn't resurrected.
+      await this.store.saveProLicenseKey(localKey);
+      this.settings.proLicenseSeeded = true;
+      await this.saveSettings();
+    }
   }
 
   /** Background re-validation of the license when the last check is stale (no-op during beta). */
@@ -1091,7 +1125,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
     if (id === "drive") { this.currentPage = id; this.refreshNav(); return void this.activateDriveView(); }
     this.currentPage = id;
     const { workspace } = this.app;
-    let leaf = this.findCenterPAView();
+    let leaf = this.findCenterMomentumLeaf();
     if (!leaf) {
       leaf = workspace.getLeaf("tab");
     }
@@ -1129,7 +1163,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
         break;
       case "center":
       default:
-        leaf = this.findCenterPAView() ?? workspace.getLeaf("tab");
+        leaf = this.findCenterMomentumLeaf() ?? workspace.getLeaf("tab");
         break;
     }
     if (!leaf) return;
@@ -1140,14 +1174,20 @@ export default class MomentumPlugin extends Plugin implements PAHost {
 
   /** Find an existing PAView docked in the main/center area (not a sidebar).
    *  Prefers the currently active leaf so navigation always updates the right tab. */
-  private findCenterPAView(): WorkspaceLeaf | null {
+  private findCenterMomentumLeaf(): WorkspaceLeaf | null {
     const { workspace } = this.app;
     const rootSplit = workspace.rootSplit;
-    const centerLeaves = workspace.getLeavesOfType(VIEW_TYPE_PA)
+    // Any Momentum content view docked in the center — a page (PA), the File Manager (QUICK)
+    // or the Drive browser (DRIVE). Treating them as one lets every nav item swap the content
+    // of the SAME center tab, instead of the File Manager/Drive popping a new tab.
+    const centerLeaves = [VIEW_TYPE_PA, VIEW_TYPE_QUICK, VIEW_TYPE_DRIVE]
+      .flatMap((t) => workspace.getLeavesOfType(t))
       .filter((l) => l.getRoot() === rootSplit);
     if (!centerLeaves.length) return null;
     // Prefer the active leaf so clicking a nav item updates the focused tab.
-    const active = workspace.getActiveViewOfType(PAView);
+    const active = workspace.getActiveViewOfType(PAView)
+      ?? workspace.getActiveViewOfType(FileManagerView)
+      ?? workspace.getActiveViewOfType(DriveBrowserView);
     if (active && centerLeaves.includes(active.leaf)) return active.leaf;
     return centerLeaves[0];
   }

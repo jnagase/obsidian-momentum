@@ -7,6 +7,7 @@ import {
 import { todayLocal } from "./util";
 import { monthHubTitle, monthKeyOf, monthName, financeTxTitle, mealLogTitle, workoutTitle, formatAmount, mergeBody } from "./readablenotes";
 import { mapTransaction, mapMealLog, mapWorkout, computePace, deriveWorkoutKind, totalCardioDistance } from "./loaders";
+import { JournalEntry, CHECKIN_QUESTIONS, checkinTags } from "./journal";
 
 /** Root folder inside the vault that holds all Personal Assistant data. */
 export let DATA_ROOT = "Momentum Life";
@@ -2030,6 +2031,100 @@ export class PADataStore {
     const log: Record<string, number> = {};
     log[date] = Math.max(0, deltaLiters);
     await this.writeFile("Nutrition/water.md", this.buildDoc({ type: "water-log", log, modified: new Date().toISOString() }, "# Water log\n"));
+  }
+
+  // ============================================================
+  // JOURNAL (Journal/YYYY/YYYY-MM-DD.md — one entry per day)
+  // ============================================================
+
+  /** Vault-relative path for a day's entry: Journal/<year>/<YYYY-MM-DD>.md. */
+  journalEntryRel(date: string): string {
+    return `Journal/${date.slice(0, 4)}/${date}.md`;
+  }
+
+  /** The note for a given day, or null if there's no entry yet. */
+  getJournalEntryFile(date: string): TFile | null {
+    return this.fileAt(this.journalEntryRel(date));
+  }
+
+  /** Delete a journal entry by path (moves the note to the system trash — recoverable). */
+  async deleteJournalEntry(path: string): Promise<void> {
+    const f = this.app.vault.getAbstractFileByPath(path);
+    if (f instanceof TFile) await this.removeFile(f);
+  }
+
+  // ---- Momentum Pro license (stored in the vault so it rides Obsidian Sync across devices) --
+  private proLicenseFile = "Config/pro.md";
+
+  /** The Pro license key stored in the vault, or "" when none. Synced like the rest of the vault. */
+  loadProLicenseKey(): string {
+    const f = this.fileAt(this.proLicenseFile);
+    return f ? str(this.frontmatter(f).key) : "";
+  }
+
+  /** Persist the Pro license key into the vault Config note (rides Obsidian Sync to other devices). */
+  async saveProLicenseKey(key: string): Promise<void> {
+    await this.writeFile(this.proLicenseFile, this.buildDoc(
+      { type: "pro-license", key: key.trim(), modified: new Date().toISOString() },
+      "# Momentum Pro license\n\nYour Momentum Pro license key lives here so it syncs across your " +
+      "devices with the rest of your vault — activate on one device and Pro unlocks everywhere. " +
+      "This is your own purchase key, not a shared secret.\n",
+    ));
+  }
+
+  /**
+   * Create a NEW journal entry for a day and return it. Never overwrites: the first entry of a
+   * day is `<date>.md`; a second, third, … entry for the same day gets a sequential prefix
+   * (`2 - <date>.md`, `3 - <date>.md`, …), so nothing the user already wrote is lost. The `date`
+   * frontmatter still points at the day, so numbered entries group under the right day.
+   */
+  async createJournalEntry(date: string, templateId: string, body: string, checkin: Record<string, string> = {}): Promise<TFile> {
+    const year = date.slice(0, 4);
+    let rel = `Journal/${year}/${date}.md`;
+    for (let n = 2; this.fileAt(rel); n++) rel = `Journal/${year}/${n} - ${date}.md`;
+    const tags = checkinTags(checkin);
+    const meta: FM = {
+      type: "journal",
+      date,
+      template: templateId,
+      ...checkin, // mood / energy / connection / stress
+      ...(tags.length ? { tags } : {}),
+      created: new Date().toISOString(),
+      modified: new Date().toISOString(),
+    };
+    return await this.writeFile(rel, this.buildDoc(meta, body));
+  }
+
+  /** Read the stored check-in answers (mood/energy/…) from an entry's frontmatter. */
+  private readCheckin(fm: FM): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const q of CHECKIN_QUESTIONS) {
+      const v = fm[q.key];
+      if (typeof v === "string" && v) out[q.key] = v;
+    }
+    return out;
+  }
+
+  /** All saved entries (frontmatter-derived), excluding the Templates subfolder. */
+  loadJournalEntries(): JournalEntry[] {
+    const templatesPrefix = this.full("Journal/Templates") + "/";
+    return this.listMarkdown("Journal")
+      .filter((f) => !f.path.startsWith(templatesPrefix))
+      .map((f) => {
+        const fm = this.frontmatter(f);
+        // Prefer the frontmatter date; fall back to the YYYY-MM-DD filename so imported or
+        // hand-made entries without a `date:` field are still recognized.
+        const fmDate = str(fm.date).slice(0, 10);
+        const date = /^\d{4}-\d{2}-\d{2}$/.test(fmDate) ? fmDate : f.basename.slice(0, 10);
+        return { date, path: f.path, template: str(fm.template), checkin: this.readCheckin(fm) };
+      })
+      .filter((e) => /^\d{4}-\d{2}-\d{2}$/.test(e.date))
+      .sort((a, b) => b.date.localeCompare(a.date)); // newest first
+  }
+
+  /** Set of days that have an entry — for the history heatmap. */
+  journalEntryDates(): Set<string> {
+    return new Set(this.loadJournalEntries().map((e) => e.date));
   }
 
   // ============================================================

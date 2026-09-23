@@ -8,6 +8,7 @@ import { FitnessModule } from "./modules/fitness";
 import { NutritionModule } from "./modules/nutrition";
 import { StudiesModule } from "./modules/studies";
 import { FinancesModule } from "./modules/finances";
+import { JournalModule } from "./modules/journal";
 import { CustomModule } from "./modules/custom";
 import { CustomPage } from "./types";
 import { VIEW_TYPE_PA_SIDE, PASideView } from "./side";
@@ -22,6 +23,7 @@ export const PAGES = [
   { id: "nutrition", label: "🥗 Nutrition" },
   { id: "studies", label: "📚 Studies" },
   { id: "finances", label: "💰 Finances" },
+  { id: "journal", label: "📓 Journal" },
   { id: "quick-access", label: "🗂️ File Manager" },
 ];
 
@@ -70,6 +72,7 @@ export class PAView extends ItemView {
   private nutritionModule: NutritionModule;
   private studiesModule: StudiesModule;
   private financesModule: FinancesModule;
+  private journalModule: JournalModule;
   private customModule: CustomModule;
 
   constructor(leaf: WorkspaceLeaf, store: PADataStore, host: PAHost, pluginName = "Momentum Life") {
@@ -99,6 +102,7 @@ export class PAView extends ItemView {
     this.nutritionModule = new NutritionModule(this.ctx);
     this.studiesModule = new StudiesModule(this.ctx);
     this.financesModule = new FinancesModule(this.ctx);
+    this.journalModule = new JournalModule(this.ctx);
     this.customModule = new CustomModule(this.ctx);
   }
 
@@ -207,6 +211,7 @@ export class PAView extends ItemView {
       case "nutrition": this.nutritionModule.render(main); break;
       case "studies": this.studiesModule.render(main); break;
       case "finances": this.financesModule.render(main); break;
+      case "journal": this.journalModule.render(main); break;
       default: {
         const custom = this.host.customPages.find((p) => p.id === this.page);
         if (custom) this.customModule.render(main, custom);

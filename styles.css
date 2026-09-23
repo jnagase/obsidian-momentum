@@ -804,3 +804,47 @@ a.pa-drive-tname:hover{color:var(--text-accent)}
 .pa-drive-catfile-path{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;color:var(--text-accent);text-decoration:none}
 .pa-drive-catfile-path:hover{text-decoration:underline}
 .pa-drive-catfile-reason{color:var(--text-faint);flex-shrink:0}
+
+/* ===== Journal ===== */
+.pa-journal-today{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.pa-journal-hint{margin-bottom:8px}
+.pa-journal-templates{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px}
+.pa-journal-tmpl{display:flex;flex-direction:column;align-items:flex-start;text-align:left;background:var(--background-primary);border:1px solid var(--background-modifier-border);border-radius:10px;padding:12px;cursor:pointer;white-space:normal;transition:border-color .15s,transform .05s}
+.pa-journal-tmpl:hover{border-color:var(--interactive-accent)}
+.pa-journal-tmpl:active{transform:scale(.99)}
+.pa-journal-tmpl-emoji{font-size:1.4rem}
+.pa-journal-tmpl-name{font-weight:700;margin:4px 0 2px}
+.pa-journal-tmpl-desc{font-size:.78rem;color:var(--text-muted);line-height:1.4}
+.pa-journal-cal-nav{display:flex;gap:6px;align-items:center}
+.pa-cal-cell.pa-cal-future{opacity:.35}
+.pa-cal-dot{width:5px;height:5px;border-radius:50%;background:var(--text-accent);margin:3px auto 0}
+.pa-cal-cell.selected .pa-cal-dot{background:var(--text-on-accent)}
+.pa-journal-recent-head{margin:10px 0 6px;font-weight:600}
+.pa-journal-recent{display:flex;flex-direction:column;gap:2px}
+.pa-journal-recent-row{display:flex;align-items:baseline;gap:10px;padding:3px 0;border-bottom:1px solid var(--background-modifier-border)}
+.pa-journal-recent-date{color:var(--text-accent);text-decoration:none;font-variant-numeric:tabular-nums}
+.pa-journal-recent-date:hover{text-decoration:underline}
+.pa-journal-recent-tmpl{font-size:.78rem}
+
+/* ===== Journal: history table + check-in ===== */
+.pa-journal-table{display:flex;flex-direction:column;gap:2px;margin-top:6px}
+.pa-journal-trow{display:grid;grid-template-columns:100px repeat(4,1fr) 1.6fr 40px;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid var(--background-modifier-border)}
+.pa-journal-tc-tmpl{font-size:.76rem;color:var(--text-muted)}
+.pa-journal-tc-act{display:flex;justify-content:flex-end}
+.pa-journal-tc-act .pa-icon-btn{opacity:.55}
+.pa-journal-tc-act .pa-icon-btn:hover{opacity:1}
+.pa-journal-thead{font-size:.72rem;color:var(--text-muted);font-weight:600}
+.pa-journal-tc{font-size:.78rem;color:var(--text-muted)}
+.pa-journal-tc-date{color:var(--text-accent);text-decoration:none;font-variant-numeric:tabular-nums;font-size:.82rem}
+.pa-journal-tc-date:hover{text-decoration:underline}
+.pa-journal-chip{display:inline-flex;align-items:center;justify-content:center;width:28px;height:22px;border-radius:6px;font-size:.9rem;box-shadow:inset 0 0 0 1px rgba(0,0,0,.06)}
+/* check-in modal */
+.pa-checkin-q{margin:12px 0}
+.pa-checkin-q-name{font-weight:600;margin-bottom:5px}
+.pa-checkin-opts{display:flex;flex-wrap:wrap;gap:6px}
+.pa-checkin-opt{display:flex;flex-direction:column;align-items:center;gap:2px;padding:6px 10px;border:1px solid var(--background-modifier-border);border-radius:8px;background:var(--background-primary);cursor:pointer;min-width:58px}
+.pa-checkin-opt:hover{border-color:var(--text-muted)}
+.pa-checkin-opt.selected{box-shadow:inset 0 0 0 2px currentColor}
+.pa-checkin-opt-emoji{font-size:1.25rem}
+.pa-checkin-opt-label{font-size:.68rem;color:var(--text-muted)}
+.pa-checkin-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}

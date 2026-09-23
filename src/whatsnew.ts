@@ -6,6 +6,17 @@ export interface ChangeEntry { version: string; sections: ChangeSection[]; }
 /** Release notes shown in the "What's new" dialog, newest first. */
 export const CHANGELOG: ChangeEntry[] = [
   {
+    version: "0.7.13",
+    sections: [
+      {
+        title: "Improved — Google Drive sync",
+        items: [
+          "Text notes now sync on every plan — no license needed. Momentum pro is only required to also sync binary files like images, pdfs and other file types.",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.7.12",
     sections: [
       {

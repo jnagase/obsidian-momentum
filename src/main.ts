@@ -875,9 +875,11 @@ export default class MomentumPlugin extends Plugin implements PAHost {
    *  Any Drive error is contained here and never affects the Tasks sync. */
   async syncGoogleDrive(confirmed = false, onProgress?: (p: { done: number; total: number }) => void): Promise<void> {
     if (this.driveSyncing) { new Notice("Drive: a sync is already running."); return; }
-    // Google Drive sync is the Momentum Pro feature (single choke point: covers the manual
-    // button, command, startup, interval and on-change paths). No-op while PRO_BETA_FREE.
-    if (!this.isProEnabled()) { new Notice("Google Drive sync is a momentum pro feature. Unlock it in settings."); return; }
+    // Scope A: text notes sync on every plan; only real binary upload/download is a Momentum Pro
+    // feature. So we never block the whole sync — text always flows — and only gate the binary
+    // lever: binaries round-trip as bytes just when Pro is active AND the toggle is on. Without
+    // Pro (or with it off) the engine's block-and-warn keeps binaries safe, and text still syncs.
+    const proBinaries = this.isProEnabled() && !!this.settings.driveSyncBinaries;
     const token = await this.driveAccessToken();
     if (!token) { new Notice("Google Drive: not connected."); return; }
     this.driveSyncing = true;
@@ -908,7 +910,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
         resolveConflict: (name) => this.askDriveConflict(name),
         confirmDelete: (msg) => this.confirmDriveDeletion(msg),
         onProgress: progress,
-        syncBinaries: !!this.settings.driveSyncBinaries,
+        syncBinaries: proBinaries,
         incremental: !!this.settings.driveIncremental,
       });
       this.settings.driveLastSync = {
@@ -1775,26 +1777,17 @@ class PASettingTab extends PluginSettingTab {
     const driveConnected = !!this.plugin.settings.driveToken;
     new Setting(containerEl).setName("Google Drive (beta)").setHeading();
 
-    if (!this.plugin.isProEnabled()) {
-      // The whole Drive sync is a Momentum Pro feature (scope B). Without an active license, show a
-      // locked card instead of any live controls, and point to the Momentum pro section just below
-      // to unlock — a non-Pro user can't even connect the Drive OAuth from here.
-      const locked = containerEl.createDiv({ cls: "pa-pro-locked" });
-      locked.createDiv({ cls: "pa-pro-locked-title", text: "🔒 Momentum pro feature" });
-      locked.createEl("p", {
-        cls: "pa-pro-locked-desc",
-        text: "Two-way Google Drive sync — text notes plus images, pdfs and any other file type, " +
-          "between a drive folder (or your whole vault) and Obsidian. Unlock it in the momentum pro " +
-          "section just below.",
-      });
-    } else {
+    // Scope A: text notes sync on every plan, so the controls are always available. Only real
+    // binary sync is gated (the "Sync binary files" toggle below), pointing at Momentum pro.
+    const driveProOn = this.plugin.isProEnabled();
 
     new Setting(containerEl)
       .setName("Enable Google Drive (beta)")
       .setDesc(
         "Browse and sync files between a drive folder and a vault folder. Uses a SEPARATE Google " +
         "sign-in from Tasks. Full drive access is in Google verification — until it completes, " +
-        "connect with a test-user account. Syncing is a Momentum Pro feature (free during the beta).",
+        "connect with a test-user account. Text notes sync on every plan; syncing images, pdfs and " +
+        "other binaries is a Momentum pro feature (free during the beta).",
       )
       .addToggle((t) =>
         t.setValue(!!this.plugin.settings.googleDriveEnabled).onChange(async (v) => {
@@ -1924,12 +1917,16 @@ class PASettingTab extends PluginSettingTab {
 
         new Setting(containerEl)
           .setName("Sync binary files")
-          .setDesc("Upload/download images, pdfs and other binaries too (off = text/Markdown only, binaries skipped).")
+          .setDesc(driveProOn
+            ? "Upload/download images, pdfs and other binaries too (off = text/Markdown only, binaries skipped)."
+            : "🔒 Momentum pro — text notes always sync; unlock Pro (section below) to also sync images, pdfs and other binaries.")
           .addToggle((t) =>
-            t.setValue(!!this.plugin.settings.driveSyncBinaries).onChange(async (v) => {
-              this.plugin.settings.driveSyncBinaries = v;
-              await this.plugin.saveSettings();
-            })
+            t.setValue(driveProOn && !!this.plugin.settings.driveSyncBinaries)
+              .setDisabled(!driveProOn)
+              .onChange(async (v) => {
+                this.plugin.settings.driveSyncBinaries = v;
+                await this.plugin.saveSettings();
+              })
           );
 
         new Setting(containerEl)
@@ -1949,7 +1946,6 @@ class PASettingTab extends PluginSettingTab {
             b.setButtonText("Sync now").setCta().onClick(() => { void this.plugin.syncGoogleDrive(true); })
           );
       }
-    }
     }
 
     // ── Momentum Pro ──────────────────────────────────────────────────────

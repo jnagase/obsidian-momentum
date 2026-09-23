@@ -6,6 +6,32 @@ export interface ChangeEntry { version: string; sections: ChangeSection[]; }
 /** Release notes shown in the "What's new" dialog, newest first. */
 export const CHANGELOG: ChangeEntry[] = [
   {
+    version: "0.7.12",
+    sections: [
+      {
+        title: "New — Journal",
+        items: [
+          "A new Journal tab: pick a template (five-minute journal, gratitude or free writing) and a quick check-in captures your mood, energy, connection and stress. Entries are plain notes in your vault, so you can write, add images and format them like any other note.",
+          "A month calendar tinted by your mood and a history table of past entries, each shown as colour chips.",
+          "You can keep more than one entry per day — starting another never overwrites the first, it just gets a numbered name.",
+          "A delete button on each history row moves that entry to your system trash (recoverable).",
+        ],
+      },
+      {
+        title: "Improved — Momentum Pro across devices",
+        items: [
+          "Your Pro license now travels with your vault: activate on one device and, once Obsidian Sync catches up, Pro unlocks on your other devices on its own — no need to paste the key again. Nothing is required from you; your existing license keeps working.",
+        ],
+      },
+      {
+        title: "Fixed",
+        items: [
+          "The File Manager tab now opens in place instead of stacking a new pane, and Momentum starts a touch faster on large vaults.",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.7.11",
     sections: [
       {

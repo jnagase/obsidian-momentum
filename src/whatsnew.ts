@@ -6,6 +6,19 @@ export interface ChangeEntry { version: string; sections: ChangeSection[]; }
 /** Release notes shown in the "What's new" dialog, newest first. */
 export const CHANGELOG: ChangeEntry[] = [
   {
+    version: "0.7.14",
+    sections: [
+      {
+        title: "Improved — Google Drive sync",
+        items: [
+          "Whole-vault sync now includes your Momentum data too (journal, fitness, nutrition, finance, studies, habits and settings), so it travels across your devices — the plugin only skips its own volatile logs.",
+          "Your Momentum pro license now rides the sync as well, so activating on one device unlocks the others once the sync catches up.",
+          "Task notes stay owned by Google Tasks sync when that's on (no double-sync); with Google Tasks off, Drive syncs your tasks too.",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.7.13",
     sections: [
       {

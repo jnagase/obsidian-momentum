@@ -82,6 +82,21 @@ const DEFAULT_SETTINGS: PASettings = {
   driveIncremental: false,
 };
 const LEGACY_DATA_ROOT = "Personal Assistant";
+/**
+ * Files INSIDE the data root that whole-vault Drive sync must never carry, keyed by their path
+ * relative to the data root. These are per-device / volatile: the debug logs are rewritten on
+ * every sync (a feedback loop if synced), and the Google-Tasks control files would fight the
+ * Google Tasks sync across devices. User data (Journal, Fitness, settings.md, pro.md, …) is NOT
+ * here — it syncs. Task NOTES are handled separately (owned by Google Tasks sync when enabled).
+ */
+const DRIVE_DATA_EXCLUDE = new Set<string>([
+  "Config/google-drive-debug.md",
+  "Config/google-sync-debug.md",
+  "Config/google-auth-debug.md",
+  "Config/pending-google-deletes.md",
+  "Config/known-boards.md",
+  "Config/deleted-boards.md",
+]);
 /** Bump when the readable-notes migration changes so the guarded auto-run re-triggers. */
 const READABLE_NOTES_SCHEMA = 1;
 /** Bump when the task-list mirror layout changes so the guarded migration re-runs. */
@@ -776,19 +791,39 @@ export default class MomentumPlugin extends Plugin implements PAHost {
   /**
    * VaultFS over the mirror scope, keyed by RELATIVE PATH (so subfolders sync, not just a flat
    * folder). `driveMirrorDir` = "" means WHOLE VAULT — in that mode the plugin's own data root
-   * (dataRoot) is excluded, to avoid a feedback loop with its own logs/notes and to never let a
-   * Drive pull overwrite the app's live state mid-operation.
+   * (dataRoot) IS synced too (so your Momentum data and the pro.md license travel), with one
+   * exception per file so nothing fights over the same note:
+   *  - volatile control/debug files (DRIVE_DATA_EXCLUDE) are always skipped (loop / per-device);
+   *  - derived task mirrors (Tasks/Lists) and the orphan archive (Tasks/_orphaned) are skipped —
+   *    each device rebuilds the mirrors locally;
+   *  - task NOTES (Tasks/…) are skipped ONLY while Google Tasks sync is enabled, since that sync
+   *    is their sole owner. With Google Tasks off, Drive carries the task notes too.
    */
+  /**
+   * Whether a vault file path is in the Drive sync scope. Shared by the sync engine's VaultFS
+   * and the status panel so both always agree on what syncs. See driveVaultFS for the rules.
+   */
+  private driveInScope(path: string): boolean {
+    const raw = this.settings.driveMirrorDir ?? "Drive";
+    const base = raw === "" ? "" : normalizePath(raw); // "" = whole vault
+    if (base) return path === base || path.startsWith(`${base}/`);
+    const dataRoot = normalizePath(this.settings.dataRoot || "");
+    if (dataRoot && (path === dataRoot || path.startsWith(`${dataRoot}/`))) {
+      const rel = path.slice(dataRoot.length + 1); // "" for the data-root folder itself
+      if (!rel) return false;
+      if (DRIVE_DATA_EXCLUDE.has(rel)) return false;                                    // volatile/per-device
+      if (rel.startsWith("Tasks/Lists/") || rel.startsWith("Tasks/_orphaned/")) return false; // derived / archive
+      if (this.settings.googleTasksEnabled && rel.startsWith("Tasks/")) return false;   // Google Tasks owns notes
+      return true;                                                                      // sync the rest (data, pro.md)
+    }
+    return true;
+  }
+
   private driveVaultFS(): VaultFS {
     const raw = this.settings.driveMirrorDir ?? "Drive";
     const base = raw === "" ? "" : normalizePath(raw); // "" = whole vault
-    const dataRoot = normalizePath(this.settings.dataRoot || "");
     const toFull = (rel: string) => normalizePath(base ? `${base}/${rel}` : rel);
-    const inScope = (path: string): boolean => {
-      if (base) return path === base || path.startsWith(`${base}/`);
-      if (dataRoot && (path === dataRoot || path.startsWith(`${dataRoot}/`))) return false; // exclude plugin data
-      return true;
-    };
+    const inScope = (path: string): boolean => this.driveInScope(path);
     const ensureFolders = async (fullPath: string): Promise<void> => {
       const slash = fullPath.lastIndexOf("/");
       if (slash < 0) return;
@@ -1003,15 +1038,10 @@ export default class MomentumPlugin extends Plugin implements PAHost {
   getDriveStatus(): { last?: DriveSyncSummary; tracked: number; inScope: number; logPath: string; files: { path: string; status: "synced" | "local"; at?: string; mtime: number }[] } {
     const raw = this.settings.driveMirrorDir ?? "Drive";
     const base = raw === "" ? "" : normalizePath(raw);
-    const dataRoot = normalizePath(this.settings.dataRoot || "");
     const inScope: { rel: string; mtime: number }[] = [];
     for (const f of this.app.vault.getFiles()) {
-      if (base) {
-        if (f.path === base || f.path.startsWith(`${base}/`)) inScope.push({ rel: f.path.slice(base.length + 1), mtime: f.stat.mtime });
-      } else {
-        if (dataRoot && (f.path === dataRoot || f.path.startsWith(`${dataRoot}/`))) continue;
-        inScope.push({ rel: f.path, mtime: f.stat.mtime });
-      }
+      if (!this.driveInScope(f.path)) continue;
+      inScope.push({ rel: base ? f.path.slice(base.length + 1) : f.path, mtime: f.stat.mtime });
     }
     const baselines = this.settings.driveBaselines ?? {};
     let tracked = 0;

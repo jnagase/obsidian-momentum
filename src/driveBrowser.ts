@@ -9,7 +9,7 @@ import {
   isGoogleNative,
   EXPORT_MIME,
 } from "./googledrive";
-import { walkRemoteTree } from "./driveSync";
+import { walkRemoteTree, DriveProgress } from "./driveSync";
 
 export const VIEW_TYPE_DRIVE = "momentum-drive-browser";
 
@@ -21,8 +21,8 @@ export interface DriveViewConfig {
   driveFolderId: () => string | undefined;
   /** Plugin data root to exclude in whole-vault mode (mirrors the engine's exclusion). */
   dataRoot?: () => string;
-  /** Run a full bidirectional Drive sync now, reporting progress for a UI indicator. */
-  syncNow?: (onProgress?: (p: { done: number; total: number }) => void) => Promise<void>;
+  /** Run a full bidirectional Drive sync now, reporting phase/progress for a UI indicator. */
+  syncNow?: (onProgress?: (p: DriveProgress) => void) => Promise<void>;
 }
 
 type RowStatus = "only_drive" | "only_local" | "same" | "diff" | "native";

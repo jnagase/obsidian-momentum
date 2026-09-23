@@ -13,7 +13,7 @@ import {
 import { GTSyncService } from "./gtSync";
 import { FileManagerView, VIEW_TYPE_QUICK } from "./quickAccess";
 import { DriveBrowserView, VIEW_TYPE_DRIVE, DriveViewConfig } from "./driveBrowser";
-import { runDriveSync, DriveBaselineStore, VaultFS, DriveConflictStrategy, DEFAULT_CONFLICT_STRATEGY, ConflictChoice, DriveSyncResult, DriveSyncSummary, acquireDriveLock, releaseDriveLock } from "./driveSync";
+import { runDriveSync, DriveBaselineStore, VaultFS, DriveConflictStrategy, DEFAULT_CONFLICT_STRATEGY, ConflictChoice, DriveSyncResult, DriveSyncSummary, DriveProgress, acquireDriveLock, releaseDriveLock } from "./driveSync";
 import { authorizeDrive, completeDriveAuth, ensureFreshDriveToken, revokeDriveToken, DriveAuthExpiredError, DRIVE_PROTOCOL_ACTION } from "./driveAuth";
 import { DriveFolderPicker } from "./driveFolderPicker";
 import { isProActive, proNeedsRecheck, validateLicense, PRO_BETA_FREE, PRO_PRICE, PRO_CHECKOUT_URL, PRO_BETA_OFFER, ProState } from "./pro";
@@ -908,7 +908,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
 
   /** Run one bidirectional Drive sync cycle. `confirmed` (manual) bypasses the mass-change guard.
    *  Any Drive error is contained here and never affects the Tasks sync. */
-  async syncGoogleDrive(confirmed = false, onProgress?: (p: { done: number; total: number }) => void): Promise<void> {
+  async syncGoogleDrive(confirmed = false, onProgress?: (p: DriveProgress) => void): Promise<void> {
     if (this.driveSyncing) { new Notice("Drive: a sync is already running."); return; }
     // Scope A: text notes sync on every plan; only real binary upload/download is a Momentum Pro
     // feature. So we never block the whole sync — text always flows — and only gate the binary
@@ -919,8 +919,12 @@ export default class MomentumPlugin extends Plugin implements PAHost {
     if (!token) { new Notice("Google Drive: not connected."); return; }
     this.driveSyncing = true;
     this.updateDriveStatus("Drive: syncing…");
-    const progress = (p: { done: number; total: number }): void => {
-      this.updateDriveStatus(p.total ? `Drive: syncing ${p.done}/${p.total}` : "Drive: syncing…");
+    const progress = (p: DriveProgress): void => {
+      const label =
+        p.phase === "scanning" ? (p.incremental ? "Drive: checking changes…" : "Drive: scanning…")
+        : p.phase === "planning" ? (p.total ? `Drive: comparing ${p.done}/${p.total}` : "Drive: comparing…")
+        : (p.total ? `Drive: syncing ${p.done}/${p.total}` : "Drive: syncing…");
+      this.updateDriveStatus(label);
       onProgress?.(p);
     };
     const rootId = this.settings.driveFolderId || "root";

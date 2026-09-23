@@ -68,6 +68,8 @@ export class FileManagerView extends ItemView {
   private driveSyncing = false;
   /** Live "Syncing… X/Y" line in the Drive card, updated from the sync's onProgress callback. */
   private driveLiveEl: HTMLElement | null = null;
+  /** Live progress bar fill in the Drive card (determinate per phase, or animated while scanning). */
+  private driveLiveBarEl: HTMLElement | null = null;
   /** Result of the last on-demand "Check Drive" walk (enriched statuses incl. drive-only/diverged). */
   private driveCheck: { files: CheckedFile[]; at: number } | null = null;
   private driveChecking = false;
@@ -141,8 +143,10 @@ export class FileManagerView extends ItemView {
       const btn = actions.createEl("button", { cls: "pa-fm-drive-sync", text: "🔄 Sync now" });
       btn.onclick = () => void this.runDriveSyncFromFileManager(btn);
     }
-    const check = actions.createEl("button", { cls: "pa-fm-drive-open", text: this.driveChecking ? "Checking…" : "↯ Check drive" });
-    check.disabled = this.driveChecking;
+    const check = actions.createEl("button", { cls: "pa-fm-drive-open", text: this.driveChecking ? "Checking…" : "🔍 Compare" });
+    check.setAttr("title", "Compare your files with Google Drive to see what differs (drive-only, diverged, pending). Read-only — makes no changes.");
+    check.setAttr("aria-label", "Compare with Google Drive (read-only, makes no changes)");
+    check.disabled = this.driveChecking || this.driveSyncing;
     check.onclick = () => void this.checkDrive(check);
     // Persistent status + per-file table (instant, no network) — driven by the last sync + baselines.
     // The old live browser (which zeroed out between syncs) was removed.
@@ -224,9 +228,11 @@ export class FileManagerView extends ItemView {
     hdr.createSpan({ cls: "pa-drive-status-when", text: last ? `Last sync ${relTime(Date.parse(last.time))}` : "Not synced yet" });
     hdr.createSpan({ cls: "pa-drive-status-pct", text: `${pct}% in sync` });
 
-    // Live progress line (point 1) — filled while a sync runs (updated from onProgress), else empty.
+    // Live progress line + bar — filled while a sync runs (updated per phase from onProgress).
     this.driveLiveEl = el.createDiv({ cls: `pa-drive-live${this.driveSyncing ? " on" : ""}` });
     if (this.driveSyncing) this.driveLiveEl.setText("Syncing…");
+    const liveBarTrack = el.createDiv({ cls: `pa-drive-live-track${this.driveSyncing ? " on" : ""}` });
+    this.driveLiveBarEl = liveBarTrack.createDiv({ cls: "pa-drive-live-fill" });
 
     // Multi-colour stacked bar (point 3): synced + held + errors + skipped + conflicts.
     const segs: Array<[number, string]> = [
@@ -388,25 +394,43 @@ export class FileManagerView extends ItemView {
     this.driveSyncing = true;
     btn.disabled = true;
     btn.addClass("is-syncing");
+    btn.setText("⏳ Syncing…");
 
     // Prefer overlaying the clock on the mirror folder card; fall back to beside the button.
     const host = this.mirrorCardEl
       ? this.mirrorCardEl.createDiv({ cls: "pa-clock-overlay" })
       : btn.parentElement!.createSpan({ cls: "pa-clock-inline" });
     const clock = drawClockProgress(host, this.mirrorCardEl ? 48 : 22);
-    // Live text in the status card (point 1), updated as the sync progresses.
-    if (this.driveLiveEl) { this.driveLiveEl.addClass("on"); this.driveLiveEl.setText("Syncing…"); }
+    // Live line + bar in the status card, updated per phase as the sync progresses.
+    if (this.driveLiveEl) this.driveLiveEl.addClass("on");
+    this.driveLiveBarEl?.parentElement?.addClass("on");
+    const setLive = (text: string, frac: number | null): void => {
+      if (this.driveLiveEl) this.driveLiveEl.setText(text);
+      if (this.driveLiveBarEl) {
+        // frac === null → indeterminate (scanning): animate; else determinate fill.
+        this.driveLiveBarEl.toggleClass("indeterminate", frac === null);
+        this.driveLiveBarEl.setCssStyles({ width: frac === null ? "100%" : `${Math.round(Math.max(0, Math.min(1, frac)) * 100)}%` });
+      }
+    };
+    setLive("Starting…", null);
 
     try {
       await this.cfg.drive.syncNow((p) => {
-        clock.update(p.total ? p.done / p.total : 1);
-        if (this.driveLiveEl) {
+        const frac = p.total ? p.done / p.total : null;
+        clock.update(frac ?? 0.15);
+        if (p.phase === "scanning") {
+          setLive(p.incremental ? "Checking for changes… (incremental)" : "Scanning Drive… (full)", null);
+        } else if (p.phase === "planning") {
+          setLive(p.total ? `Comparing files… ${p.done}/${p.total}` : "Comparing files…", frac);
+        } else {
           const pc = p.total ? Math.round((p.done / p.total) * 100) : 0;
-          this.driveLiveEl.setText(p.total ? `Syncing… ${p.done}/${p.total} (${pc}%)` : "Syncing…");
+          setLive(p.total ? `Applying changes… ${p.done}/${p.total} (${pc}%)` : "Applying changes…", frac);
         }
       });
       clock.update(1);
-      if (this.driveLiveEl) this.driveLiveEl.setText("Sync complete ✓");
+      setLive("Sync complete ✓", 1);
+    } catch (e) {
+      setLive(`Sync failed: ${e instanceof Error ? e.message : String(e)}`, 0);
     } finally {
       this.driveSyncing = false;
       // A short beat so a fast sync still flashes a full clock, then refresh the dashboard.

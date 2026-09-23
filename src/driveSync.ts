@@ -72,6 +72,19 @@ export function isBinaryName(name: string): boolean {
   return ext === "" || !TEXT_EXT.has(ext);
 }
 
+/**
+ * Progress ticks for the UI. A sync moves through phases: `scanning` (list/compare the remote —
+ * the long part of a full run; `incremental:true` means the fast change-check path was taken),
+ * `planning` (deciding each file, may download for first-contact compares) and `applying`
+ * (executing the planned writes). `done`/`total` are per-phase (total 0 = indeterminate).
+ */
+export interface DriveProgress {
+  phase: "scanning" | "planning" | "applying";
+  done: number;
+  total: number;
+  incremental?: boolean;
+}
+
 /** The conflict-resolution strategy applied when both sides diverged (Req 9.2). */
 export type DriveConflictStrategy =
   | "keep-both"    // default: keep local, save the remote alongside as a .conflict copy
@@ -282,8 +295,8 @@ export async function runDriveSync(args: {
   resolveConflict?: (name: string) => Promise<ConflictChoice>;
   /** Approve a mass deletion over the limit. No callback / declined → deletions are withheld. */
   confirmDelete?: (msg: string) => Promise<boolean>;
-  /** Progress callback fired as planned operations execute (for a UI indicator). */
-  onProgress?: (p: { done: number; total: number }) => void;
+  /** Progress callback fired across the scan/plan/apply phases (for a UI indicator). */
+  onProgress?: (p: DriveProgress) => void;
   /** Enable REAL binary upload/download (needs fs.readBinary/writeBinary). Off → block-and-warn. */
   syncBinaries?: boolean;
   /** Use the Changes API to skip the full tree walk when nothing changed remotely (safe: any
@@ -299,6 +312,8 @@ export async function runDriveSync(args: {
   let remoteByPath: Map<string, DriveFile> = new Map();
   let folderCache: Map<string, string> = new Map();
   let usedIncremental = false;
+
+  args.onProgress?.({ phase: "scanning", done: 0, total: 0 });
 
   // INCREMENTAL (Req 9.3/9.4), opt-in and SAFE: if a cursor exists and the Changes API reports
   // NO remote changes since it, reconstruct the remote view from the baselines and skip the full
@@ -316,6 +331,7 @@ export async function runDriveSync(args: {
         folderCache = new Map<string, string>([["", rootId]]);
         usedIncremental = true;
         result.notes.push("Incremental: no remote changes since last sync (skipped full scan).");
+        args.onProgress?.({ phase: "scanning", done: 0, total: 0, incremental: true });
       }
     } catch { /* fall through to the full walk */ }
   }
@@ -342,7 +358,10 @@ export async function runDriveSync(args: {
   const isCreate = (action: DriveAction, localExists: boolean, remoteExists: boolean): boolean =>
     (action === "push" && !remoteExists) || (action === "pull" && !localExists);
   const plans: Plan[] = [];
+  const planTotal = allPaths.size;
+  let planned = 0;
   for (const path of allPaths) {
+   args.onProgress?.({ phase: "planning", done: planned++, total: planTotal });
    try {
     const remote = remoteByPath.get(path);
     const base = baselines.get(path);
@@ -477,7 +496,7 @@ export async function runDriveSync(args: {
   // ---- EXECUTION ------------------------------------------------------------------------
   let fatal = false;
   const total = plans.length;
-  args.onProgress?.({ done: 0, total });
+  args.onProgress?.({ phase: "applying", done: 0, total });
   let done = 0;
   for (const p of plans) {
     let okThis = true;
@@ -520,7 +539,7 @@ export async function runDriveSync(args: {
       }
     }
     done++;
-    args.onProgress?.({ done, total });
+    args.onProgress?.({ phase: "applying", done, total });
   }
 
   // ---- COMMIT (advance cursor only on a clean cycle) ------------------------------------

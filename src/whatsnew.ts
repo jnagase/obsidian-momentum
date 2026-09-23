@@ -6,6 +6,19 @@ export interface ChangeEntry { version: string; sections: ChangeSection[]; }
 /** Release notes shown in the "What's new" dialog, newest first. */
 export const CHANGELOG: ChangeEntry[] = [
   {
+    version: "0.7.15",
+    sections: [
+      {
+        title: "Improved — Google Drive sync progress",
+        items: [
+          "The sync card now shows what's actually happening, with a progress bar that moves: scanning Drive (and whether it's a full or an incremental check), comparing files one by one, then applying changes — instead of a single stuck \"Syncing…\".",
+          "The Sync now button clearly shows \"Syncing…\" and is disabled while a sync runs, so you don't fire it several times by accident.",
+          "The old \"Check drive\" button is now \"Compare\", with a note that it just shows what differs from Drive and makes no changes.",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.7.14",
     sections: [
       {

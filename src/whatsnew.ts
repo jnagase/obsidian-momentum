@@ -6,6 +6,17 @@ export interface ChangeEntry { version: string; sections: ChangeSection[]; }
 /** Release notes shown in the "What's new" dialog, newest first. */
 export const CHANGELOG: ChangeEntry[] = [
   {
+    version: "0.8.1",
+    sections: [
+      {
+        title: "New — Pro & beta terms",
+        items: [
+          "Added clear terms for Momentum pro, linked from Settings → Momentum pro. In short: beta, provided as-is, no guaranteed support — and if the project is ever discontinued, the intent is to open-source it (Pro becomes free for everyone) or hand it to a new maintainer. Your free, local features never depend on us.",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.8.0",
     sections: [
       {

@@ -147,6 +147,10 @@ beta, Pro features are unlocked for everyone at no cost.
 - The plugin's source is fully public; the license check lives in the open code. That's expected
   for a community plugin.
 
+**Terms:** by activating Pro you accept the [Pro & Beta Terms](docs/pro-terms.md) — in short: beta,
+"as is", no guaranteed support, and if the project is ever discontinued the intent is to open-source
+it (making Pro free) or hand it to a new maintainer. The free, local features never depend on us.
+
 ## Install (dev)
 1. `npm install`
 2. `npm run dev` (watch) or `npm run build` (production, one-off).

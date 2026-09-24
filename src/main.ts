@@ -2071,5 +2071,16 @@ class PASettingTab extends PluginSettingTab {
         .addText((t) => t.setPlaceholder("Your license key").setValue(keyInput).onChange((v) => { keyInput = v; }))
         .addButton((b) => b.setButtonText("Activate").onClick(() => { void this.plugin.activatePro(keyInput).then(() => rerender()); }));
     }
+
+    new Setting(containerEl)
+      .setName("Terms")
+      .setDesc(
+        "Beta, provided as-is, with no guaranteed support. If the project is ever discontinued, the " +
+        "intent is to open-source it (Pro becomes free for everyone) or hand it to a new maintainer. " +
+        "Your free, local features never depend on us. Activating Pro means you accept these terms.",
+      )
+      .addButton((b) => b.setButtonText("View terms").onClick(() => {
+        window.open("https://github.com/jnagase/obsidian-momentum/blob/main/docs/pro-terms.md", "_blank");
+      }));
   }
 }

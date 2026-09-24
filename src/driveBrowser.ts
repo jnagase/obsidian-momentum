@@ -21,8 +21,10 @@ export interface DriveViewConfig {
   driveFolderId: () => string | undefined;
   /** Plugin data root to exclude in whole-vault mode (mirrors the engine's exclusion). */
   dataRoot?: () => string;
-  /** Run a full bidirectional Drive sync now, reporting phase/progress for a UI indicator. */
-  syncNow?: (onProgress?: (p: DriveProgress) => void) => Promise<void>;
+  /** Run a bidirectional Drive sync now, reporting phase/progress for a UI indicator. Pass
+   *  `incremental` to force the fast change-check path (true) or a full walk (false); omit to
+   *  use the saved setting. */
+  syncNow?: (onProgress?: (p: DriveProgress) => void, incremental?: boolean) => Promise<void>;
 }
 
 type RowStatus = "only_drive" | "only_local" | "same" | "diff" | "native";

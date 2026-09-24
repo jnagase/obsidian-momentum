@@ -6,6 +6,34 @@ export interface ChangeEntry { version: string; sections: ChangeSection[]; }
 /** Release notes shown in the "What's new" dialog, newest first. */
 export const CHANGELOG: ChangeEntry[] = [
   {
+    version: "0.8.0",
+    sections: [
+      {
+        title: "Join the beta — Momentum pro free for the first 100",
+        items: [
+          "Momentum pro is a one-time unlock (Google Drive sync of your images, pdfs and other binaries). The first 100 beta testers get it free — a perpetual license that stays yours. Open Settings → Momentum pro to grab your key.",
+          "Come kick the tyres and tell us what breaks: your notes always sync for free; pro just adds binary files on top.",
+        ],
+      },
+      {
+        title: "Improved — Google Drive sync you can actually watch",
+        items: [
+          "The sync card shows exactly what's happening — scanning, comparing files, applying changes — with a progress bar that moves and per-folder cards that fill in and settle green (in sync), yellow (has differences) or red (error).",
+          "It now reflects every sync, including the automatic one on startup — not only syncs you start from the card.",
+          "Two explicit buttons: Incremental (fast — checks only what changed on Drive) and Full sync (a complete two-way scan). When an incremental run has to fall back to full, it tells you why.",
+          "A Stop button (with confirmation) to end a running sync safely — it finishes the current file, keeps everything already synced, and the next sync picks up the rest.",
+          "Faster routine syncs on large vaults: unchanged files are no longer re-read to check them.",
+        ],
+      },
+      {
+        title: "Improved — File manager",
+        items: [
+          "The storage overview, folder map and activity chart now refresh on their own as files change — no need to reopen the tab.",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.7.16",
     sections: [
       {

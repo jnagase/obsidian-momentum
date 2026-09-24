@@ -2053,23 +2053,60 @@ export class PADataStore {
     if (f instanceof TFile) await this.removeFile(f);
   }
 
-  // ---- Momentum Pro license (stored in the vault so it rides Obsidian Sync across devices) --
-  private proLicenseFile = "Config/pro.md";
+  // ---- App state (Config/state.md) — general internal state, synced with the vault -----------
+  // A general-purpose internal-state note, distinct from the user-facing settings.md. It holds
+  // things the app needs to remember across devices/sessions and grows over time. Only app code
+  // writes it (never saveConfig or the MCP), so keys here are never clobbered. The Pro license
+  // lives here under the deliberately non-descriptive key "sig", base64-encoded. base64 is light
+  // obfuscation, NOT security (the license is validated server-side); it just keeps the key from
+  // being obvious/greppable in the vault.
+  private appStateFile = "Config/state.md";
+  private legacyProFile = "Config/pro.md";
 
-  /** The Pro license key stored in the vault, or "" when none. Synced like the rest of the vault. */
-  loadProLicenseKey(): string {
-    const f = this.fileAt(this.proLicenseFile);
-    return f ? str(this.frontmatter(f).key) : "";
+  /** Read one app-state frontmatter value ("" when absent). */
+  private appStateValue(key: string): string {
+    const f = this.fileAt(this.appStateFile);
+    return f ? str(this.frontmatter(f)[key]) : "";
   }
 
-  /** Persist the Pro license key into the vault Config note (rides Obsidian Sync to other devices). */
+  /** Set app-state frontmatter values in place, preserving the other keys (creates the note if
+   *  missing). Lets Config/state.md safely accumulate many values over time. */
+  private async patchAppState(values: Record<string, string>): Promise<void> {
+    const f = this.fileAt(this.appStateFile);
+    if (f) {
+      await this.patchFrontmatter(f, (fm) => { for (const k of Object.keys(values)) fm[k] = values[k]; fm.modified = new Date().toISOString(); });
+    } else {
+      await this.writeFile(this.appStateFile, this.buildDoc(
+        { type: "app-state", ...values, modified: new Date().toISOString() },
+        "# Momentum Life — app state\n\nInternal state Momentum keeps for you, kept in sync with your vault. Safe to leave as-is.\n",
+      ));
+    }
+  }
+
+  /** The Pro license key, decoded. Reads Config/state.md `sig` (base64), falling back to the
+   *  legacy plaintext Config/pro.md so an upgrade keeps working until migrateProLicense runs. */
+  loadProLicenseKey(): string {
+    const sig = this.appStateValue("sig");
+    if (sig) { try { return atob(sig).trim(); } catch { /* fall through to legacy */ } }
+    const legacy = this.fileAt(this.legacyProFile);
+    return legacy ? str(this.frontmatter(legacy).key).trim() : "";
+  }
+
+  /** Persist the Pro license key (base64) into Config/state.md. */
   async saveProLicenseKey(key: string): Promise<void> {
-    await this.writeFile(this.proLicenseFile, this.buildDoc(
-      { type: "pro-license", key: key.trim(), modified: new Date().toISOString() },
-      "# Momentum Pro license\n\nYour Momentum Pro license key lives here so it syncs across your " +
-      "devices with the rest of your vault — activate on one device and Pro unlocks everywhere. " +
-      "This is your own purchase key, not a shared secret.\n",
-    ));
+    const k = key.trim();
+    await this.patchAppState({ sig: k ? btoa(k) : "" });
+  }
+
+  /** One-time migration: move a legacy plaintext Config/pro.md key into Config/state.md (base64),
+   *  then trash the old, obvious file. No-op once migrated (or when there's nothing to migrate). */
+  async migrateProLicense(): Promise<void> {
+    if (this.appStateValue("sig")) return;          // already in the new store
+    const legacy = this.fileAt(this.legacyProFile);
+    if (!legacy) return;                            // nothing to migrate
+    const key = str(this.frontmatter(legacy).key).trim();
+    if (key) await this.patchAppState({ sig: btoa(key) });
+    await this.removeFile(legacy);                  // trash the old Config/pro.md
   }
 
   /**

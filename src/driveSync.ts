@@ -85,6 +85,9 @@ export interface DriveProgress {
   incremental?: boolean;
   /** The vault-relative path being examined/applied this tick (lets the UI colour per folder). */
   path?: string;
+  /** Why a requested incremental sync fell back to a full scan (e.g. "3 changes on Drive",
+   *  "first full sync") — shown in the scanning label so it isn't confusing. */
+  reason?: string;
 }
 
 /** The conflict-resolution strategy applied when both sides diverged (Req 9.2). */
@@ -309,6 +312,10 @@ export async function runDriveSync(args: {
    *  still holds. Safety net: any file touched at/after this time is read and compared normally.
    *  Cuts the per-file local reads that dominate a large-vault sync. */
   lastSyncMs?: number;
+  /** Checked between files; when it returns true the sync stops gracefully after the current
+   *  file. Files already applied keep their new baseline, the rest are left untouched, and the
+   *  change cursor is NOT advanced so the next sync re-checks everything. */
+  shouldStop?: () => boolean;
 }): Promise<DriveSyncResult> {
   const { token, driveFolderId, fs, baselines, confirmed } = args;
   const strategy = args.conflictStrategy ?? DEFAULT_CONFLICT_STRATEGY;
@@ -320,27 +327,36 @@ export async function runDriveSync(args: {
   let folderCache: Map<string, string> = new Map();
   let usedIncremental = false;
 
-  args.onProgress?.({ phase: "scanning", done: 0, total: 0 });
+  args.onProgress?.({ phase: "scanning", done: 0, total: 0, incremental: !!args.incremental });
 
   // INCREMENTAL (Req 9.3/9.4), opt-in and SAFE: if a cursor exists and the Changes API reports
   // NO remote changes since it, reconstruct the remote view from the baselines and skip the full
-  // walk. ANY reported change — or any error — falls back to the authoritative full walk.
-  if (args.incremental && baselines.getCursor() && baselines.names().length > 0) {
-    try {
-      const { changes } = await listChanges(token, baselines.getCursor() as string);
-      if (changes.length === 0) {
-        remoteByPath = new Map();
-        for (const name of baselines.names()) {
-          const b = baselines.get(name);
-          if (!b) continue;
-          remoteByPath.set(name, { id: b.fileId, name: baseOf(name), mimeType: "text/plain", md5Checksum: b.md5, modifiedTime: b.modifiedTime });
+  // walk. ANY reported change — or any error, or no cursor yet — falls back to the authoritative
+  // full walk (and we tell the UI why, so an "Incremental" click showing "full" isn't confusing).
+  if (args.incremental) {
+    const cursor = baselines.getCursor();
+    if (cursor && baselines.names().length > 0) {
+      try {
+        const { changes } = await listChanges(token, cursor);
+        if (changes.length === 0) {
+          remoteByPath = new Map();
+          for (const name of baselines.names()) {
+            const b = baselines.get(name);
+            if (!b) continue;
+            remoteByPath.set(name, { id: b.fileId, name: baseOf(name), mimeType: "text/plain", md5Checksum: b.md5, modifiedTime: b.modifiedTime });
+          }
+          folderCache = new Map<string, string>([["", rootId]]);
+          usedIncremental = true;
+          result.notes.push("Incremental: no remote changes since last sync (skipped full scan).");
+          args.onProgress?.({ phase: "scanning", done: 0, total: 0, incremental: true });
+        } else {
+          result.notes.push(`Incremental check found ${changes.length} remote change(s) → full scan.`);
+          args.onProgress?.({ phase: "scanning", done: 0, total: 0, reason: `${changes.length} change${changes.length === 1 ? "" : "s"} on Drive` });
         }
-        folderCache = new Map<string, string>([["", rootId]]);
-        usedIncremental = true;
-        result.notes.push("Incremental: no remote changes since last sync (skipped full scan).");
-        args.onProgress?.({ phase: "scanning", done: 0, total: 0, incremental: true });
-      }
-    } catch { /* fall through to the full walk */ }
+      } catch { args.onProgress?.({ phase: "scanning", done: 0, total: 0, reason: "change check failed" }); }
+    } else {
+      args.onProgress?.({ phase: "scanning", done: 0, total: 0, reason: "first full sync" });
+    }
   }
 
   if (!usedIncremental) {
@@ -377,7 +393,9 @@ export async function runDriveSync(args: {
   const plans: Plan[] = [];
   const planTotal = allPaths.size;
   let planned = 0;
+  let stopped = false;
   for (const path of allPaths) {
+   if (args.shouldStop?.()) { stopped = true; break; }
    args.onProgress?.({ phase: "planning", done: planned++, total: planTotal, path });
    try {
     const remote = remoteByPath.get(path);
@@ -525,6 +543,7 @@ export async function runDriveSync(args: {
   args.onProgress?.({ phase: "applying", done: 0, total });
   let done = 0;
   for (const p of plans) {
+    if (args.shouldStop?.()) { stopped = true; break; }
     let okThis = true;
     try {
       if (p.binary) {
@@ -568,9 +587,10 @@ export async function runDriveSync(args: {
     args.onProgress?.({ phase: "applying", done, total, path: p.path });
   }
 
-  // ---- COMMIT (advance cursor only on a clean cycle) ------------------------------------
+  // ---- COMMIT (advance cursor only on a clean, complete cycle) --------------------------
   await baselines.save();
-  if (!fatal) {
+  if (stopped) result.notes.push("Sync stopped by user — partial run; cursor not advanced, next sync re-checks everything.");
+  if (!fatal && !stopped) {
     try {
       // Refresh the change cursor to "now" so the next run only re-checks the delta. (First
       // version re-lists fully each run; the cursor is stored for the incremental path next.)

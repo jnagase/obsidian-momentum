@@ -1,7 +1,8 @@
-import { ItemView, WorkspaceLeaf, TFile, TFolder, setIcon, Notice, normalizePath } from "obsidian";
+import { ItemView, WorkspaceLeaf, TFile, TFolder, setIcon, setTooltip, Notice, normalizePath, debounce } from "obsidian";
 import { drawDonut, drawTreemap, drawLineChart, drawRing, drawClockProgress } from "./charts";
 import { DriveViewConfig } from "./driveBrowser";
-import { DriveSyncSummary, DriveIssueCategory, walkRemoteTree } from "./driveSync";
+import { ConfirmModal } from "./ui";
+import { DriveSyncSummary, DriveIssueCategory, DriveProgress, walkRemoteTree } from "./driveSync";
 
 /** Enriched per-file status after an on-demand "Check Drive" (adds drive-only / diverged / remote). */
 type CheckStatus = "synced" | "local" | "pending" | "diverged" | "remote" | "drive";
@@ -21,6 +22,13 @@ export interface QuickAccessConfig {
   openDriveBrowser?: () => void;
   /** Instant Drive status (last-sync summary + compliance counts + per-file table). No network. */
   driveStatus?: () => { last?: DriveSyncSummary; tracked: number; inScope: number; logPath: string; files: { path: string; status: "synced" | "local"; at?: string; mtime: number }[] };
+  /** True while ANY Drive sync is running (button, interval, startup, on-change) — for the header. */
+  isSyncing?: () => boolean;
+  /** Subscribe to Drive sync progress from any trigger; returns an unsubscribe fn. Lets the card
+   *  reflect a sync it didn't start itself (interval/startup/on-change). */
+  subscribeDriveProgress?: (cb: (p: DriveProgress | null) => void) => () => void;
+  /** Request a graceful stop of the running sync (finishes the current file, then stops). */
+  cancelSync?: () => void;
 }
 
 /** Palette shared across the dashboard visualizations. */
@@ -78,6 +86,12 @@ export class FileManagerView extends ItemView {
   private folderFills: Map<string, { el: HTMLElement; labelEl: HTMLElement; total: number; done: number; sizeText: string }> = new Map();
   /** The "⏳ Syncing… / ✓ Synced" header above the folder grid inside the Drive section. */
   private folderSyncLabelEl: HTMLElement | null = null;
+  /** Unsubscribe from the plugin's Drive-progress feed (so the card reflects ANY sync). */
+  private driveProgressUnsub: (() => void) | null = null;
+  /** Debounce the re-render that settles durable folder colours after a sync ends. */
+  private driveSettleTimer = 0;
+  /** The "⏹ Stop" button, shown only while a sync runs. */
+  private driveStopBtnEl: HTMLButtonElement | null = null;
 
   constructor(leaf: WorkspaceLeaf, cfg: QuickAccessConfig) {
     super(leaf);
@@ -97,6 +111,69 @@ export class FileManagerView extends ItemView {
     this.bodyEl = root.createDiv();
     this.render();
     this.registerEvent(this.app.workspace.on("file-open", () => this.render()));
+    // Keep the dashboard fresh as the vault changes (new/removed/renamed/edited files) — debounced,
+    // and skipped WHILE a sync runs so it doesn't fight the live fills (the sync re-renders at its end).
+    const refresh = debounce(() => { if (!this.isDriveSyncing()) this.render(); }, 800, true);
+    this.registerEvent(this.app.vault.on("create", refresh));
+    this.registerEvent(this.app.vault.on("delete", refresh));
+    this.registerEvent(this.app.vault.on("rename", refresh));
+    this.registerEvent(this.app.vault.on("modify", refresh));
+    // Reflect ANY Drive sync (button, interval, startup, on-change), not just one started here.
+    this.driveProgressUnsub = this.cfg.subscribeDriveProgress?.((p) => this.applyDriveProgress(p)) ?? null;
+  }
+
+  async onClose(): Promise<void> {
+    this.driveProgressUnsub?.();
+    this.driveProgressUnsub = null;
+    window.clearTimeout(this.driveSettleTimer);
+  }
+
+  /** True while any Drive sync is running — the card's own run or one from another trigger. */
+  private isDriveSyncing(): boolean { return this.driveSyncing || !!this.cfg.isSyncing?.(); }
+
+  /** Show the Stop button only while a sync is running. */
+  private updateStopBtn(): void { this.driveStopBtnEl?.toggleClass("pa-hidden", !this.isDriveSyncing()); }
+
+  /** Update the live status line + bar. `frac === null` → indeterminate (animated) while scanning. */
+  private setLive(text: string, frac: number | null): void {
+    if (this.driveLiveEl) this.driveLiveEl.setText(text);
+    if (this.driveLiveBarEl) {
+      this.driveLiveBarEl.toggleClass("indeterminate", frac === null);
+      this.driveLiveBarEl.setCssStyles({ width: frac === null ? "100%" : `${Math.round(Math.max(0, Math.min(1, frac)) * 100)}%` });
+    }
+  }
+
+  /** Drive the live UI from a progress tick, from ANY sync trigger. A null tick means the sync
+   *  finished: finalize the line and re-render so the folder cards settle to durable colours. */
+  private applyDriveProgress(p: DriveProgress | null): void {
+    if (p === null) {
+      this.driveSyncing = false;
+      this.setLive("Sync complete ✓", 1);
+      this.setFolderSyncLabel();
+      this.updateStopBtn();
+      window.clearTimeout(this.driveSettleTimer);
+      this.driveSettleTimer = window.setTimeout(() => this.render(), 400);
+      return;
+    }
+    this.driveSyncing = true;
+    if (this.driveLiveEl) this.driveLiveEl.addClass("on");
+    this.driveLiveBarEl?.parentElement?.addClass("on");
+    this.setFolderSyncLabel();
+    this.updateStopBtn();
+    if (p.path) {
+      const fe = this.folderFills.get(topFolder(p.path));
+      if (fe) {
+        fe.done = Math.min(fe.total, fe.done + 1);
+        fe.el.removeClasses(["is-green", "is-yellow", "is-red"]);
+        fe.el.addClass("is-progress");
+        fe.el.setCssStyles({ width: `${Math.round((fe.done / Math.max(1, fe.total)) * 100)}%` });
+        fe.labelEl.setText(`${fe.total} / ${fe.done} items · ${fe.sizeText}`);
+      }
+    }
+    const frac = p.total ? p.done / p.total : null;
+    if (p.phase === "scanning") this.setLive(p.incremental ? "Checking for changes… (incremental)" : p.reason ? `Scanning Drive… (full — ${p.reason})` : "Scanning Drive… (full)", null);
+    else if (p.phase === "planning") this.setLive(p.total ? `Comparing files… ${p.done}/${p.total}` : "Comparing files…", frac);
+    else { const pc = p.total ? Math.round((p.done / p.total) * 100) : 0; this.setLive(p.total ? `Applying changes… ${p.done}/${p.total} (${pc}%)` : "Applying changes…", frac); }
   }
 
   private render(): void {
@@ -148,31 +225,41 @@ export class FileManagerView extends ItemView {
     head.createSpan({ cls: "pa-beta-tag", text: "beta" });
     const actions = head.createDiv({ cls: "pa-fm-drive-actions" });
     if (drive.syncNow) {
-      const btn = actions.createEl("button", { cls: "pa-fm-drive-sync", text: "🔄 Sync now" });
-      btn.onclick = () => void this.runDriveSyncFromFileManager(btn);
+      // Incremental = fast change-check (skips the full remote scan when nothing changed on Drive,
+      // falling back to full automatically); Full = force a complete two-way walk.
+      const inc = actions.createEl("button", { cls: "pa-fm-drive-sync", text: "⚡ Incremental" });
+      inc.setAttr("title", "Fast sync: checks only what changed on Drive since last time (falls back to a full sync when needed).");
+      inc.onclick = () => void this.runDriveSyncFromFileManager(inc, true);
+      const full = actions.createEl("button", { cls: "pa-fm-drive-sync", text: "🔄 Full sync" });
+      full.setAttr("title", "Full sync: scans every file on both sides. Slower, but the most thorough.");
+      full.onclick = () => void this.runDriveSyncFromFileManager(full, false);
     }
     const check = actions.createEl("button", { cls: "pa-fm-drive-open", text: this.driveChecking ? "Checking…" : "🔍 Compare" });
     check.setAttr("title", "Compare your files with Google Drive to see what differs (drive-only, diverged, pending). Read-only — makes no changes.");
     check.setAttr("aria-label", "Compare with Google Drive (read-only, makes no changes)");
     check.disabled = this.driveChecking || this.driveSyncing;
     check.onclick = () => void this.checkDrive(check);
-    // Persistent status + per-file table (instant, no network) — driven by the last sync + baselines.
-    // The old live browser (which zeroed out between syncs) was removed.
-    this.renderDriveStatus(sec.createDiv({ cls: "pa-drive-status" }));
-
-    // "Your folders" moved in here, each card colour-coded by its Drive sync status. A header
-    // shows "⏳ Syncing…" while a sync runs and "✓ Synced" when it's done.
-    const foldersWrap = sec.createDiv({ cls: "pa-fm-drive-folders" });
-    this.folderSyncLabelEl = foldersWrap.createDiv({ cls: "pa-fm-drive-folders-label" });
-    this.setFolderSyncLabel();
-    this.renderFolderCards(byFolder, foldersWrap);
+    // Stop button — visible only while a sync runs; asks for confirmation, then stops gracefully.
+    const stop = actions.createEl("button", { cls: "pa-fm-drive-stop", text: "⏹ Stop" });
+    stop.setAttr("title", "Stop the running sync. It finishes the current file, then stops safely — nothing already synced is undone, and the next sync resumes the rest.");
+    stop.onclick = () => new ConfirmModal(
+      this.app,
+      "Stop the Google Drive sync now? It finishes the current file, then stops. Nothing already synced is undone; the next sync picks up the rest.",
+      () => this.cfg.cancelSync?.(),
+    ).open();
+    this.driveStopBtnEl = stop;
+    this.updateStopBtn();
+    // Persistent status + folder cards + per-file table (instant, no network) — driven by the
+    // last sync + baselines. The folder cards are rendered inside, between the sync-log link
+    // and the per-file table (see renderDriveStatus).
+    this.renderDriveStatus(sec.createDiv({ cls: "pa-drive-status" }), byFolder);
   }
 
   /** Set the folder-block header: hourglass while syncing, green check when idle/done. */
   private setFolderSyncLabel(): void {
     if (!this.folderSyncLabelEl) return;
     this.folderSyncLabelEl.removeClasses(["is-syncing", "is-synced"]);
-    if (this.driveSyncing) { this.folderSyncLabelEl.addClass("is-syncing"); this.folderSyncLabelEl.setText("⏳ Syncing…"); }
+    if (this.isDriveSyncing()) { this.folderSyncLabelEl.addClass("is-syncing"); this.folderSyncLabelEl.setText("⏳ Syncing…"); }
     else { this.folderSyncLabelEl.addClass("is-synced"); this.folderSyncLabelEl.setText("✓ synced"); }
   }
 
@@ -228,7 +315,7 @@ export class FileManagerView extends ItemView {
 
   /** Instant Drive status card: last sync, honest %, clickable category pills (with per-file
    *  drill-down), a live "Syncing…" line, and a persistent per-file table — no network. */
-  private renderDriveStatus(el: HTMLElement): void {
+  private renderDriveStatus(el: HTMLElement, byFolder: Map<string, { count: number; size: number }>): void {
     const info = this.cfg.driveStatus?.();
     if (!info) return;
     const { last, inScope, files, logPath } = info;
@@ -252,9 +339,10 @@ export class FileManagerView extends ItemView {
     hdr.createSpan({ cls: "pa-drive-status-pct", text: `${pct}% in sync` });
 
     // Live progress line + bar — filled while a sync runs (updated per phase from onProgress).
-    this.driveLiveEl = el.createDiv({ cls: `pa-drive-live${this.driveSyncing ? " on" : ""}` });
-    if (this.driveSyncing) this.driveLiveEl.setText("Syncing…");
-    const liveBarTrack = el.createDiv({ cls: `pa-drive-live-track${this.driveSyncing ? " on" : ""}` });
+    const syncing = this.isDriveSyncing();
+    this.driveLiveEl = el.createDiv({ cls: `pa-drive-live${syncing ? " on" : ""}` });
+    if (syncing) this.driveLiveEl.setText("Syncing…");
+    const liveBarTrack = el.createDiv({ cls: `pa-drive-live-track${syncing ? " on" : ""}` });
     this.driveLiveBarEl = liveBarTrack.createDiv({ cls: "pa-drive-live-fill" });
 
     // Multi-colour stacked bar (point 3): synced + held + errors + skipped + conflicts.
@@ -269,7 +357,20 @@ export class FileManagerView extends ItemView {
       s.style.width = `${(n / denom) * 100}%`;
       s.style.background = color;
     }
-    el.createDiv({ cls: "pa-drive-muted", text: `${synced} of ${inScope} files in sync · scope: ${scope}` });
+    const scopeLine = el.createDiv({ cls: "pa-drive-muted pa-drive-scopeline" });
+    scopeLine.createSpan({ text: `${synced} of ${inScope} files in sync · scope: ${scope}` });
+    // Subtle "!" when the in-scope count is below the vault's total — a few files are excluded
+    // from sync on purpose; hovering explains why so the mismatch isn't alarming.
+    const totalVault = this.app.vault.getFiles().length;
+    if (totalVault > inScope) {
+      const excluded = totalVault - inScope;
+      const info = scopeLine.createSpan({ cls: "pa-drive-scopenote", text: "!" });
+      const why = `${excluded} file${excluded === 1 ? "" : "s"} are intentionally left out of sync: Momentum's own logs, ` +
+        `the task-list mirrors, and — while Google Tasks sync is on — your task notes (kept in sync by Google Tasks instead).`;
+      info.setAttr("aria-label", why);
+      setTooltip(info, why, { placement: "top" });
+      info.onclick = () => new Notice(why, 8000); // click always shows it, even if hover tooltip is flaky
+    }
 
     if (last) {
       // Clickable category pills. The "attention" ones (with a category) expand a per-file list.
@@ -330,6 +431,13 @@ export class FileManagerView extends ItemView {
         else new Notice("No sync log yet.");
       };
     }
+
+    // "Your folders" block: sits between the sync log link and the per-file table. Colour-coded
+    // per folder, with a Syncing/synced header, and advanced live during a sync.
+    const foldersWrap = el.createDiv({ cls: "pa-fm-drive-folders" });
+    this.folderSyncLabelEl = foldersWrap.createDiv({ cls: "pa-fm-drive-folders-label" });
+    this.setFolderSyncLabel();
+    this.renderFolderCards(byFolder, foldersWrap);
 
     // ---- Per-file table (persistent; enriched by "Check drive" when available) ----
     const STMETA: Record<CheckStatus, { label: string; cls: string }> = {
@@ -412,9 +520,8 @@ export class FileManagerView extends ItemView {
 
   /** Trigger a Drive sync from the File Manager, showing a clockwise-filling clock on the mirror
    *  folder card (or beside the button) as it progresses. */
-  private async runDriveSyncFromFileManager(btn: HTMLButtonElement): Promise<void> {
-    if (this.driveSyncing || !this.cfg.drive?.syncNow) return;
-    this.driveSyncing = true;
+  private async runDriveSyncFromFileManager(btn: HTMLButtonElement, incremental?: boolean): Promise<void> {
+    if (this.isDriveSyncing() || !this.cfg.drive?.syncNow) return;
     btn.disabled = true;
     btn.addClass("is-syncing");
     btn.setText("⏳ Syncing…");
@@ -424,53 +531,17 @@ export class FileManagerView extends ItemView {
       ? this.mirrorCardEl.createDiv({ cls: "pa-clock-overlay" })
       : btn.parentElement!.createSpan({ cls: "pa-clock-inline" });
     const clock = drawClockProgress(host, this.mirrorCardEl ? 48 : 22);
-    // Live line + bar in the status card, updated per phase as the sync progresses.
-    if (this.driveLiveEl) this.driveLiveEl.addClass("on");
-    this.driveLiveBarEl?.parentElement?.addClass("on");
-    this.setFolderSyncLabel(); // flip the folder-block header to "⏳ Syncing…"
-    const setLive = (text: string, frac: number | null): void => {
-      if (this.driveLiveEl) this.driveLiveEl.setText(text);
-      if (this.driveLiveBarEl) {
-        // frac === null → indeterminate (scanning): animate; else determinate fill.
-        this.driveLiveBarEl.toggleClass("indeterminate", frac === null);
-        this.driveLiveBarEl.setCssStyles({ width: frac === null ? "100%" : `${Math.round(Math.max(0, Math.min(1, frac)) * 100)}%` });
-      }
-    };
-    setLive("Starting…", null);
 
+    // The live line/bar/folder-fills + the final re-render are driven by applyDriveProgress
+    // through the plugin's progress feed (so any sync updates them). Here we only own the clock
+    // overlay and the button state.
     try {
-      await this.cfg.drive.syncNow((p) => {
-        const frac = p.total ? p.done / p.total : null;
-        clock.update(frac ?? 0.15);
-        // Advance the per-folder fill (dark green) as each file is examined/applied. It settles
-        // to green/yellow/red on the re-render at the end (durable status from getDriveStatus).
-        if (p.path) {
-          const fe = this.folderFills.get(topFolder(p.path));
-          if (fe) {
-            fe.done = Math.min(fe.total, fe.done + 1);
-            fe.el.removeClasses(["is-green", "is-yellow", "is-red"]);
-            fe.el.addClass("is-progress");
-            fe.el.setCssStyles({ width: `${Math.round((fe.done / Math.max(1, fe.total)) * 100)}%` });
-            fe.labelEl.setText(`${fe.total} / ${fe.done} items · ${fe.sizeText}`);
-          }
-        }
-        if (p.phase === "scanning") {
-          setLive(p.incremental ? "Checking for changes… (incremental)" : "Scanning Drive… (full)", null);
-        } else if (p.phase === "planning") {
-          setLive(p.total ? `Comparing files… ${p.done}/${p.total}` : "Comparing files…", frac);
-        } else {
-          const pc = p.total ? Math.round((p.done / p.total) * 100) : 0;
-          setLive(p.total ? `Applying changes… ${p.done}/${p.total} (${pc}%)` : "Applying changes…", frac);
-        }
-      });
+      await this.cfg.drive.syncNow((p) => clock.update(p.total ? p.done / p.total : 0.15), incremental);
       clock.update(1);
-      setLive("Sync complete ✓", 1);
     } catch (e) {
-      setLive(`Sync failed: ${e instanceof Error ? e.message : String(e)}`, 0);
+      new Notice(`Drive sync failed: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
-      this.driveSyncing = false;
-      // A short beat so a fast sync still flashes a full clock, then refresh the dashboard.
-      window.setTimeout(() => { host.remove(); this.render(); }, 350);
+      window.setTimeout(() => host.remove(), 350);
     }
   }
 

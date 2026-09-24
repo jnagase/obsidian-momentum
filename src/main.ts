@@ -140,6 +140,9 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       driveEnabled: () => !!this.settings.googleDriveEnabled,
       openDriveBrowser: () => void this.activateDriveView(),
       driveStatus: () => this.getDriveStatus(),
+      isSyncing: () => this.driveSyncActive,
+      subscribeDriveProgress: (cb) => this.onDriveProgress(cb),
+      cancelSync: () => this.cancelDriveSync(),
     }));
 
     // Drive (beta) status bar — shows the last sync's counters; empty when Drive is off.
@@ -720,6 +723,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
    */
   private async reconcileProLicense(): Promise<void> {
     if (PRO_BETA_FREE) return;
+    await this.store.migrateProLicense(); // move a legacy Config/pro.md into Config/state.md (base64)
     const vaultKey = this.store.loadProLicenseKey();
     const localKey = (this.settings.proLicenseKey ?? "").trim();
     if (vaultKey && vaultKey !== localKey) {
@@ -770,7 +774,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       mirrorDir: () => this.settings.driveMirrorDir ?? "Drive",
       driveFolderId: () => this.settings.driveFolderId ?? "",
       dataRoot: () => this.settings.dataRoot ?? "",
-      syncNow: (onProgress) => this.syncGoogleDrive(true, onProgress),
+      syncNow: (onProgress, incremental) => this.syncGoogleDrive(true, onProgress, incremental),
     };
   }
 
@@ -908,7 +912,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
 
   /** Run one bidirectional Drive sync cycle. `confirmed` (manual) bypasses the mass-change guard.
    *  Any Drive error is contained here and never affects the Tasks sync. */
-  async syncGoogleDrive(confirmed = false, onProgress?: (p: DriveProgress) => void): Promise<void> {
+  async syncGoogleDrive(confirmed = false, onProgress?: (p: DriveProgress) => void, incremental?: boolean): Promise<void> {
     if (this.driveSyncing) { new Notice("Drive: a sync is already running."); return; }
     // Scope A: text notes sync on every plan; only real binary upload/download is a Momentum Pro
     // feature. So we never block the whole sync — text always flows — and only gate the binary
@@ -918,7 +922,11 @@ export default class MomentumPlugin extends Plugin implements PAHost {
     const token = await this.driveAccessToken();
     if (!token) { new Notice("Google Drive: not connected."); return; }
     this.driveSyncing = true;
+    this.driveSyncActive = true;
+    this.driveStopRequested = false;
+    const useIncremental = incremental ?? !!this.settings.driveIncremental;
     this.updateDriveStatus("Drive: syncing…");
+    this.emitDriveProgress({ phase: "scanning", done: 0, total: 0, incremental: useIncremental }); // flip cards to "syncing" with the right mode
     const progress = (p: DriveProgress): void => {
       const label =
         p.phase === "scanning" ? (p.incremental ? "Drive: checking changes…" : "Drive: scanning…")
@@ -926,6 +934,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
         : (p.total ? `Drive: syncing ${p.done}/${p.total}` : "Drive: syncing…");
       this.updateDriveStatus(label);
       onProgress?.(p);
+      this.emitDriveProgress(p);
     };
     const rootId = this.settings.driveFolderId || "root";
     const deviceId = this.getDriveDeviceId();
@@ -950,8 +959,11 @@ export default class MomentumPlugin extends Plugin implements PAHost {
         confirmDelete: (msg) => this.confirmDriveDeletion(msg),
         onProgress: progress,
         syncBinaries: proBinaries,
-        incremental: !!this.settings.driveIncremental,
+        // Per-call override (Incremental/Full buttons) wins over the saved toggle. Incremental is
+        // still safe: it falls back to a full walk whenever there's no cursor or any remote change.
+        incremental: useIncremental,
         lastSyncMs: (() => { const t = Date.parse(this.settings.driveLastSync?.time ?? ""); return Number.isFinite(t) ? t : undefined; })(),
+        shouldStop: () => this.driveStopRequested,
       });
       this.settings.driveLastSync = {
         time: new Date().toISOString(),
@@ -993,11 +1005,17 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       new Notice(`Drive sync failed: ${msg}`);
     } finally {
       if (locked) await releaseDriveLock(token, rootId, deviceId).catch(() => {});
-      // Keep the guard up briefly after the run so the sync's own trailing write events don't
-      // immediately re-trigger the event-driven watcher.
+      this.driveSyncActive = false;      // logically done NOW (UI can finalize immediately)
+      this.driveStopRequested = false;
+      this.emitDriveProgress(null);      // signal "done" so listening cards finalize/re-render
+      // Keep the watcher guard up briefly after the run so the sync's own trailing write events
+      // don't immediately re-trigger the event-driven watcher.
       window.setTimeout(() => { this.driveSyncing = false; }, 1500);
     }
   }
+
+  /** Request a graceful stop of the running Drive sync (checked between files by the engine). */
+  cancelDriveSync(): void { if (this.driveSyncActive) this.driveStopRequested = true; }
 
   /** Append a human-readable Drive sync entry to Config/google-drive-debug.md (diagnostics). */
   private async writeDriveDebugLog(result: DriveSyncResult | null, fatal?: string): Promise<void> {
@@ -1033,9 +1051,26 @@ export default class MomentumPlugin extends Plugin implements PAHost {
     if (this.driveStatusEl) this.driveStatusEl.setText(text);
   }
 
+  private driveProgressCbs = new Set<(p: DriveProgress | null) => void>();
+  /** Subscribe to Drive sync progress from ANY trigger (button, interval, startup, on-change).
+   *  The callback gets each DriveProgress tick, then a final null when the sync ends. Returns an
+   *  unsubscribe fn. Lets the File Manager card reflect every sync, not just its own button. */
+  onDriveProgress(cb: (p: DriveProgress | null) => void): () => void {
+    this.driveProgressCbs.add(cb);
+    return () => { this.driveProgressCbs.delete(cb); };
+  }
+  private emitDriveProgress(p: DriveProgress | null): void {
+    for (const cb of this.driveProgressCbs) { try { cb(p); } catch { /* a listener must never break a sync */ } }
+  }
+
   /** True while a Drive sync is running — used to ignore the sync's OWN vault writes in the
    *  event-driven watcher (otherwise a pull would re-trigger a sync in a loop). */
   private driveSyncing = false;
+  /** Logical "a sync is running" for the UI. Unlike driveSyncing (which lingers ~1.5s after the
+   *  run to suppress the change-watcher), this flips false the instant the sync finishes. */
+  private driveSyncActive = false;
+  /** Set by a Stop request; the engine checks it between files and stops gracefully. */
+  private driveStopRequested = false;
   private driveChangeTimer: number | null = null;
 
   /** Instant Drive status for the File Manager panel: last-sync summary + compliance counts

@@ -705,15 +705,21 @@ export default class MomentumPlugin extends Plugin implements PAHost {
 
   /** Activate Pro with the license key from the store checkout (validated against the store's API). */
   async activatePro(key: string): Promise<void> {
-    const ok = await validateLicense(key);
+    const st = await validateLicense(key);
     this.settings.proLicenseKey = key.trim();
-    this.settings.proValid = ok;
-    this.settings.proCheckedAt = Date.now();
+    // Unreachable (offline/rate-limited) is NOT a rejection — accept optimistically and re-verify
+    // when back online (checkedAt=0 marks it stale so the background re-check runs soon).
+    this.settings.proValid = st !== "invalid";
+    this.settings.proCheckedAt = st === "valid" ? Date.now() : 0;
     this.settings.proLicenseSeeded = true;
     await this.saveSettings();
     // Mirror the key into the vault so it syncs to your other devices (unlock once, everywhere).
     if (this.settings.proLicenseKey) await this.store.saveProLicenseKey(this.settings.proLicenseKey);
-    new Notice(ok ? "✓ Momentum Pro activated — thank you!" : "That license key couldn't be verified.");
+    new Notice(
+      st === "valid" ? "✓ Momentum Pro activated — thank you!"
+      : st === "unreachable" ? "Activated — we'll verify your license once you're back online."
+      : "That license key couldn't be verified.",
+    );
   }
 
   /**
@@ -727,10 +733,11 @@ export default class MomentumPlugin extends Plugin implements PAHost {
     const vaultKey = this.store.loadProLicenseKey();
     const localKey = (this.settings.proLicenseKey ?? "").trim();
     if (vaultKey && vaultKey !== localKey) {
-      // A key arrived (or changed) on another device → adopt it here; the background re-check
-      // (0 = stale) validates it against the store so Pro unlocks once we're online.
+      // A key arrived (or changed) on another device → adopt it and unlock optimistically (it came
+      // from a device that already activated it). checkedAt=0 marks it stale so the background
+      // re-check confirms it; a transient offline check won't lock it, and a real "invalid" will.
       this.settings.proLicenseKey = vaultKey;
-      this.settings.proValid = false;
+      this.settings.proValid = true;
       this.settings.proCheckedAt = 0;
       this.settings.proLicenseSeeded = true;
       await this.saveSettings();
@@ -747,8 +754,13 @@ export default class MomentumPlugin extends Plugin implements PAHost {
   private async maybeRecheckPro(): Promise<void> {
     if (!proNeedsRecheck(this.proState()) || !this.settings.proLicenseKey) return;
     try {
-      const ok = await validateLicense(this.settings.proLicenseKey);
-      this.settings.proValid = ok;
+      const st = await validateLicense(this.settings.proLicenseKey);
+      // Only a DEFINITIVE result changes the stored state. "unreachable" (offline / store blip)
+      // is a no-op: we keep the last known validity and its offline grace, and — by not advancing
+      // proCheckedAt — the check stays due so it retries at the next opportunity instead of
+      // locking Pro for the whole re-check window.
+      if (st === "unreachable") return;
+      this.settings.proValid = st === "valid";
       this.settings.proCheckedAt = Date.now();
       await this.saveSettings();
     } catch { /* keep the last known state offline */ }

@@ -71,9 +71,14 @@ export function proNeedsRecheck(state: ProState): boolean {
  * Returns true only when the purchase is valid and not refunded/charged back. All network detail
  * (host, product id) comes from pro-config.json — no source literal.
  */
-export async function validateLicense(key: string): Promise<boolean> {
+/** Outcome of a license check. `unreachable` means we couldn't get a definitive answer (offline,
+ *  rate-limited, or a store outage) — the caller must NOT lock Pro on it, only on a real `invalid`. */
+export type LicenseStatus = "valid" | "invalid" | "unreachable";
+
+export async function validateLicense(key: string): Promise<LicenseStatus> {
   const licenseKey = key.trim();
-  if (!licenseKey || !cfg.licenseVerifyUrl || !cfg.productId) return false;
+  if (!cfg.licenseVerifyUrl || !cfg.productId) return "unreachable"; // not configured → can't tell
+  if (!licenseKey) return "invalid";
   try {
     const body = new URLSearchParams({
       product_id: cfg.productId,
@@ -87,11 +92,15 @@ export async function validateLicense(key: string): Promise<boolean> {
       body,
       throw: false,
     });
-    if (r.status >= 400) return false;
+    // A definitive rejection by the store (unknown/blocked key) → invalid. Rate-limit (429),
+    // server errors (5xx) or a network exception → unreachable: keep the last known state so a
+    // transient blip never locks out a paying user.
+    if (r.status === 401 || r.status === 403 || r.status === 404) return "invalid";
+    if (r.status >= 400) return "unreachable";
     const j = r.json as { success?: boolean; purchase?: { refunded?: boolean; chargebacked?: boolean; disputed?: boolean } };
     const p = j.purchase ?? {};
-    return !!j.success && !p.refunded && !p.chargebacked && !p.disputed;
+    return (!!j.success && !p.refunded && !p.chargebacked && !p.disputed) ? "valid" : "invalid";
   } catch {
-    return false;
+    return "unreachable";
   }
 }

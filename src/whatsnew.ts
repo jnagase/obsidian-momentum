@@ -6,6 +6,17 @@ export interface ChangeEntry { version: string; sections: ChangeSection[]; }
 /** Release notes shown in the "What's new" dialog, newest first. */
 export const CHANGELOG: ChangeEntry[] = [
   {
+    version: "0.8.2",
+    sections: [
+      {
+        title: "Fixed — Momentum pro on a second device",
+        items: [
+          "Pro now unlocks reliably on another device: once your license syncs across, it's adopted right away, and a flaky connection or a brief store outage no longer blocks activation or locks Pro. Your license is only ever turned off if the store says it's genuinely invalid.",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.8.1",
     sections: [
       {

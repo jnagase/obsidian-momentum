@@ -11,9 +11,17 @@ import {
   findChildFolder,
   getStartPageToken,
   listChanges,
+  setAppProperties,
+  InvalidDriveCursorError,
   isFolder,
   isGoogleNative,
 } from "./googledrive";
+
+/** appProperties key holding a file's stable logical identity (its vault-relative path at the
+ *  time it was written). Lets a file renamed/moved on Drive stay the SAME file, not a duplicate. */
+export const MOMENTUM_PATH_KEY = "momentumPath";
+/** appProperties key recording which device first created the file (diagnostics for dup races). */
+export const MOMENTUM_ORIGIN_KEY = "momentumOrigin";
 
 /** FNV-1a hash over raw bytes — a fast, non-cryptographic content fingerprint for binary files
  *  (used only to detect local-side changes against the last-synced baseline). */
@@ -48,6 +56,10 @@ export const DRIVE_MAX_WRITES_PER_RUN = 50;
  * can look like a mass deletion. Mirrors rclone's `--max-delete`.
  */
 export const DRIVE_MAX_DELETES_PER_RUN = 10;
+
+/** Max multi-device duplicate files consolidated (loser saved as .conflict, then trashed on
+ *  Drive) in a single cycle — a safety cap so a pathological state can't cause a trash storm. */
+export const DRIVE_MAX_CONSOLIDATE_PER_RUN = 20;
 
 /** Text extensions eligible for line-level 3-way merge. Others conflict-duplicate instead. */
 const MERGEABLE_EXT = new Set(["md", "txt", "csv", "json", "canvas", "css", "js", "ts", "yaml", "yml"]);
@@ -98,7 +110,10 @@ export type DriveConflictStrategy =
   | "newer-wins"   // whichever side has the newer modified time wins
   | "ask";         // ask the user per file (via a callback); falls back to keep-both
 
-export const DEFAULT_CONFLICT_STRATEGY: DriveConflictStrategy = "keep-both";
+// Drive is the source of truth. The default resolves a two-sided conflict by the shared clock
+// (Drive's modifiedTime): whoever wrote last wins. keep-both is still available for users who
+// prefer to never drop either side (it saves a .conflict copy instead).
+export const DEFAULT_CONFLICT_STRATEGY: DriveConflictStrategy = "newer-wins";
 
 /** Per-file resolution the `ask` strategy returns. */
 export type ConflictChoice = "local" | "remote" | "both";
@@ -110,6 +125,8 @@ export interface DriveBaseline {
   modifiedTime: string;
   /** Last-synced text content, the base for 3-way merge (only kept for mergeable text). */
   base?: string;
+  /** True once the Drive file carries its `momentumPath` appProperty (so we don't re-stamp it). */
+  tagged?: boolean;
 }
 
 /** Persistence for Drive baselines + the change cursor (backed by data.json). */
@@ -121,6 +138,21 @@ export interface DriveBaselineStore {
   getCursor(): string | undefined;
   setCursor(token: string): void;
   save(): Promise<void>;
+  /**
+   * Paths the user explicitly deleted locally since the last sync (path → timestamp ms). This is
+   * the evidence that turns a local absence into a real `delete_remote` (Req 1.2). Optional so the
+   * in-memory test store can omit it (deletions then only propagate from explicit remote events).
+   */
+  getLocalDeletes?: () => Record<string, number>;
+  clearLocalDelete?: (name: string) => void;
+  /**
+   * Declined-deletion tombstones (path → situation signature). When the user declines a mass
+   * deletion, the same deletions are suppressed next run so we stop re-prompting (Req 3). Cleared
+   * when the situation changes or the user later accepts. Optional (see above).
+   */
+  getDeclined?: () => Record<string, string>;
+  setDeclined?: (name: string, sig: string) => void;
+  clearDeclined?: (name: string) => void;
 }
 
 /** The minimal vault surface the engine needs — real impl wraps Obsidian's Vault. */
@@ -235,7 +267,16 @@ export type DriveAction =
 /**
  * Decide the action for one file. `base` is the last-synced baseline (undefined = never synced).
  * `localChanged`/`remoteChanged` are computed against the baseline by the caller.
- * Safety: any ambiguity where an edit could be lost routes to "conflict", never a delete.
+ *
+ * DELETION IS EVENT-DRIVEN, NOT ABSENCE-DRIVEN. A file simply missing from one side's listing is
+ * NOT proof it was deleted — it may just not be present on this device yet (still downloading, a
+ * transient listing gap, or a device whose baseline is out of date). So a delete only fires with
+ * EXPLICIT evidence:
+ *   - `remoteDeletedExplicit`: a Drive Changes event reported this file removed/trashed;
+ *   - `localDeletedExplicit`:  the vault emitted a `delete` for this path (the user removed it).
+ * Without that evidence, absence resolves to the SAFE side (re-pull or noop), never a delete.
+ * As before, any two-sided edit routes to merge/conflict, never a silent overwrite, and an edit
+ * always beats a deletion.
  */
 export function decideAction(args: {
   base?: DriveBaseline;
@@ -246,8 +287,15 @@ export function decideAction(args: {
   mergeable: boolean;
   /** First-contact-both-exist only: whether the two sides are byte-identical (Req 9.1). */
   contentEqual?: boolean;
+  /** A Drive Changes event reported this file removed/trashed (explicit remote deletion). */
+  remoteDeletedExplicit?: boolean;
+  /** The vault emitted a delete for this path since the last sync (explicit local deletion). */
+  localDeletedExplicit?: boolean;
 }): DriveAction {
-  const { base, localExists, remoteExists, localChanged, remoteChanged, mergeable, contentEqual } = args;
+  const {
+    base, localExists, remoteExists, localChanged, remoteChanged, mergeable, contentEqual,
+    remoteDeletedExplicit, localDeletedExplicit,
+  } = args;
 
   // Both present.
   if (localExists && remoteExists) {
@@ -263,21 +311,22 @@ export function decideAction(args: {
     return "noop";
   }
 
-  // Only remote exists (the LOCAL file is gone).
+  // Only remote exists (the LOCAL file is gone from this device's listing).
   if (remoteExists && !localExists) {
     if (!base) return "pull";                       // new remote file → bring it in
-    // Local was deleted by the user. If the remote changed since base, edit-beats-delete →
-    // pull it back (never lose the remote edit). If the remote is unchanged, honour the local
-    // deletion by removing the remote too.
-    return remoteChanged ? "pull" : "delete_remote";
+    if (remoteChanged) return "pull";               // edit-beats-delete: never lose a remote edit
+    // Local absent with an UNCHANGED remote. Honour a real local deletion ONLY with explicit
+    // evidence; otherwise the file just isn't here yet → re-pull it, never delete the remote.
+    return localDeletedExplicit ? "delete_remote" : "pull";
   }
 
-  // Only local exists (the REMOTE file is gone).
+  // Only local exists (the REMOTE file is gone from the listing).
   if (localExists && !remoteExists) {
     if (!base) return "push";                       // new local file → send it up
-    // Remote was deleted. If the local changed since base, edit-beats-delete → push it back.
-    // If the local is unchanged, honour the remote deletion by removing the local too.
-    return localChanged ? "push" : "delete_local";
+    if (localChanged) return "push";                // edit-beats-delete: never lose a local edit
+    // Remote absent with an UNCHANGED local. Honour a real remote deletion ONLY with an explicit
+    // Changes event; a transient listing gap must NOT delete the local copy → leave it (noop).
+    return remoteDeletedExplicit ? "delete_local" : "noop";
   }
 
   return "noop"; // neither exists
@@ -316,6 +365,9 @@ export async function runDriveSync(args: {
    *  file. Files already applied keep their new baseline, the rest are left untouched, and the
    *  change cursor is NOT advanced so the next sync re-checks everything. */
   shouldStop?: () => boolean;
+  /** Stable id of this device — stamped into a created file's `momentumOrigin` appProperty so a
+   *  multi-device duplicate race can be told apart in the logs. */
+  deviceId?: string;
 }): Promise<DriveSyncResult> {
   const { token, driveFolderId, fs, baselines, confirmed } = args;
   const strategy = args.conflictStrategy ?? DEFAULT_CONFLICT_STRATEGY;
@@ -324,36 +376,66 @@ export async function runDriveSync(args: {
 
   // ---- OBSERVATION (recursive: walk the Drive tree, keyed by relative path) --------------
   let remoteByPath: Map<string, DriveFile> = new Map();
+  let remoteDups: { rel: string; file: DriveFile }[] = [];
   let folderCache: Map<string, string> = new Map();
   let usedIncremental = false;
 
   args.onProgress?.({ phase: "scanning", done: 0, total: 0, incremental: !!args.incremental });
 
-  // INCREMENTAL (Req 9.3/9.4), opt-in and SAFE: if a cursor exists and the Changes API reports
-  // NO remote changes since it, reconstruct the remote view from the baselines and skip the full
-  // walk. ANY reported change — or any error, or no cursor yet — falls back to the authoritative
-  // full walk (and we tell the UI why, so an "Incremental" click showing "full" isn't confusing).
-  if (args.incremental) {
+  // ---- CHANGE EVENTS: explicit remote removals + the chained cursor ----------------------
+  // The Drive Changes API is the SOURCE OF TRUTH FOR DELETIONS. A file missing from the tree
+  // walk is NOT proof it was deleted (it may not be present on this device yet), so we never
+  // infer a remote deletion from absence — only from an explicit removed/trashed event here.
+  // We also chain the cursor correctly: the committed token is the `newStartPageToken` this call
+  // returns (advanced only on a clean cycle), instead of resetting to "now" and skipping changes
+  // that landed during the run. No cursor / an invalid cursor → this run is a reconciliation
+  // (no remote-absence deletions) and the cursor is (re)seeded at commit.
+  const removedFileIds = new Set<string>();
+  let chainedCursor: string | undefined;
+  let cursorWasValid = false;
+  let changeCount = 0;
+  {
     const cursor = baselines.getCursor();
-    if (cursor && baselines.names().length > 0) {
+    if (cursor) {
       try {
-        const { changes } = await listChanges(token, cursor);
-        if (changes.length === 0) {
-          remoteByPath = new Map();
-          for (const name of baselines.names()) {
-            const b = baselines.get(name);
-            if (!b) continue;
-            remoteByPath.set(name, { id: b.fileId, name: baseOf(name), mimeType: "text/plain", md5Checksum: b.md5, modifiedTime: b.modifiedTime });
-          }
-          folderCache = new Map<string, string>([["", rootId]]);
-          usedIncremental = true;
-          result.notes.push("Incremental: no remote changes since last sync (skipped full scan).");
-          args.onProgress?.({ phase: "scanning", done: 0, total: 0, incremental: true });
-        } else {
-          result.notes.push(`Incremental check found ${changes.length} remote change(s) → full scan.`);
-          args.onProgress?.({ phase: "scanning", done: 0, total: 0, reason: `${changes.length} change${changes.length === 1 ? "" : "s"} on Drive` });
+        const { changes, newStartPageToken } = await listChanges(token, cursor);
+        cursorWasValid = true;
+        chainedCursor = newStartPageToken;
+        changeCount = changes.length;
+        for (const c of changes) {
+          if (c.removed || c.file?.trashed) removedFileIds.add(c.fileId);
         }
-      } catch { args.onProgress?.({ phase: "scanning", done: 0, total: 0, reason: "change check failed" }); }
+      } catch (e) {
+        if (e instanceof InvalidDriveCursorError) {
+          result.notes.push("Change cursor expired → full reconciliation; remote deletions come from explicit events only this run.");
+        } else {
+          result.notes.push(`Change check failed (${e instanceof Error ? e.message : String(e)}) → full reconciliation this run.`);
+        }
+      }
+    } else {
+      result.notes.push("First sync on this device → full adoption scan (no deletions inferred).");
+    }
+  }
+
+  // INCREMENTAL fast-path (Req 8): if the caller asked for it, the cursor is valid and there were
+  // ZERO remote changes since it, reconstruct the remote view from the baselines and skip the full
+  // walk. Any change, an invalid cursor, or no cursor yet → the authoritative full walk (and we
+  // tell the UI why, so an "Incremental" click that shows "full" isn't confusing).
+  if (args.incremental) {
+    if (cursorWasValid && changeCount === 0 && baselines.names().length > 0) {
+      remoteByPath = new Map();
+      for (const name of baselines.names()) {
+        const b = baselines.get(name);
+        if (!b) continue;
+        remoteByPath.set(name, { id: b.fileId, name: baseOf(name), mimeType: "text/plain", md5Checksum: b.md5, modifiedTime: b.modifiedTime });
+      }
+      folderCache = new Map<string, string>([["", rootId]]);
+      usedIncremental = true;
+      result.notes.push("Incremental: no remote changes since last sync (skipped full scan).");
+      args.onProgress?.({ phase: "scanning", done: 0, total: 0, incremental: true });
+    } else if (cursorWasValid && changeCount > 0) {
+      result.notes.push(`Incremental check found ${changeCount} remote change(s) → full scan.`);
+      args.onProgress?.({ phase: "scanning", done: 0, total: 0, reason: `${changeCount} change${changeCount === 1 ? "" : "s"} on Drive` });
     } else {
       args.onProgress?.({ phase: "scanning", done: 0, total: 0, reason: "first full sync" });
     }
@@ -368,8 +450,84 @@ export async function runDriveSync(args: {
       return result;
     }
     remoteByPath = tree.files;
+    remoteDups = tree.dups;
     folderCache = new Map(tree.folders); // seeds push so a subfolder is created at most once/cycle
   }
+
+  // ---- IDENTITY RECONCILIATION (Req 2: stable identity, anti-duplicate) ------------------
+  // Re-key the remote by its stable logical identity (appProperties.momentumPath) when present,
+  // so a file renamed/moved on Drive stays the SAME file (keyed by its momentumPath) instead of
+  // appearing as a new path that would duplicate. Files without the tag key by their tree path
+  // (legacy / not yet stamped). When two DIFFERENT Drive files claim the SAME explicit
+  // momentumPath, that's a multi-device duplicate race → consolidate non-destructively: keep the
+  // newest, preserve the loser's content locally as a .conflict copy, then trash the loser.
+  {
+    const rawEntries: [string, DriveFile][] = [
+      ...remoteByPath.entries(),
+      ...remoteDups.map((d) => [d.rel, d.file] as [string, DriveFile]),
+    ];
+    const dupLosers = new Map<string, DriveFile[]>();
+    remoteByPath = new Map<string, DriveFile>();
+    for (const [treePath, f] of rawEntries) {
+      const logical = f.appProperties?.[MOMENTUM_PATH_KEY] || treePath;
+      const existing = remoteByPath.get(logical);
+      if (!existing) { remoteByPath.set(logical, f); continue; }
+      const bothTagged =
+        existing.appProperties?.[MOMENTUM_PATH_KEY] === logical &&
+        f.appProperties?.[MOMENTUM_PATH_KEY] === logical;
+      const fNewer = (Date.parse(f.modifiedTime || "") || 0) >= (Date.parse(existing.modifiedTime || "") || 0);
+      const winner = fNewer ? f : existing;
+      const loser = fNewer ? existing : f;
+      remoteByPath.set(logical, winner);
+      if (bothTagged) {
+        const g = dupLosers.get(logical) ?? [];
+        g.push(loser);
+        dupLosers.set(logical, g);
+      } else {
+        result.notes.push(`Two remote files map to "${logical}"; kept the newer (${winner.id}).`);
+      }
+    }
+
+    let consolidated = 0;
+    for (const [logical, losers] of dupLosers) {
+      const canonical = remoteByPath.get(logical);
+      const b = baselines.get(logical);
+      if (canonical && b && losers.some((l) => l.id === b.fileId)) {
+        baselines.set(logical, { ...b, fileId: canonical.id }); // repoint baseline off a loser
+      }
+      for (const loser of losers) {
+        if (args.shouldStop?.()) break;
+        if (consolidated >= DRIVE_MAX_CONSOLIDATE_PER_RUN) {
+          result.notes.push(`Duplicate consolidation capped at ${DRIVE_MAX_CONSOLIDATE_PER_RUN} this run.`);
+          break;
+        }
+        try {
+          // Preserve the loser's content locally as a .conflict BEFORE trashing (never lose data).
+          const isBin = isBinaryName(logical);
+          if (isBin && !fs.writeBinary) {
+            result.notes.push(`Duplicate for "${logical}" left as-is (binary; enable Sync binary files to consolidate).`);
+            continue; // can't safely preserve the binary → don't trash it
+          }
+          const taken = new Set<string>();
+          let cName = conflictName(logical, (x) => taken.has(x));
+          while (await fs.exists(cName)) { taken.add(cName); cName = conflictName(logical, (x) => taken.has(x)); }
+          if (isBin) await fs.writeBinary!(cName, await downloadFile(token, loser.id));
+          else await fs.write(cName, new TextDecoder().decode(await downloadFile(token, loser.id)));
+          await trashFile(token, loser.id);
+          result.conflicted++;
+          result.issues.push({ path: logical, reason: "duplicate on Drive consolidated — kept newest, extra copy saved as .conflict", category: "conflict" });
+          result.notes.push(`Consolidated duplicate for "${logical}": extra Drive file ${loser.id} → .conflict + trash.`);
+          consolidated++;
+        } catch (e) {
+          result.errors.push(`consolidate ${logical}: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+    }
+  }
+
+  // Snapshot of paths the user explicitly deleted locally since last sync (evidence for a real
+  // delete_remote — see decideAction). Empty when the store doesn't track it (e.g. tests).
+  const localDeletes = baselines.getLocalDeletes?.() ?? {};
 
   const localPaths = new Set(await fs.list());
   const allPaths = new Set<string>([...remoteByPath.keys(), ...localPaths]);
@@ -402,6 +560,10 @@ export async function runDriveSync(args: {
     const base = baselines.get(path);
     const localExists = localPaths.has(path);
     const remoteExists = !!remote;
+    // Explicit deletion evidence (see decideAction): a Drive removal event for this file's id,
+    // or a vault delete the user made for this path. Absence alone never counts as a deletion.
+    const remoteDeletedExplicit = !!base?.fileId && removedFileIds.has(base.fileId);
+    const localDeletedExplicit = localDeletes[path] !== undefined;
 
     // BINARY files (Req 9.5). Two modes:
     //  - syncBinaries OFF (default) or no binary VaultFS: BLOCK-AND-WARN — never round-trip a
@@ -443,7 +605,7 @@ export async function runDriveSync(args: {
           continue;
         }
       }
-      const actionB = decideAction({ base, localExists, remoteExists, localChanged: localChangedB, remoteChanged: remoteChangedB, mergeable: false, contentEqual: contentEqualB });
+      const actionB = decideAction({ base, localExists, remoteExists, localChanged: localChangedB, remoteChanged: remoteChangedB, mergeable: false, contentEqual: contentEqualB, remoteDeletedExplicit, localDeletedExplicit });
       if (actionB !== "noop") plans.push({ path, action: actionB, remote, binary: true, create: isCreate(actionB, localExists, remoteExists) });
       continue;
     }
@@ -487,7 +649,7 @@ export async function runDriveSync(args: {
       }
     }
 
-    const action = decideAction({ base, localExists, remoteExists, localChanged, remoteChanged, mergeable, contentEqual });
+    const action = decideAction({ base, localExists, remoteExists, localChanged, remoteChanged, mergeable, contentEqual, remoteDeletedExplicit, localDeletedExplicit });
     if (action !== "noop") plans.push({ path, action, remote, remoteText: cachedRemoteText, create: isCreate(action, localExists, remoteExists) });
    } catch (e) {
     // One bad file must never abort the whole cycle (esp. in whole-vault mode).
@@ -497,18 +659,47 @@ export async function runDriveSync(args: {
    }
   }
 
+  // ---- DECLINED-DELETION SUPPRESSION (Req 3: stop re-prompting) ---------------------------
+  // A signature of the deletion's situation (action + the baseline's file identity). If the user
+  // declined this exact deletion before, skip it silently; if the situation changed (different
+  // signature), the old tombstone is stale — drop it and reconsider the deletion this run.
+  const deleteSig = (p: Plan): string => {
+    const b = baselines.get(p.path);
+    return `${p.action}:${b?.fileId ?? ""}:${b?.md5 ?? ""}`;
+  };
+  const declined = baselines.getDeclined?.() ?? {};
+  const clearDeclined = baselines.clearDeclined; // function-typed property → safe to capture; keeps type in the closure
+  if (Object.keys(declined).length && clearDeclined) {
+    const kept = plans.filter((p) => {
+      if (p.action !== "delete_local" && p.action !== "delete_remote") return true;
+      const prev = declined[p.path];
+      if (prev === undefined) return true;
+      if (prev === deleteSig(p)) {
+        result.issues.push({ path: p.path, reason: "deletion suppressed — you declined it earlier", category: "held" });
+        return false; // same situation the user already refused → don't re-propose
+      }
+      clearDeclined(p.path); // situation changed → tombstone stale, reconsider
+      return true;
+    });
+    plans.length = 0;
+    plans.push(...kept);
+  }
+
   // ---- MASS-DELETE GUARD (separate from the write breaker) -------------------------------
   const deletePlans = plans.filter((p) => p.action === "delete_local" || p.action === "delete_remote");
   if (deletePlans.length > DRIVE_MAX_DELETES_PER_RUN) {
     const msg =
       `Momentum Drive: this sync wants to delete ${deletePlans.length} files ` +
-      `(limit ${DRIVE_MAX_DELETES_PER_RUN}). This is normal if you really removed that many, but a ` +
-      `sync/load glitch can look the same. Deletions go to the trash (reversible). Proceed?`;
+      `(limit ${DRIVE_MAX_DELETES_PER_RUN}). Each of these was reported deleted by an explicit ` +
+      `event (removed on Drive, or deleted here), so this is normal if you really removed that ` +
+      `many. Deletions go to the trash (reversible). Proceed? Declining remembers your choice so ` +
+      `you won't be asked about the same files again.`;
     const ok = args.confirmDelete ? await args.confirmDelete(msg) : false;
     if (!ok) {
       result.blocked += deletePlans.length;
       result.errors.push(`Deletion guard: withheld ${deletePlans.length} deletions (over the limit of ${DRIVE_MAX_DELETES_PER_RUN}).`);
       for (const dp of deletePlans) {
+        baselines.setDeclined?.(dp.path, deleteSig(dp)); // remember the decline so we stop asking (Req 3.1)
         result.issues.push({
           path: dp.path,
           reason: dp.action === "delete_local" ? "deletion held — gone on Drive, would delete locally" : "deletion held — gone locally, would delete on Drive",
@@ -518,6 +709,9 @@ export async function runDriveSync(args: {
       const kept = plans.filter((p) => p.action !== "delete_local" && p.action !== "delete_remote");
       plans.length = 0;
       plans.push(...kept);
+    } else {
+      // Accepted → these deletions are wanted; clear any stale decline tombstones for them.
+      for (const dp of deletePlans) baselines.clearDeclined?.(dp.path);
     }
   }
 
@@ -549,7 +743,7 @@ export async function runDriveSync(args: {
       if (p.binary) {
         switch (p.action) {
           case "pull": await this_pullBinary(token, p.path, p.remote!, fs, baselines, result); break;
-          case "push": await this_pushBinary(token, p.path, rootId, folderCache, fs, baselines, result); break;
+          case "push": await this_pushBinary(token, p.path, rootId, folderCache, fs, baselines, result, args.deviceId); break;
           case "conflict": await this_conflictBinary(token, p.path, p.remote!, fs, baselines, result, strategy, args.resolveConflict); break;
           case "delete_local": await this_deleteLocal(p.path, fs, baselines, result); break;
           case "delete_remote": await this_deleteRemote(token, p.path, p.remote, baselines, result); break;
@@ -558,7 +752,7 @@ export async function runDriveSync(args: {
       } else {
         switch (p.action) {
           case "pull": await this_pull(token, p.path, p.remote!, fs, baselines, result); break;
-          case "push": await this_push(token, p.path, rootId, folderCache, fs, baselines, result); break;
+          case "push": await this_push(token, p.path, rootId, folderCache, fs, baselines, result, args.deviceId); break;
           case "merge": await this_merge(token, p.path, p.remote!, fs, baselines, result, strategy, args.resolveConflict); break;
           case "conflict": await this_conflict(token, p.path, p.remote!, fs, baselines, result, strategy, args.resolveConflict, p.remoteText); break;
           case "delete_local": await this_deleteLocal(p.path, fs, baselines, result); break;
@@ -592,13 +786,22 @@ export async function runDriveSync(args: {
   if (stopped) result.notes.push("Sync stopped by user — partial run; cursor not advanced, next sync re-checks everything.");
   if (!fatal && !stopped) {
     try {
-      // Refresh the change cursor to "now" so the next run only re-checks the delta. (First
-      // version re-lists fully each run; the cursor is stored for the incremental path next.)
-      const cursor = await getStartPageToken(token);
-      baselines.setCursor(cursor);
+      // Chain the cursor correctly: prefer the newStartPageToken the Changes API returned for
+      // this run (so nothing that happened during the run is skipped). Only when we had no valid
+      // cursor this run (first sync / expired token) do we seed a fresh "now" token.
+      const next = (cursorWasValid && chainedCursor) ? chainedCursor : await getStartPageToken(token);
+      baselines.setCursor(next);
       await baselines.save();
     } catch (e) {
       result.notes.push(`cursor refresh skipped: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    // Local-delete evidence is single-use: drop entries whose file exists again (the user undid
+    // the delete). Entries that produced a delete_remote are cleared by the delete helper itself.
+    if (baselines.getLocalDeletes && baselines.clearLocalDelete) {
+      for (const p of Object.keys(baselines.getLocalDeletes())) {
+        if (await fs.exists(p)) baselines.clearLocalDelete(p);
+      }
+      await baselines.save();
     }
   }
   return result;
@@ -611,6 +814,10 @@ export interface RemoteTree {
   files: Map<string, DriveFile>;
   /** relDir → Drive folder id ("" maps to the root folder id). */
   folders: Map<string, string>;
+  /** Same-path collisions: extra files that share a relative path with another (Drive allows
+   *  duplicate names). Surfaced separately so identity reconciliation can consolidate them instead
+   *  of silently dropping one — this is the classic multi-device duplicate. */
+  dups: { rel: string; file: DriveFile }[];
 }
 
 /** Safety cap on how many entries a single tree walk will enumerate. */
@@ -667,6 +874,7 @@ export async function releaseDriveLock(token: string, rootId: string, deviceId: 
 export async function walkRemoteTree(token: string, rootId: string): Promise<RemoteTree> {
   const files = new Map<string, DriveFile>();
   const folders = new Map<string, string>([["", rootId]]);
+  const dups: { rel: string; file: DriveFile }[] = [];
   const queue: { id: string; prefix: string }[] = [{ id: rootId, prefix: "" }];
   let seen = 0;
   while (queue.length) {
@@ -676,11 +884,22 @@ export async function walkRemoteTree(token: string, rootId: string): Promise<Rem
       const rel = prefix ? `${prefix}/${f.name}` : f.name;
       if (f.name === DRIVE_LOCK_NAME) continue; // the multi-device lock is never synced
       if (isFolder(f)) { folders.set(rel, f.id); queue.push({ id: f.id, prefix: rel }); }
-      else if (!isGoogleNative(f)) files.set(rel, f);
-      if (++seen > REMOTE_WALK_MAX) return { files, folders };
+      else if (!isGoogleNative(f)) {
+        const existing = files.get(rel);
+        if (existing) {
+          // Two Drive files at the same path (duplicate name). Keep the newer as canonical and
+          // surface the other for consolidation instead of silently losing it.
+          const keepNew = (Date.parse(f.modifiedTime || "") || 0) >= (Date.parse(existing.modifiedTime || "") || 0);
+          files.set(rel, keepNew ? f : existing);
+          dups.push({ rel, file: keepNew ? existing : f });
+        } else {
+          files.set(rel, f);
+        }
+      }
+      if (++seen > REMOTE_WALK_MAX) return { files, folders, dups };
     }
   }
-  return { files, folders };
+  return { files, folders, dups };
 }
 
 /** Directory portion of a relative path ("a/b/c.md" → "a/b"; "c.md" → ""). */
@@ -716,6 +935,13 @@ async function ensureRemoteFolderPath(
 
 // ---- per-action helpers (free functions; `this_` prefix avoids clashing with class methods) --
 
+/** Build the appProperties that stamp a file's stable identity (its logical path + origin). */
+function momentumProps(path: string, deviceId?: string): Record<string, string> {
+  const props: Record<string, string> = { [MOMENTUM_PATH_KEY]: path };
+  if (deviceId) props[MOMENTUM_ORIGIN_KEY] = deviceId;
+  return props;
+}
+
 async function this_pull(
   token: string, path: string, remote: DriveFile, fs: VaultFS, baselines: DriveBaselineStore, result: DriveSyncResult,
 ): Promise<void> {
@@ -727,28 +953,37 @@ async function this_pull(
     md5: remote.md5Checksum ?? "",
     modifiedTime: remote.modifiedTime ?? "",
     base: isMergeable(path, text.length) ? text : undefined,
+    tagged: !!remote.appProperties?.[MOMENTUM_PATH_KEY],
   });
   result.pulled++;
 }
 
 async function this_push(
   token: string, path: string, rootId: string, folderCache: Map<string, string>,
-  fs: VaultFS, baselines: DriveBaselineStore, result: DriveSyncResult,
+  fs: VaultFS, baselines: DriveBaselineStore, result: DriveSyncResult, deviceId?: string,
 ): Promise<void> {
   const content = await fs.read(path);
   const existing = baselines.get(path);
+  const props = momentumProps(path, deviceId);
   let meta: DriveFile;
+  let tagged = true;
   if (existing?.fileId) {
     meta = await updateTextFile(token, existing.fileId, content);
+    // Lazily stamp identity on a file created before this feature existed (once).
+    if (!existing.tagged) {
+      try { meta = await setAppProperties(token, existing.fileId, props); }
+      catch (e) { tagged = false; result.notes.push(`tag ${path}: ${e instanceof Error ? e.message : String(e)}`); }
+    }
   } else {
     const parentId = await ensureRemoteFolderPath(token, dirOf(path), rootId, folderCache);
-    meta = await createTextFile(token, baseOf(path), content, parentId === "root" ? undefined : parentId);
+    meta = await createTextFile(token, baseOf(path), content, parentId === "root" ? undefined : parentId, props);
   }
   baselines.set(path, {
     fileId: meta.id,
     md5: meta.md5Checksum ?? "",
     modifiedTime: meta.modifiedTime ?? "",
     base: isMergeable(path, content.length) ? content : undefined,
+    tagged,
   });
   result.pushed++;
 }
@@ -829,13 +1064,40 @@ async function this_conflict(
   }
 
   // "both" (keep-both, the default): keep local at its path; save the remote alongside as a
-  // unique .conflict copy. Never overwrites; the baseline stays diverged until the user resolves.
-  const taken = new Set<string>();
-  let cName = conflictName(path, (x) => taken.has(x));
-  while (await fs.exists(cName)) { taken.add(cName); cName = conflictName(path, (x) => taken.has(x)); }
-  await fs.write(cName, remoteText);
-  result.conflicted++;
-  result.notes.push(`Conflict on ${path}: remote copy saved as ${cName}. Your local version was kept.`);
+  // unique .conflict copy. Never overwrites.
+  const local = localIn ?? (await fs.read(path));
+
+  // Req 4.3 — don't spawn yet another .conflict-N if an existing .conflict sibling already holds
+  // this exact remote content (which is what made copies pile up every run).
+  const dot = path.lastIndexOf(".");
+  const stem = dot >= 0 ? path.slice(0, dot) : path;
+  const ext = dot >= 0 ? path.slice(dot) : "";
+  let alreadySaved = false;
+  for (let i = 1; i <= 50; i++) {
+    const cand = i === 1 ? `${stem}.conflict${ext}` : `${stem}.conflict-${i}${ext}`;
+    if (!(await fs.exists(cand))) break; // names are assigned in order, so the first gap ends the run
+    if ((await fs.read(cand)) === remoteText) { alreadySaved = true; break; }
+  }
+  if (!alreadySaved) {
+    const taken = new Set<string>();
+    let cName = conflictName(path, (x) => taken.has(x));
+    while (await fs.exists(cName)) { taken.add(cName); cName = conflictName(path, (x) => taken.has(x)); }
+    await fs.write(cName, remoteText);
+    result.conflicted++;
+    result.notes.push(`Conflict on ${path}: remote copy saved as ${cName}. Your local version was kept.`);
+  } else {
+    result.notes.push(`Conflict on ${path}: remote copy was already saved earlier — not duplicated.`);
+  }
+
+  // Req 4.1 — CLOSE THE LOOP so this pair doesn't re-conflict (and spawn another copy) every run:
+  // adopt the current local as the merge base and record the remote's current md5. An unchanged
+  // pair is then a noop next run; the .conflict copy syncs on its own as a new file.
+  baselines.set(path, {
+    fileId: remote.id,
+    md5: remote.md5Checksum ?? "",
+    modifiedTime: remote.modifiedTime ?? "",
+    base: isMergeable(path, local.length) ? local : undefined,
+  });
 }
 
 // ---- binary per-action helpers (real bytes; no 3-way merge) ---------------------------
@@ -845,24 +1107,30 @@ async function this_pullBinary(
 ): Promise<void> {
   const buf = await downloadFile(token, remote.id);
   await fs.writeBinary!(path, buf);
-  baselines.set(path, { fileId: remote.id, md5: remote.md5Checksum ?? "", modifiedTime: remote.modifiedTime ?? "", base: hashBytes(buf) });
+  baselines.set(path, { fileId: remote.id, md5: remote.md5Checksum ?? "", modifiedTime: remote.modifiedTime ?? "", base: hashBytes(buf), tagged: !!remote.appProperties?.[MOMENTUM_PATH_KEY] });
   result.pulled++;
 }
 
 async function this_pushBinary(
   token: string, path: string, rootId: string, folderCache: Map<string, string>,
-  fs: VaultFS, baselines: DriveBaselineStore, result: DriveSyncResult,
+  fs: VaultFS, baselines: DriveBaselineStore, result: DriveSyncResult, deviceId?: string,
 ): Promise<void> {
   const buf = await fs.readBinary!(path);
   const existing = baselines.get(path);
+  const props = momentumProps(path, deviceId);
   let meta: DriveFile;
+  let tagged = true;
   if (existing?.fileId) {
     meta = await updateBinaryFile(token, existing.fileId, buf, baseOf(path));
+    if (!existing.tagged) {
+      try { meta = await setAppProperties(token, existing.fileId, props); }
+      catch (e) { tagged = false; result.notes.push(`tag ${path}: ${e instanceof Error ? e.message : String(e)}`); }
+    }
   } else {
     const parentId = await ensureRemoteFolderPath(token, dirOf(path), rootId, folderCache);
-    meta = await createBinaryFile(token, baseOf(path), buf, parentId === "root" ? undefined : parentId);
+    meta = await createBinaryFile(token, baseOf(path), buf, parentId === "root" ? undefined : parentId, props);
   }
-  baselines.set(path, { fileId: meta.id, md5: meta.md5Checksum ?? "", modifiedTime: meta.modifiedTime ?? "", base: hashBytes(buf) });
+  baselines.set(path, { fileId: meta.id, md5: meta.md5Checksum ?? "", modifiedTime: meta.modifiedTime ?? "", base: hashBytes(buf), tagged });
   result.pushed++;
 }
 
@@ -907,6 +1175,7 @@ async function this_deleteLocal(
     result.notes.push(`Removed locally (deleted on Drive): ${name} → trash.`);
   }
   baselines.remove(name);
+  baselines.clearDeclined?.(name); // deletion executed → any decline tombstone is moot
 }
 
 async function this_deleteRemote(
@@ -920,4 +1189,6 @@ async function this_deleteRemote(
     result.notes.push(`Removed on Drive (deleted locally): ${name} → Drive trash.`);
   }
   baselines.remove(name);
+  baselines.clearLocalDelete?.(name); // the local-delete evidence has been acted on
+  baselines.clearDeclined?.(name);
 }

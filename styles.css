@@ -875,3 +875,17 @@ a.pa-drive-tname:hover{color:var(--text-accent)}
 .pa-checkin-opt-emoji{font-size:1.25rem}
 .pa-checkin-opt-label{font-size:.68rem;color:var(--text-muted)}
 .pa-checkin-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
+
+/* Google Drive source-of-truth + backup warning (Settings) */
+.pa-drive-sot-warning {
+  margin: 0.5em 0 1em;
+  padding: 0.7em 0.9em;
+  border: 1px solid var(--background-modifier-error-hover, #e0a);
+  border-left-width: 4px;
+  border-radius: 6px;
+  background: var(--background-modifier-error, rgba(230, 100, 100, 0.12));
+  color: var(--text-normal);
+  font-size: 0.9em;
+  line-height: 1.45;
+}
+.pa-drive-sot-warning strong { color: var(--text-error, #d33); }

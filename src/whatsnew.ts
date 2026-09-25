@@ -6,6 +6,23 @@ export interface ChangeEntry { version: string; sections: ChangeSection[]; }
 /** Release notes shown in the "What's new" dialog, newest first. */
 export const CHANGELOG: ChangeEntry[] = [
   {
+    version: "0.8.4",
+    sections: [
+      {
+        title: "Improved — Google Drive sync across devices (beta)",
+        items: [
+          "Google Drive is now the source of truth. Changes made on Drive win and flow to every device — including deletions (delete a file on Drive and it's removed on your devices too). Please back up your vault before enabling Drive sync (there's a reminder in Settings).",
+          "Deletions are driven by real events, not guesswork. A file that's simply missing on one device (still downloading, or a device that hasn't caught up) is no longer mistaken for a deletion — so notes stop coming back or getting removed unexpectedly. A file is only removed when Drive reports it deleted, or when you delete it here.",
+          "No more duplicates from renames: files now carry a stable identity, so renaming or moving a file on Drive is recognised as the same file instead of spawning a copy. Existing duplicates from earlier multi-device races are consolidated automatically — the newest is kept and the other is preserved as a .conflict copy.",
+          "Far fewer deletion prompts, and if you decline one, Momentum remembers and stops asking about the same files.",
+          "Conflicts settle instead of piling up, and the default resolution is now \"newer wins\" (Drive's clock decides). You can change it — including \"keep both\" — under Settings → Conflict resolution.",
+          "Faster, more reliable incremental sync: the change cursor is tracked correctly, so a routine sync only looks at what actually changed and never skips a change that landed mid-sync.",
+          "Heads-up: still beta. Delete or rename files from within Obsidian so the change is captured, and keep Drive sync active on a single device while this settles.",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.8.2",
     sections: [
       {

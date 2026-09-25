@@ -11,6 +11,18 @@ import { requestUrl } from "obsidian";
 const DRIVE = "https://www.googleapis.com/drive/v3";
 const UPLOAD = "https://www.googleapis.com/upload/drive/v3";
 
+/**
+ * Thrown by listChanges when the stored change cursor (startPageToken) is no longer valid
+ * (expired / too old — Google answers 400). The sync engine catches this and reseeds the cursor
+ * via a full reconciliation instead of aborting, so no data is lost.
+ */
+export class InvalidDriveCursorError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidDriveCursorError";
+  }
+}
+
 export interface DriveFile {
   id: string;
   name: string;
@@ -20,6 +32,10 @@ export interface DriveFile {
   md5Checksum?: string;
   size?: string;
   trashed?: boolean;
+  /** App-private key/value metadata (invisible to the user, per-app). We store a stable logical
+   *  identity here (`momentumPath`) so a file renamed/moved on Drive is still recognised as the
+   *  same file instead of becoming a duplicate. */
+  appProperties?: Record<string, string>;
 }
 
 /** A page of change records from the Changes API. */
@@ -60,7 +76,7 @@ function q(params: Record<string, string | undefined>): string {
   return parts.length ? `?${parts.join("&")}` : "";
 }
 
-const FILE_FIELDS = "id,name,mimeType,parents,modifiedTime,md5Checksum,size,trashed";
+const FILE_FIELDS = "id,name,mimeType,parents,modifiedTime,md5Checksum,size,trashed,appProperties";
 
 /**
  * List files/folders. Pass a folderId to list that folder's children (navigation), or a raw
@@ -130,10 +146,12 @@ export async function createTextFile(
   name: string,
   content: string,
   parentId?: string,
+  appProperties?: Record<string, string>,
 ): Promise<DriveFile> {
   const boundary = `momentum-${Date.now()}`;
   const metadata: Record<string, unknown> = { name };
   if (parentId) metadata.parents = [parentId];
+  if (appProperties) metadata.appProperties = appProperties;
   const body =
     `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n` +
     `${JSON.stringify(metadata)}\r\n` +
@@ -199,6 +217,24 @@ export async function updateTextFile(token: string, fileId: string, content: str
   return r.json as DriveFile;
 }
 
+/**
+ * Set (merge) app-private properties on a file — a metadata-only PATCH. Used to stamp the stable
+ * `momentumPath` identity on files (including ones created before this feature existed, lazily).
+ * Returns updated metadata.
+ */
+export async function setAppProperties(token: string, fileId: string, appProperties: Record<string, string>): Promise<DriveFile> {
+  const url = `${DRIVE}/files/${fileId}` + q({ fields: FILE_FIELDS });
+  const r = await requestUrl({
+    url,
+    method: "PATCH",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ appProperties }),
+    throw: false,
+  });
+  if (r.status >= 400) throw new Error(`Drive files.setAppProperties failed: ${r.status}${fmtErr(r.text)}`);
+  return r.json as DriveFile;
+}
+
 /** Best-effort MIME type from a file name (for binary uploads). */
 const MIME_BY_EXT: Record<string, string> = {
   png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp",
@@ -229,10 +265,11 @@ function multipartBinaryBody(metadata: Record<string, unknown>, mime: string, da
 }
 
 /** Create a new binary file (multipart upload, raw bytes). Returns the created metadata. */
-export async function createBinaryFile(token: string, name: string, data: ArrayBuffer, parentId?: string): Promise<DriveFile> {
+export async function createBinaryFile(token: string, name: string, data: ArrayBuffer, parentId?: string, appProperties?: Record<string, string>): Promise<DriveFile> {
   const boundary = `momentum-${Date.now()}`;
   const metadata: Record<string, unknown> = { name };
   if (parentId) metadata.parents = [parentId];
+  if (appProperties) metadata.appProperties = appProperties;
   const url = `${UPLOAD}/files` + q({ uploadType: "multipart", fields: FILE_FIELDS });
   const r = await requestUrl({
     url, method: "POST",
@@ -297,10 +334,16 @@ export async function listChanges(
         pageToken: cursor,
         spaces: "drive",
         includeRemoved: "true",
+        // Don't restrict to My Drive: a removal we must observe can arrive on a file the user
+        // moved out or that was shared — restricting would silently drop those removal events.
+        restrictToMyDrive: "false",
         fields: `newStartPageToken,nextPageToken,changes(fileId,removed,file(${FILE_FIELDS}))`,
         pageSize: "1000",
       });
     const r = await requestUrl({ url, headers: { Authorization: `Bearer ${token}` }, throw: false });
+    // A 400 here almost always means the stored page token expired/became invalid. Signal it
+    // distinctly so the engine can reseed the cursor with a full reconciliation (no data loss).
+    if (r.status === 400) throw new InvalidDriveCursorError(`Drive changes.list rejected the cursor: 400${fmtErr(r.text)}`);
     if (r.status >= 400) throw new Error(`Drive changes.list failed: ${r.status}${fmtErr(r.text)}`);
     const j = r.json as {
       changes?: DriveChange[];

@@ -17,6 +17,7 @@ const D = vi.hoisted(() => {
   interface F {
     id: string; name: string; mimeType: string; content: string;
     md5Checksum: string; modifiedTime: string; size: string; parents: string[]; trashed?: boolean; bin?: Uint8Array;
+    appProperties?: Record<string, string>;
   }
   const FOLDER = "application/vnd.google-apps.folder";
   const files = new Map<string, F>();
@@ -33,7 +34,7 @@ const D = vi.hoisted(() => {
   };
   const nextId = (): string => `id${seq++}`;
   const reset = (): void => { files.clear(); seq = 1; };
-  const seed = (name: string, content: string, opts: { parent?: string; mimeType?: string; modifiedTime?: string } = {}): string => {
+  const seed = (name: string, content: string, opts: { parent?: string; mimeType?: string; modifiedTime?: string; appProperties?: Record<string, string> } = {}): string => {
     const id = nextId();
     files.set(id, {
       id, name, content,
@@ -42,6 +43,7 @@ const D = vi.hoisted(() => {
       modifiedTime: opts.modifiedTime ?? "2020-01-01T00:00:00.000Z",
       size: String(content.length),
       parents: [opts.parent ?? "root"],
+      appProperties: opts.appProperties,
     });
     return id;
   };
@@ -63,8 +65,8 @@ const D = vi.hoisted(() => {
 
 vi.mock("../src/googledrive", () => {
   const PREFIX = "application/vnd.google-apps.";
-  interface F { id: string; name: string; mimeType: string; content: string; md5Checksum: string; modifiedTime: string; size: string; parents: string[]; trashed?: boolean; bin?: Uint8Array }
-  const meta = (f: F) => ({ id: f.id, name: f.name, mimeType: f.mimeType, modifiedTime: f.modifiedTime, md5Checksum: f.md5Checksum, size: f.size, parents: f.parents, trashed: f.trashed });
+  interface F { id: string; name: string; mimeType: string; content: string; md5Checksum: string; modifiedTime: string; size: string; parents: string[]; trashed?: boolean; bin?: Uint8Array; appProperties?: Record<string, string> }
+  const meta = (f: F) => ({ id: f.id, name: f.name, mimeType: f.mimeType, modifiedTime: f.modifiedTime, md5Checksum: f.md5Checksum, size: f.size, parents: f.parents, trashed: f.trashed, appProperties: f.appProperties });
   return {
     GOOGLE_NATIVE_PREFIX: PREFIX,
     EXPORT_MIME: {},
@@ -86,10 +88,10 @@ vi.mock("../src/googledrive", () => {
     },
     exportFile: async () => "",
     mimeForName: () => "application/octet-stream",
-    createBinaryFile: async (_t: string, name: string, data: ArrayBuffer, parent?: string) => {
+    createBinaryFile: async (_t: string, name: string, data: ArrayBuffer, parent?: string, appProperties?: Record<string, string>) => {
       const id = D.nextId();
       const u8 = new Uint8Array(data);
-      const f: F = { id, name, mimeType: "application/octet-stream", content: "", md5Checksum: D.hashBuf(u8), modifiedTime: new Date().toISOString(), size: String(u8.length), parents: [parent || "root"], bin: u8 };
+      const f: F = { id, name, mimeType: "application/octet-stream", content: "", md5Checksum: D.hashBuf(u8), modifiedTime: new Date().toISOString(), size: String(u8.length), parents: [parent || "root"], bin: u8, appProperties };
       D.files.set(id, f);
       return meta(f);
     },
@@ -100,10 +102,16 @@ vi.mock("../src/googledrive", () => {
       f.bin = u8; f.md5Checksum = D.hashBuf(u8); f.modifiedTime = new Date().toISOString(); f.size = String(u8.length);
       return meta(f);
     },
-    createTextFile: async (_t: string, name: string, content: string, parent?: string) => {
+    createTextFile: async (_t: string, name: string, content: string, parent?: string, appProperties?: Record<string, string>) => {
       const id = D.nextId();
-      const f: F = { id, name, mimeType: "text/plain", content, md5Checksum: D.hash(content), modifiedTime: new Date().toISOString(), size: String(content.length), parents: [parent || "root"] };
+      const f: F = { id, name, mimeType: "text/plain", content, md5Checksum: D.hash(content), modifiedTime: new Date().toISOString(), size: String(content.length), parents: [parent || "root"], appProperties };
       D.files.set(id, f);
+      return meta(f);
+    },
+    setAppProperties: async (_t: string, id: string, appProperties: Record<string, string>) => {
+      const f = D.files.get(id);
+      if (!f) throw new Error(`setAppProperties: no file ${id}`);
+      f.appProperties = { ...(f.appProperties ?? {}), ...appProperties };
       return meta(f);
     },
     updateTextFile: async (_t: string, id: string, content: string) => {
@@ -147,8 +155,10 @@ function makeVault(init: Record<string, string> = {}, binInit: Record<string, nu
   return { fs, map, mtimes, bin };
 }
 
-function makeBaselines(seed: Record<string, DriveBaseline> = {}) {
+function makeBaselines(seed: Record<string, DriveBaseline> = {}, localDeletes: Record<string, number> = {}) {
   const m = new Map(Object.entries(seed));
+  const ld = new Map<string, number>(Object.entries(localDeletes));
+  const declined = new Map<string, string>();
   let cursor: string | undefined;
   const store: DriveBaselineStore = {
     get: (n) => m.get(n),
@@ -158,8 +168,13 @@ function makeBaselines(seed: Record<string, DriveBaseline> = {}) {
     getCursor: () => cursor,
     setCursor: (t) => { cursor = t; },
     save: async () => {},
+    getLocalDeletes: () => Object.fromEntries(ld),
+    clearLocalDelete: (n) => { ld.delete(n); },
+    getDeclined: () => Object.fromEntries(declined),
+    setDeclined: (n, sig) => { declined.set(n, sig); },
+    clearDeclined: (n) => { declined.delete(n); },
   };
-  return { store, m };
+  return { store, m, ld, declined };
 }
 
 const run = (fs: VaultFS, baselines: DriveBaselineStore, extra: Partial<Parameters<typeof runDriveSync>[0]> = {}) =>
@@ -321,13 +336,17 @@ describe("configurable conflict strategy (Req 9.2, task 16)", () => {
 describe("mass-delete guard (Req 9.7, task 17)", () => {
   const setupDeletions = (count: number) => {
     const baseSeed: Record<string, DriveBaseline> = {};
+    const localDeletes: Record<string, number> = {};
     for (let i = 0; i < count; i++) {
       const content = `file ${i}`;
       const name = `del${i}.md`;
       const id = D.seed(name, content);
       baseSeed[name] = { fileId: id, md5: D.hash(content), modifiedTime: "2020-01-01T00:00:00.000Z", base: content };
+      // Deletion is now event-driven: the local files were explicitly deleted by the user, which
+      // is the evidence that turns their absence into a real delete_remote (not a re-pull).
+      localDeletes[name] = Date.now();
     }
-    return { v: makeVault(), b: makeBaselines(baseSeed) };
+    return { v: makeVault(), b: makeBaselines(baseSeed, localDeletes) };
   };
 
   it("withholds deletions over the limit when not confirmed", async () => {
@@ -351,6 +370,87 @@ describe("mass-delete guard (Req 9.7, task 17)", () => {
     const r = await run(v.fs, b.store, { confirmDelete: declineSpy });
     expect(declineSpy).not.toHaveBeenCalled();
     expect(r.deletedRemote).toBe(3);
+  });
+});
+
+describe("event-driven deletion — absence is never proof (anti-resurrection)", () => {
+  it("remote missing from the listing but with NO removal event → keeps the local file", async () => {
+    // Baseline exists (synced before), local file present & unchanged, but the remote isn't in
+    // the tree this run and no Changes event reported it removed → must NOT delete locally.
+    const v = makeVault({ "keep.md": "still here" });
+    const b = makeBaselines({ "keep.md": { fileId: "ghost", md5: D.hash("still here"), modifiedTime: "2020-01-01T00:00:00.000Z", base: "still here" } });
+    const r = await run(v.fs, b.store, { confirmDelete: async () => true });
+    expect(r.deletedLocal).toBe(0);
+    expect(v.map.get("keep.md")).toBe("still here");
+  });
+
+  it("local missing with NO explicit local delete → re-pulls instead of deleting the remote", async () => {
+    // Remote present & unchanged, baseline exists, but the vault doesn't have it and the user
+    // didn't delete it here (empty localDeletes) → treat as not-yet-downloaded → re-pull.
+    const id = D.seed("back.md", "from drive");
+    const v = makeVault();
+    const b = makeBaselines({ "back.md": { fileId: id, md5: D.hash("from drive"), modifiedTime: "2020-01-01T00:00:00.000Z", base: "from drive" } });
+    const r = await run(v.fs, b.store, { confirmDelete: async () => true });
+    expect(r.deletedRemote).toBe(0);
+    expect(r.pulled).toBe(1);
+    expect(v.map.get("back.md")).toBe("from drive");
+    expect(D.byName("back.md")).toBeTruthy();
+  });
+});
+
+describe("stable identity via appProperties.momentumPath (Req 2, Phase 5)", () => {
+  it("a file renamed on Drive is matched by momentumPath — no duplicate in the vault", async () => {
+    // Drive file's tree name is "renamed.md" but it carries momentumPath "note.md" (renamed on
+    // Drive). Local + baseline are at "note.md" → must be recognised as the same file, not pulled
+    // in again under the new name.
+    const id = D.seed("renamed.md", "content", { appProperties: { momentumPath: "note.md" } });
+    const v = makeVault({ "note.md": "content" });
+    const b = makeBaselines({ "note.md": { fileId: id, md5: D.hash("content"), modifiedTime: "2020-01-01T00:00:00.000Z", base: "content", tagged: true } });
+    const r = await run(v.fs, b.store);
+    expect(r.pulled).toBe(0);
+    expect(r.pushed).toBe(0);
+    expect(r.conflicted).toBe(0);
+    expect(v.map.has("renamed.md")).toBe(false);
+    expect(v.map.get("note.md")).toBe("content");
+  });
+
+  it("stamps momentumPath on a newly pushed file", async () => {
+    const v = makeVault({ "fresh.md": "hi" });
+    const b = makeBaselines();
+    await run(v.fs, b.store, { deviceId: "dev-1" });
+    const f = D.byName("fresh.md");
+    expect(f?.appProperties?.momentumPath).toBe("fresh.md");
+    expect(f?.appProperties?.momentumOrigin).toBe("dev-1");
+    expect(b.m.get("fresh.md")?.tagged).toBe(true);
+  });
+
+  it("consolidates two Drive files sharing the same momentumPath — keeps newest, saves loser as .conflict", async () => {
+    const older = D.seed("dup.md", "OLDER", { appProperties: { momentumPath: "dup.md" }, modifiedTime: "2020-01-01T00:00:00.000Z" });
+    const newer = D.seed("dup.md", "NEWER", { appProperties: { momentumPath: "dup.md" }, modifiedTime: "2024-01-01T00:00:00.000Z" });
+    const v = makeVault();
+    const b = makeBaselines();
+    const r = await run(v.fs, b.store);
+    expect(D.files.get(older)?.trashed).toBe(true);   // loser trashed on Drive
+    expect(D.files.get(newer)?.trashed).toBeFalsy();  // newest kept
+    expect(v.map.get("dup.conflict.md")).toBe("OLDER"); // loser content preserved locally
+    expect(v.map.get("dup.md")).toBe("NEWER");          // canonical pulled
+    expect(r.conflicted).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe("local rename is a move, not a duplicate (Phase 5)", () => {
+  it("old path (explicitly deleted by the rename) is removed on Drive; new path is pushed", async () => {
+    const id = D.seed("old.md", "body", { appProperties: { momentumPath: "old.md" } });
+    const v = makeVault({ "new.md": "body" }); // the file now lives under the new name locally
+    const b = makeBaselines(
+      { "old.md": { fileId: id, md5: D.hash("body"), modifiedTime: "2020-01-01T00:00:00.000Z", base: "body", tagged: true } },
+      { "old.md": Date.now() }, // the rename recorded old.md as an explicit local deletion
+    );
+    const r = await run(v.fs, b.store);
+    expect(r.deletedRemote).toBe(1);          // old.md trashed on Drive
+    expect(D.files.get(id)?.trashed).toBe(true);
+    expect(r.pushed).toBe(1);                 // new.md uploaded
+    expect(D.byName("new.md")?.content).toBe("body");
   });
 });
 

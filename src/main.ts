@@ -39,6 +39,8 @@ interface PASettings {
   driveMirrorDir?: string;         // the local vault folder mirrored against Drive
   driveSyncInterval?: number;      // 0=manual, or minutes
   driveBaselines?: Record<string, { fileId: string; md5: string; modifiedTime: string; base?: string }>;
+  driveLocalDeletes?: Record<string, number>;     // paths the user deleted locally (evidence for delete_remote)
+  driveDeclinedDeletions?: Record<string, string>; // path → situation signature the user declined to delete
   driveConflictStrategy?: DriveConflictStrategy; // how two-sided conflicts resolve (default keep-both)
   driveSyncOnStartup?: boolean;   // run a Drive sync shortly after launch
   driveSyncOnChange?: boolean;    // event-driven: sync (debounced) when vault files change
@@ -74,6 +76,8 @@ const DEFAULT_SETTINGS: PASettings = {
   driveMirrorDir: "Drive",
   driveSyncInterval: 0,
   driveBaselines: {},
+  driveLocalDeletes: {},
+  driveDeclinedDeletions: {},
   driveCursor: "",
   driveConflictStrategy: DEFAULT_CONFLICT_STRATEGY,
   driveSyncOnStartup: false,
@@ -801,7 +805,21 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       getCursor: () => this.settings.driveCursor || undefined,
       setCursor: (t) => { this.settings.driveCursor = t; },
       save: async () => { await this.saveSettings(); },
+      getLocalDeletes: () => (this.settings.driveLocalDeletes ??= {}),
+      clearLocalDelete: (n) => { delete (this.settings.driveLocalDeletes ??= {})[n]; },
+      getDeclined: () => (this.settings.driveDeclinedDeletions ??= {}),
+      setDeclined: (n, sig) => { (this.settings.driveDeclinedDeletions ??= {})[n] = sig; },
+      clearDeclined: (n) => { delete (this.settings.driveDeclinedDeletions ??= {})[n]; },
     };
+  }
+
+  /** The mirror-relative key for a vault path (matching driveVaultFS/baseline keys), or null if
+   *  the path is outside the Drive sync scope. Used to record explicit local deletions. */
+  private driveRelKey(path: string): string | null {
+    if (!this.driveInScope(path)) return null;
+    const raw = this.settings.driveMirrorDir ?? "Drive";
+    const base = raw === "" ? "" : normalizePath(raw);
+    return base ? path.slice(base.length + 1) : path;
   }
 
   /**
@@ -976,6 +994,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
         incremental: useIncremental,
         lastSyncMs: (() => { const t = Date.parse(this.settings.driveLastSync?.time ?? ""); return Number.isFinite(t) ? t : undefined; })(),
         shouldStop: () => this.driveStopRequested,
+        deviceId,
       });
       this.settings.driveLastSync = {
         time: new Date().toISOString(),
@@ -1142,8 +1161,26 @@ export default class MomentumPlugin extends Plugin implements PAHost {
     };
     this.registerEvent(this.app.vault.on("modify", (f) => schedule(f.path)));
     this.registerEvent(this.app.vault.on("create", (f) => schedule(f.path)));
-    this.registerEvent(this.app.vault.on("delete", (f) => schedule(f.path)));
-    this.registerEvent(this.app.vault.on("rename", (f) => schedule(f.path)));
+    this.registerEvent(this.app.vault.on("delete", (f) => {
+      // Record a REAL user deletion as evidence so the sync can honour it (delete_remote) instead
+      // of re-pulling the file. Skip the sync's OWN trash writes (driveSyncing guards those),
+      // otherwise a pulled/trashed file would look like the user deleting it.
+      if (!this.driveSyncing && this.settings.googleDriveEnabled) {
+        const rel = this.driveRelKey(f.path);
+        if (rel) { (this.settings.driveLocalDeletes ??= {})[rel] = Date.now(); void this.saveSettings(); }
+      }
+      schedule(f.path);
+    }));
+    this.registerEvent(this.app.vault.on("rename", (f, oldPath) => {
+      // A rename fires no `delete` event, but the OLD path genuinely ceased to exist (it became
+      // the new path). Record it as an explicit local deletion so the sync moves the file on Drive
+      // instead of re-pulling the old name back (which would duplicate). Skip the sync's own writes.
+      if (!this.driveSyncing && this.settings.googleDriveEnabled) {
+        const relOld = this.driveRelKey(oldPath);
+        if (relOld) { (this.settings.driveLocalDeletes ??= {})[relOld] = Date.now(); void this.saveSettings(); }
+      }
+      schedule(f.path);
+    }));
   }
 
   private driveSyncTimer: number | null = null;
@@ -1859,6 +1896,16 @@ class PASettingTab extends PluginSettingTab {
     const driveConnected = !!this.plugin.settings.driveToken;
     new Setting(containerEl).setName("Google Drive (beta)").setHeading();
 
+    // Source-of-truth + backup warning: Drive wins, and its changes (including deletions) flow to
+    // every device. Make the user read this before enabling, and tell them to back up first.
+    const driveWarn = containerEl.createDiv({ cls: "pa-drive-sot-warning" });
+    driveWarn.createEl("strong", { text: "Google Drive is the source of truth." });
+    driveWarn.createEl("span", {
+      text: " When sync is on, changes made on Drive win and flow to every device — including deletions "
+        + "(delete a file on Drive and it's removed on your devices too). Back up your vault before you "
+        + "enable this. Still beta.",
+    });
+
     // Scope A: text notes sync on every plan, so the controls are always available. Only real
     // binary sync is gated (the "Sync binary files" toggle below), pointing at Momentum pro.
     const driveProOn = this.plugin.isProEnabled();
@@ -1963,12 +2010,12 @@ class PASettingTab extends PluginSettingTab {
 
         new Setting(containerEl)
           .setName("Conflict resolution")
-          .setDesc("What happens when a file changed on both sides. Keep both is the safest: it never overwrites.")
+          .setDesc("What happens when a file changed on both sides since the last sync. Newer wins follows drive's clock (the source of truth). Keep both never overwrites — it saves a .conflict copy instead.")
           .addDropdown((d) => {
-            d.addOption("keep-both", "Keep both (recommended)");
-            d.addOption("newer-wins", "Newer wins");
-            d.addOption("local-wins", "Local wins");
-            d.addOption("remote-wins", "Remote wins");
+            d.addOption("newer-wins", "Newer wins (recommended)");
+            d.addOption("keep-both", "Keep both (never lose either side)");
+            d.addOption("remote-wins", "Drive always wins");
+            d.addOption("local-wins", "This device always wins");
             d.addOption("ask", "Ask me each time");
             d.setValue(this.plugin.settings.driveConflictStrategy ?? DEFAULT_CONFLICT_STRATEGY);
             d.onChange(async (v) => {

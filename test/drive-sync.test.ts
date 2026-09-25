@@ -52,24 +52,37 @@ describe("decideAction — the 3-way decision matrix", () => {
   });
 
   // The safety-critical rows: edit must beat deletion.
-  it("remote gone, local unchanged → delete_local (honour the remote deletion)", () => {
-    expect(decideAction({ base: B, localExists: true, remoteExists: false, localChanged: false, remoteChanged: false, mergeable: true }))
+  it("remote gone WITH an explicit removal event, local unchanged → delete_local", () => {
+    expect(decideAction({ base: B, localExists: true, remoteExists: false, localChanged: false, remoteChanged: false, mergeable: true, remoteDeletedExplicit: true }))
       .toBe("delete_local");
   });
 
   it("EDIT BEATS DELETE: remote gone but local CHANGED → push (never lose the local edit)", () => {
-    expect(decideAction({ base: B, localExists: true, remoteExists: false, localChanged: true, remoteChanged: false, mergeable: true }))
+    expect(decideAction({ base: B, localExists: true, remoteExists: false, localChanged: true, remoteChanged: false, mergeable: true, remoteDeletedExplicit: true }))
       .toBe("push");
   });
 
   it("EDIT BEATS DELETE: local gone but remote CHANGED → pull (never lose the remote edit)", () => {
-    expect(decideAction({ base: B, localExists: false, remoteExists: true, localChanged: false, remoteChanged: true, mergeable: true }))
+    expect(decideAction({ base: B, localExists: false, remoteExists: true, localChanged: false, remoteChanged: true, mergeable: true, localDeletedExplicit: true }))
       .toBe("pull");
   });
 
-  it("local gone, remote unchanged → delete_remote (honour the local deletion)", () => {
-    expect(decideAction({ base: B, localExists: false, remoteExists: true, localChanged: false, remoteChanged: false, mergeable: true }))
+  it("local gone WITH explicit local delete, remote unchanged → delete_remote", () => {
+    expect(decideAction({ base: B, localExists: false, remoteExists: true, localChanged: false, remoteChanged: false, mergeable: true, localDeletedExplicit: true }))
       .toBe("delete_remote");
+  });
+
+  // Deletion is EVENT-DRIVEN, not absence-driven: absence WITHOUT explicit evidence must NEVER
+  // delete — it resolves to the safe side (noop / re-pull). This is the fix for files that came
+  // back or got deleted on another device that hadn't finished syncing.
+  it("remote absent but NO removal event → noop (a listing gap must not delete the local copy)", () => {
+    expect(decideAction({ base: B, localExists: true, remoteExists: false, localChanged: false, remoteChanged: false, mergeable: true }))
+      .toBe("noop");
+  });
+
+  it("local absent but NO local-delete event → pull (re-download; never delete the remote)", () => {
+    expect(decideAction({ base: B, localExists: false, remoteExists: true, localChanged: false, remoteChanged: false, mergeable: true }))
+      .toBe("pull");
   });
 
   // First-contact, both exist, no baseline (Req 9.1): identical content is NOT a conflict.

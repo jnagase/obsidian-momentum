@@ -6,6 +6,17 @@ export interface ChangeEntry { version: string; sections: ChangeSection[]; }
 /** Release notes shown in the "What's new" dialog, newest first. */
 export const CHANGELOG: ChangeEntry[] = [
   {
+    version: "0.8.9",
+    sections: [
+      {
+        title: "Improved — better theme compatibility",
+        items: [
+          "Dropped the last few forced style overrides so your theme and CSS snippets can style Momentum's controls more predictably. No visual change with the default appearance; behaviour is unchanged.",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.8.8",
     sections: [
       {

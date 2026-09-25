@@ -521,17 +521,18 @@
 }
 
 /* ── Link-styled action (a real <button> for a11y, drawn as a link) ────────
-   Themes style bare `button` with a background, padding, radius and shadow at a
-   higher specificity than a lone class, so the visual reset is forced here. */
-button.pa-link-btn {
-  background: none !important;
-  background-color: transparent !important;
-  border: none !important;
-  border-radius: 0 !important;
-  box-shadow: none !important;
-  padding: 0 !important;
-  height: auto !important;
-  min-height: 0 !important;
+   Themes style bare `button` with a background, padding, radius and shadow. The
+   doubled class raises specificity to (0,2,1) to win over those theme rules
+   without !important, and stays robust regardless of the button's container. */
+button.pa-link-btn.pa-link-btn {
+  background: none;
+  background-color: transparent;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  padding: 0;
+  height: auto;
+  min-height: 0;
   line-height: inherit;
   color: var(--text-accent);
   font-size: 0.8rem;
@@ -605,8 +606,10 @@ button.pa-link-btn:focus-visible {
   border-radius: 6px;
 }
 
-/* FormModal conditional fields (visibleWhen) — fitness-cardio */
-.pa-hidden { display: none !important; }
+/* FormModal conditional fields (visibleWhen) — fitness-cardio.
+   Doubled class raises specificity to (0,2,0) so it beats later same-specificity
+   display rules (e.g. the Drive stop button) without needing !important. */
+.pa-hidden.pa-hidden { display: none; }
 
 /* ===== Cockpit Life ===== */
 .pa-cockpit-topbar{display:flex;align-items:baseline;gap:10px;margin-bottom:12px}
@@ -816,7 +819,7 @@ a.pa-drive-tname:hover{color:var(--text-accent)}
 .pa-drive-live-track{height:6px;border-radius:5px;background:var(--background-modifier-border);overflow:hidden;margin:2px 0 6px;display:none}
 .pa-drive-live-track.on{display:block}
 .pa-drive-live-fill{height:100%;width:0;border-radius:5px;background:var(--interactive-accent);transition:width .25s ease}
-.pa-drive-live-fill.indeterminate{width:40% !important;animation:pa-drive-sweep 1.1s ease-in-out infinite}
+.pa-drive-live-fill.indeterminate{width:40%;animation:pa-drive-sweep 1.1s ease-in-out infinite}
 /* Subtle "!" at the right of the scope line, explaining why in-scope < total files on hover. */
 .pa-drive-scopeline{display:flex;align-items:center;justify-content:space-between;gap:8px}
 .pa-drive-scopenote{flex:0 0 auto;width:14px;height:14px;line-height:14px;text-align:center;border-radius:50%;font-size:.62rem;font-weight:700;color:var(--background-primary);background:var(--text-muted);opacity:.45;cursor:pointer}

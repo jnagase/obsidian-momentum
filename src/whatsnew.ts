@@ -6,6 +6,20 @@ export interface ChangeEntry { version: string; sections: ChangeSection[]; }
 /** Release notes shown in the "What's new" dialog, newest first. */
 export const CHANGELOG: ChangeEntry[] = [
   {
+    version: "0.8.8",
+    sections: [
+      {
+        title: "Improved — Google Drive sync (beta)",
+        items: [
+          "Faster everyday sync: opening the app and editing/deleting a file locally now use an incremental sync (checks Drive's change feed and skips the full scan when nothing changed remotely). The first sync — and anything that actually changed on Drive — still does a full pass, so nothing is missed.",
+          "Duplicate cleanup: if the same file ends up as two copies on Drive (e.g. a folder dropped in that merged with already-synced content), the extra copy is now consolidated — the newest is kept, identical copies are removed, and any differing copy is preserved as a .conflict. A manual Full sync cleans them all in one pass.",
+          "Deleting on Drive takes effect in one confirmation (a second safety limit was double-counting deletions), and when a deletion empties a folder, the empty folder is removed from your vault too instead of being left behind.",
+          "Fixed a case-only folder mismatch (e.g. \"Skill\" vs \"skill\") that could error repeatedly on macOS.",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.8.7",
     sections: [
       {

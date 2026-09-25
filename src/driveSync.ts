@@ -56,7 +56,7 @@ export const DRIVE_MAX_WRITES_PER_RUN = 50;
  * dangerous than a bulk edit, and a sync/load glitch (a device that hasn't finished downloading)
  * can look like a mass deletion. Mirrors rclone's `--max-delete`.
  */
-export const DRIVE_MAX_DELETES_PER_RUN = 10;
+export const DRIVE_MAX_DELETES_PER_RUN = 50;
 
 /** Max multi-device duplicate files consolidated (loser saved as .conflict, then trashed on
  *  Drive) in a single cycle — a safety cap so a pathological state can't cause a trash storm. */
@@ -498,6 +498,16 @@ export async function runDriveSync(args: {
       if (args.shouldStop?.()) break;
       const mp = f.appProperties?.[MOMENTUM_PATH_KEY];
       if (!mp || mp === treePath) continue;
+      // Case-only difference (e.g. "Skill/x.md" vs "skill/x.md") is NOT a real move on a
+      // case-insensitive filesystem (macOS/Windows) — the file already lives at the same place, and
+      // attempting the move errors with "File already exists". Park both endpoints and skip so it
+      // never errors or duplicates; the identity discrepancy is harmless.
+      if (mp.toLowerCase() === treePath.toLowerCase()) {
+        movedPaths.add(mp);
+        movedPaths.add(treePath);
+        result.notes.push(`Skipped case-only move "${mp}" ↔ "${treePath}" (same file on a case-insensitive filesystem).`);
+        continue;
+      }
       const bFrom = baselines.get(mp);
       if (!bFrom || bFrom.fileId !== f.id) continue;
       if (moves >= DRIVE_MAX_MOVES_PER_RUN) { result.notes.push(`Move propagation capped at ${DRIVE_MAX_MOVES_PER_RUN} this run.`); break; }
@@ -534,20 +544,18 @@ export async function runDriveSync(args: {
       const logical = f.appProperties?.[MOMENTUM_PATH_KEY] || treePath;
       const existing = remoteByPath.get(logical);
       if (!existing) { remoteByPath.set(logical, f); continue; }
-      const bothTagged =
-        existing.appProperties?.[MOMENTUM_PATH_KEY] === logical &&
-        f.appProperties?.[MOMENTUM_PATH_KEY] === logical;
+      // ANY collision at a logical path is a genuine duplicate — two distinct Drive files competing
+      // for one local path (only one can exist locally). Consolidate it, regardless of whether we
+      // tagged them: keep the newer as canonical, and the loser gets trashed (identical content) or
+      // preserved as a .conflict first (differing content). This cleans up legacy/externally-created
+      // duplicates too — e.g. a folder dropped into Drive that merged with already-synced content.
       const fNewer = (Date.parse(f.modifiedTime || "") || 0) >= (Date.parse(existing.modifiedTime || "") || 0);
       const winner = fNewer ? f : existing;
       const loser = fNewer ? existing : f;
       remoteByPath.set(logical, winner);
-      if (bothTagged) {
-        const g = dupLosers.get(logical) ?? [];
-        g.push(loser);
-        dupLosers.set(logical, g);
-      } else {
-        result.notes.push(`Two remote files map to "${logical}"; kept the newer (${winner.id}).`);
-      }
+      const g = dupLosers.get(logical) ?? [];
+      g.push(loser);
+      dupLosers.set(logical, g);
     }
 
     // Consolidation TRASHES the extra copies on Drive — a destructive op — so a large batch is
@@ -568,6 +576,10 @@ export async function runDriveSync(args: {
       }
     }
     let consolidated = 0;
+    // On a manual/confirmed run the user explicitly asked to reconcile, so clean up ALL duplicates
+    // in one pass (no annoying "run it 3 more times"). On automatic runs keep the small safety cap
+    // so a pathological state can't cause a trash storm unattended.
+    const consolidateCap = confirmed ? Number.MAX_SAFE_INTEGER : DRIVE_MAX_CONSOLIDATE_PER_RUN;
     const groups = consolidationAllowed ? dupLosers : new Map<string, DriveFile[]>();
     for (const [logical, losers] of groups) {
       const canonical = remoteByPath.get(logical);
@@ -577,8 +589,8 @@ export async function runDriveSync(args: {
       }
       for (const loser of losers) {
         if (args.shouldStop?.()) break;
-        if (consolidated >= DRIVE_MAX_CONSOLIDATE_PER_RUN) {
-          result.notes.push(`Duplicate consolidation capped at ${DRIVE_MAX_CONSOLIDATE_PER_RUN} this run.`);
+        if (consolidated >= consolidateCap) {
+          result.notes.push(`Duplicate consolidation capped at ${consolidateCap} this run (run a manual Full sync to clean the rest in one pass).`);
           break;
         }
         try {
@@ -800,10 +812,11 @@ export async function runDriveSync(args: {
   }
 
   // ---- WRITE CIRCUIT BREAKER (unconfirmed automatic runs) --------------------------------
-  // Only DATA-CHANGING ops count: overwrites, merges and deletions. Brand-new creates and
-  // keep-both conflicts never lose data, so a first sync / enabling binaries / adding a big
-  // folder flows freely even on an automatic run. (Deletions also have their own guard above.)
-  const riskyWrites = plans.filter((p) => !p.create && p.action !== "conflict").length;
+  // Only OVERWRITES / merges count. Brand-new creates and keep-both conflicts never lose data,
+  // and DELETIONS are governed solely by the dedicated mass-delete guard above — counting them
+  // here too would double-gate them: on an automatic run the user could approve the delete guard
+  // and then have this breaker silently block the whole plan, forcing a confusing second confirm.
+  const riskyWrites = plans.filter((p) => !p.create && p.action !== "conflict" && p.action !== "delete_local" && p.action !== "delete_remote").length;
   if (!confirmed && riskyWrites > DRIVE_MAX_WRITES_PER_RUN) {
     result.blocked = plans.length;
     result.errors.push(

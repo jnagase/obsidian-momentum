@@ -357,17 +357,17 @@ describe("mass-delete guard (Req 9.7, task 17)", () => {
   };
 
   it("withholds deletions over the limit when not confirmed", async () => {
-    const { v, b } = setupDeletions(12);
+    const { v, b } = setupDeletions(60);
     const r = await run(v.fs, b.store, { confirmDelete: async () => false });
     expect(r.deletedRemote).toBe(0);
-    expect(r.blocked).toBe(12);
-    expect(D.live().length).toBe(12);
+    expect(r.blocked).toBe(60);
+    expect(D.live().length).toBe(60);
   });
 
   it("performs the deletions when the guard is confirmed", async () => {
-    const { v, b } = setupDeletions(12);
+    const { v, b } = setupDeletions(60);
     const r = await run(v.fs, b.store, { confirmDelete: async () => true });
-    expect(r.deletedRemote).toBe(12);
+    expect(r.deletedRemote).toBe(60);
     expect(D.live().length).toBe(0);
   });
 
@@ -377,6 +377,38 @@ describe("mass-delete guard (Req 9.7, task 17)", () => {
     const r = await run(v.fs, b.store, { confirmDelete: declineSpy });
     expect(declineSpy).not.toHaveBeenCalled();
     expect(r.deletedRemote).toBe(3);
+  });
+
+  it("incremental (event-driven) run propagates a local delete to Drive without a full walk", async () => {
+    // A local delete with a valid cursor and no remote changes takes the reconstruct-from-baseline
+    // path (no tree walk) and still trashes the file on Drive by its baseline fileId.
+    const id = D.seed("gone.md", "x");
+    const v = makeVault(); // deleted locally
+    const b = makeBaselines(
+      { "gone.md": { fileId: id, md5: D.hash("x"), modifiedTime: "2020-01-01T00:00:00.000Z", base: "x", tagged: true } },
+      { "gone.md": Date.now() }, // explicit local delete
+    );
+    b.store.setCursor("cursor-1"); // valid cursor → incremental reconstruct path (mock listChanges returns 0 changes)
+    const r = await run(v.fs, b.store, { incremental: true, confirmDelete: async () => true });
+    expect(r.deletedRemote).toBe(1);
+    expect(D.files.get(id)?.trashed).toBe(true);
+  });
+
+  it("deletions don't trip the write circuit breaker on an unconfirmed run (own guard governs them)", async () => {
+    // 55 files gone from Drive on an authoritative full walk, UNCONFIRMED (automatic) run. The
+    // write breaker (limit 50) must NOT block them once the mass-delete guard is satisfied —
+    // otherwise the user would confirm the deletion and it would still be silently withheld.
+    const baseSeed: Record<string, DriveBaseline> = {};
+    const vault: Record<string, string> = {};
+    for (let i = 0; i < 55; i++) {
+      baseSeed[`d${i}.md`] = { fileId: `x${i}`, md5: D.hash("c"), modifiedTime: "2020-01-01T00:00:00.000Z", base: "c", tagged: true };
+      vault[`d${i}.md`] = "c";
+    }
+    const v = makeVault(vault);
+    const b = makeBaselines(baseSeed);
+    const r = await run(v.fs, b.store, { confirmed: false, confirmDelete: async () => true });
+    expect(r.deletedLocal).toBe(55);
+    expect(r.blocked).toBe(0);
   });
 });
 
@@ -421,6 +453,18 @@ describe("stable identity via appProperties.momentumPath (Req 2, Phase 5)", () =
     expect(b.m.get("renamed.md")?.fileId).toBe(id);
     expect(D.files.get(id)?.appProperties?.momentumPath).toBe("renamed.md"); // Drive tag realigned
     expect(r.conflicted).toBe(0);
+  });
+
+  it("a case-only path difference is NOT treated as a move (no error, no duplicate)", async () => {
+    // Drive tree path "skill/x.md" but momentumPath "Skill/x.md" (folder case drift). On a
+    // case-insensitive filesystem these are the same file — the move must be skipped, not attempted.
+    const id = D.seed("skill/x.md", "body", { appProperties: { momentumPath: "Skill/x.md" } });
+    const v = makeVault({ "Skill/x.md": "body" });
+    const b = makeBaselines({ "Skill/x.md": { fileId: id, md5: D.hash("body"), modifiedTime: "2020-01-01T00:00:00.000Z", base: "body", tagged: true } });
+    const r = await run(v.fs, b.store, { deviceId: "dev-1" });
+    expect(r.errors.length).toBe(0);
+    expect(v.map.get("Skill/x.md")).toBe("body");
+    expect(v.map.has("skill/x.md")).toBe(false); // not duplicated under the other case
   });
 
   it("mirrors a Drive rename AND pulls the new content when it also changed", async () => {

@@ -339,8 +339,13 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       this.resetGoogleSyncInterval();
       this.resetDriveSyncInterval();
       // Optional Drive sync on startup (off by default; unconfirmed so its guards still apply).
+      // INCREMENTAL: opening the app shouldn't cost a full tree walk. The incremental path checks
+      // the Drive change feed and reconstructs from the baselines when nothing changed remotely
+      // (fast); it auto-escalates to a full walk when the feed reports changes (e.g. something
+      // edited/deleted on Drive while closed), and the very first sync (no cursor yet) is a full
+      // walk anyway to seed. So "first sync is full, every open after is incremental" — for free.
       if (this.settings.driveSyncOnStartup && this.settings.googleDriveEnabled && this.settings.driveToken) {
-        window.setTimeout(() => void this.syncGoogleDrive(false), 4000);
+        window.setTimeout(() => void this.syncGoogleDrive(false, undefined, true), 4000);
       }
       // Optional event-driven Drive sync: watch vault changes and sync (debounced).
       this.registerDriveChangeWatcher();
@@ -892,8 +897,19 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       },
       exists: async (rel) => this.app.vault.getAbstractFileByPath(toFull(rel)) instanceof TFile,
       trash: async (rel) => {
-        const f = this.app.vault.getAbstractFileByPath(toFull(rel));
+        const full = toFull(rel);
+        const f = this.app.vault.getAbstractFileByPath(full);
         if (f instanceof TFile) await this.app.fileManager.trashFile(f); // reversible, respects user preference
+        // Prune parent folders left empty by the deletion — up to (but not including) the mirror
+        // root — so deleting all of a folder's files on Drive doesn't leave an empty shell locally.
+        let dir = full.lastIndexOf("/") >= 0 ? full.slice(0, full.lastIndexOf("/")) : "";
+        while (dir && dir !== base) {
+          const folder = this.app.vault.getAbstractFileByPath(dir);
+          if (folder instanceof TFolder && folder.children.length === 0) {
+            await this.app.fileManager.trashFile(folder);
+            dir = dir.lastIndexOf("/") >= 0 ? dir.slice(0, dir.lastIndexOf("/")) : "";
+          } else break;
+        }
       },
       mtime: async (rel) => {
         const f = this.app.vault.getAbstractFileByPath(toFull(rel));
@@ -1156,7 +1172,13 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       if (this.driveChangeTimer !== null) window.clearTimeout(this.driveChangeTimer);
       this.driveChangeTimer = window.setTimeout(() => {
         this.driveChangeTimer = null;
-        void this.syncGoogleDrive(false);
+        // Event-driven runs are ALWAYS incremental: react to a LOCAL change by checking the Drive
+        // change feed and, when nothing changed remotely, pushing just the delta off the baselines
+        // (no full tree walk). If the feed reports any remote change (e.g. a folder trashed on
+        // Drive) it still escalates to a full walk, so correctness is preserved — just fast in the
+        // common case. This is independent of the "Incremental sync" toggle (which governs manual/
+        // interval runs); an event reaction should never pay for a full scan of the whole Drive.
+        void this.syncGoogleDrive(false, undefined, true);
       }, 8000); // debounce: wait for a lull in edits before syncing
     };
     this.registerEvent(this.app.vault.on("modify", (f) => schedule(f.path)));

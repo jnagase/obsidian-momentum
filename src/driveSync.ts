@@ -274,15 +274,16 @@ export type DriveAction =
  * Decide the action for one file. `base` is the last-synced baseline (undefined = never synced).
  * `localChanged`/`remoteChanged` are computed against the baseline by the caller.
  *
- * DELETION IS EVENT-DRIVEN, NOT ABSENCE-DRIVEN. A file simply missing from one side's listing is
- * NOT proof it was deleted — it may just not be present on this device yet (still downloading, a
- * transient listing gap, or a device whose baseline is out of date). So a delete only fires with
- * EXPLICIT evidence:
- *   - `remoteDeletedExplicit`: a Drive Changes event reported this file removed/trashed;
- *   - `localDeletedExplicit`:  the vault emitted a `delete` for this path (the user removed it).
- * Without that evidence, absence resolves to the SAFE side (re-pull or noop), never a delete.
- * As before, any two-sided edit routes to merge/conflict, never a silent overwrite, and an edit
- * always beats a deletion.
+ * DELETION detection has two modes, so it's both safe AND complete:
+ *   - EXPLICIT evidence (any sync): `remoteDeletedExplicit` (a Drive Changes event reported this
+ *     file removed/trashed) or `localDeletedExplicit` (the vault emitted a delete for this path).
+ *   - AUTHORITATIVE ABSENCE (`remoteAuthoritative`): set only when a FULL remote walk completed
+ *     without truncation/error, so "absent from the walk" reliably means "not on Drive now". This
+ *     is what propagates a FOLDER deleted on Drive (its child files get no per-file event, they
+ *     just vanish from the walk). It is NEVER set for the incremental/reconstructed path, where a
+ *     transient/partial view could otherwise look like a mass deletion.
+ * Without either signal, absence resolves to the SAFE side (re-pull or noop), never a delete. Any
+ * two-sided edit routes to merge/conflict, never a silent overwrite, and an edit beats a deletion.
  */
 export function decideAction(args: {
   base?: DriveBaseline;
@@ -297,10 +298,13 @@ export function decideAction(args: {
   remoteDeletedExplicit?: boolean;
   /** The vault emitted a delete for this path since the last sync (explicit local deletion). */
   localDeletedExplicit?: boolean;
+  /** The remote view came from a COMPLETE full walk, so absence from it is authoritative (a real
+   *  remote deletion, e.g. a folder trashed on Drive). Never set for the incremental path. */
+  remoteAuthoritative?: boolean;
 }): DriveAction {
   const {
     base, localExists, remoteExists, localChanged, remoteChanged, mergeable, contentEqual,
-    remoteDeletedExplicit, localDeletedExplicit,
+    remoteDeletedExplicit, localDeletedExplicit, remoteAuthoritative,
   } = args;
 
   // Both present.
@@ -330,9 +334,11 @@ export function decideAction(args: {
   if (localExists && !remoteExists) {
     if (!base) return "push";                       // new local file → send it up
     if (localChanged) return "push";                // edit-beats-delete: never lose a local edit
-    // Remote absent with an UNCHANGED local. Honour a real remote deletion ONLY with an explicit
-    // Changes event; a transient listing gap must NOT delete the local copy → leave it (noop).
-    return remoteDeletedExplicit ? "delete_local" : "noop";
+    // Remote absent with an UNCHANGED local. Honour a real remote deletion on an explicit Changes
+    // event OR when the remote view is authoritative (a complete full walk — this catches a folder
+    // trashed on Drive, whose child files get no per-file event). A transient/partial view (no
+    // authority, no event) must NOT delete → leave it (noop).
+    return (remoteDeletedExplicit || remoteAuthoritative) ? "delete_local" : "noop";
   }
 
   return "noop"; // neither exists
@@ -385,6 +391,9 @@ export async function runDriveSync(args: {
   let remoteDups: { rel: string; file: DriveFile }[] = [];
   let folderCache: Map<string, string> = new Map();
   let usedIncremental = false;
+  // True when the remote view is a COMPLETE full walk, so absence from it is a real deletion
+  // (propagates a folder trashed on Drive). Stays false for the incremental/reconstructed path.
+  let remoteAuthoritative = false;
 
   args.onProgress?.({ phase: "scanning", done: 0, total: 0, incremental: !!args.incremental });
 
@@ -458,6 +467,7 @@ export async function runDriveSync(args: {
     remoteByPath = tree.files;
     remoteDups = tree.dups;
     folderCache = new Map(tree.folders); // seeds push so a subfolder is created at most once/cycle
+    remoteAuthoritative = !tree.truncated; // a complete walk → absence means a real remote deletion
   }
 
   // ---- IDENTITY RECONCILIATION (Req 2: stable identity, anti-duplicate) ------------------
@@ -679,7 +689,7 @@ export async function runDriveSync(args: {
           continue;
         }
       }
-      const actionB = decideAction({ base, localExists, remoteExists, localChanged: localChangedB, remoteChanged: remoteChangedB, mergeable: false, contentEqual: contentEqualB, remoteDeletedExplicit, localDeletedExplicit });
+      const actionB = decideAction({ base, localExists, remoteExists, localChanged: localChangedB, remoteChanged: remoteChangedB, mergeable: false, contentEqual: contentEqualB, remoteDeletedExplicit, localDeletedExplicit, remoteAuthoritative });
       if (actionB !== "noop") plans.push({ path, action: actionB, remote, binary: true, create: isCreate(actionB, localExists, remoteExists) });
       continue;
     }
@@ -723,7 +733,7 @@ export async function runDriveSync(args: {
       }
     }
 
-    const action = decideAction({ base, localExists, remoteExists, localChanged, remoteChanged, mergeable, contentEqual, remoteDeletedExplicit, localDeletedExplicit });
+    const action = decideAction({ base, localExists, remoteExists, localChanged, remoteChanged, mergeable, contentEqual, remoteDeletedExplicit, localDeletedExplicit, remoteAuthoritative });
     if (action !== "noop") plans.push({ path, action, remote, remoteText: cachedRemoteText, create: isCreate(action, localExists, remoteExists) });
    } catch (e) {
     // One bad file must never abort the whole cycle (esp. in whole-vault mode).
@@ -892,6 +902,9 @@ export interface RemoteTree {
    *  duplicate names). Surfaced separately so identity reconciliation can consolidate them instead
    *  of silently dropping one — this is the classic multi-device duplicate. */
   dups: { rel: string; file: DriveFile }[];
+  /** True if the walk hit the enumeration cap and stopped early — the remote view is INCOMPLETE,
+   *  so absence must NOT be treated as a deletion this run. */
+  truncated: boolean;
 }
 
 /** Safety cap on how many entries a single tree walk will enumerate. */
@@ -970,10 +983,10 @@ export async function walkRemoteTree(token: string, rootId: string): Promise<Rem
           files.set(rel, f);
         }
       }
-      if (++seen > REMOTE_WALK_MAX) return { files, folders, dups };
+      if (++seen > REMOTE_WALK_MAX) return { files, folders, dups, truncated: true };
     }
   }
-  return { files, folders, dups };
+  return { files, folders, dups, truncated: false };
 }
 
 /** Directory portion of a relative path ("a/b/c.md" → "a/b"; "c.md" → ""). */

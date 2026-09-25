@@ -75,9 +75,19 @@ describe("decideAction — the 3-way decision matrix", () => {
   // Deletion is EVENT-DRIVEN, not absence-driven: absence WITHOUT explicit evidence must NEVER
   // delete — it resolves to the safe side (noop / re-pull). This is the fix for files that came
   // back or got deleted on another device that hadn't finished syncing.
-  it("remote absent but NO removal event → noop (a listing gap must not delete the local copy)", () => {
+  it("remote absent, NO event and NOT authoritative → noop (a partial/incremental view must not delete)", () => {
     expect(decideAction({ base: B, localExists: true, remoteExists: false, localChanged: false, remoteChanged: false, mergeable: true }))
       .toBe("noop");
+  });
+
+  it("remote absent on an AUTHORITATIVE full walk → delete_local (real deletion, e.g. a folder trashed on Drive)", () => {
+    expect(decideAction({ base: B, localExists: true, remoteExists: false, localChanged: false, remoteChanged: false, mergeable: true, remoteAuthoritative: true }))
+      .toBe("delete_local");
+  });
+
+  it("EDIT BEATS DELETE even on an authoritative walk: remote absent but local changed → push", () => {
+    expect(decideAction({ base: B, localExists: true, remoteExists: false, localChanged: true, remoteChanged: false, mergeable: true, remoteAuthoritative: true }))
+      .toBe("push");
   });
 
   it("local absent but NO local-delete event → pull (re-download; never delete the remote)", () => {

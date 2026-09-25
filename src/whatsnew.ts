@@ -6,6 +6,18 @@ export interface ChangeEntry { version: string; sections: ChangeSection[]; }
 /** Release notes shown in the "What's new" dialog, newest first. */
 export const CHANGELOG: ChangeEntry[] = [
   {
+    version: "0.8.7",
+    sections: [
+      {
+        title: "Fixed — deleting a folder on Google Drive now removes it locally",
+        items: [
+          "When you delete a folder (or file) directly on Google Drive and run a full sync, it's now removed from your vault too. Before, a folder trashed on Drive didn't propagate because Drive doesn't emit a per-file event for the files inside it — a full sync now treats what's genuinely gone from Drive as deleted (soft-delete, reversible; a large batch still asks first).",
+          "This applies to a full sync (which reads Drive's complete state). Automatic/incremental syncs stay conservative — they only act on explicit change events — so a device that's merely behind never triggers a wrong deletion.",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.8.6",
     sections: [
       {

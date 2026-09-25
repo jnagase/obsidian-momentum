@@ -381,14 +381,15 @@ describe("mass-delete guard (Req 9.7, task 17)", () => {
 });
 
 describe("event-driven deletion — absence is never proof (anti-resurrection)", () => {
-  it("remote missing from the listing but with NO removal event → keeps the local file", async () => {
-    // Baseline exists (synced before), local file present & unchanged, but the remote isn't in
-    // the tree this run and no Changes event reported it removed → must NOT delete locally.
-    const v = makeVault({ "keep.md": "still here" });
-    const b = makeBaselines({ "keep.md": { fileId: "ghost", md5: D.hash("still here"), modifiedTime: "2020-01-01T00:00:00.000Z", base: "still here" } });
+  it("full walk is authoritative: a baselined file gone from Drive is deleted locally (folder trashed on Drive)", async () => {
+    // No remote file — e.g. its parent folder ("books") was trashed on Drive, so the child
+    // vanished from the walk and gets no per-file removal event. A full (authoritative) sync
+    // treats that absence as the real deletion it is and removes it locally (soft-delete).
+    const v = makeVault({ "books/intro.md": "chapter" });
+    const b = makeBaselines({ "books/intro.md": { fileId: "gone", md5: D.hash("chapter"), modifiedTime: "2020-01-01T00:00:00.000Z", base: "chapter", tagged: true } });
     const r = await run(v.fs, b.store, { confirmDelete: async () => true });
-    expect(r.deletedLocal).toBe(0);
-    expect(v.map.get("keep.md")).toBe("still here");
+    expect(r.deletedLocal).toBe(1);
+    expect(v.map.has("books/intro.md")).toBe(false);
   });
 
   it("local missing with NO explicit local delete → re-pulls instead of deleting the remote", async () => {

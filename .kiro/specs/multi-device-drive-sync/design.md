@@ -300,3 +300,24 @@ Estas são limitações **de projeto**, não bugs — documentadas para não ser
   O(arquivos) sequencial).
 - Scope OAuth `drive.file` (menor blast radius) em vez de `drive` completo.
 - Observabilidade estruturada (log JSONL rotativo por ciclo) para diagnosticar campo.
+
+
+---
+
+## Refinamento (0.8.7): deleção de PASTA no Drive
+
+O modelo "deleção só por evento" (Req 1) tinha um furo: apagar uma **pasta** no Drive
+lixeira a pasta, mas o Drive **não emite evento de remoção por-arquivo** para os arquivos
+dentro dela — eles apenas somem do walk (pai lixeirado). Resultado: não deletavam local.
+
+Correção — deleção passa a ter **dois modos**:
+- **Evento explícito** (qualquer sync): `removed`/`trashed` do Changes API, ou deleção
+  local capturada pelo watcher. Mantém o incremental/automático conservador.
+- **Ausência autoritativa** (`remoteAuthoritative`): quando um **full walk completo** (sem
+  truncamento/erro) não contém um arquivo com baseline e o local está inalterado, isso é
+  uma deleção real → `delete_local` (soft, com a guarda de massa). É o que propaga a pasta
+  apagada no Drive. Nunca vale para o caminho incremental/reconstruído (view parcial).
+
+`RemoteTree.truncated` sinaliza um walk incompleto (cap de enumeração) para que ausência
+nesse caso **não** seja tratada como deleção. Erro no walk aborta o sync (não gera view
+parcial autoritativa).

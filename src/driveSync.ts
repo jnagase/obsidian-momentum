@@ -1,6 +1,7 @@
 import {
   DriveFile,
   listFiles,
+  getFileMeta,
   downloadFile,
   createTextFile,
   updateTextFile,
@@ -61,6 +62,10 @@ export const DRIVE_MAX_DELETES_PER_RUN = 10;
  *  Drive) in a single cycle — a safety cap so a pathological state can't cause a trash storm. */
 export const DRIVE_MAX_CONSOLIDATE_PER_RUN = 20;
 
+/** Max Drive-side renames/moves mirrored into the vault in a single cycle — a safety cap so a bad
+ *  batch of stale identity tags can't drive a rename storm. Extras are deferred to the next run. */
+export const DRIVE_MAX_MOVES_PER_RUN = 50;
+
 /** Text extensions eligible for line-level 3-way merge. Others conflict-duplicate instead. */
 const MERGEABLE_EXT = new Set(["md", "txt", "csv", "json", "canvas", "css", "js", "ts", "yaml", "yml"]);
 /** Max size (bytes) eligible for merge. */
@@ -110,10 +115,11 @@ export type DriveConflictStrategy =
   | "newer-wins"   // whichever side has the newer modified time wins
   | "ask";         // ask the user per file (via a callback); falls back to keep-both
 
-// Drive is the source of truth. The default resolves a two-sided conflict by the shared clock
-// (Drive's modifiedTime): whoever wrote last wins. keep-both is still available for users who
-// prefer to never drop either side (it saves a .conflict copy instead).
-export const DEFAULT_CONFLICT_STRATEGY: DriveConflictStrategy = "newer-wins";
+// Default resolves a two-sided conflict by KEEPING BOTH — it never drops either side (the remote
+// is saved alongside as a .conflict copy). This is the safe default: "newer wins" (Drive's clock)
+// is available as an opt-in, but wall-clock LWW across devices can silently discard the genuinely
+// newer edit under clock skew, so it is not the default.
+export const DEFAULT_CONFLICT_STRATEGY: DriveConflictStrategy = "keep-both";
 
 /** Per-file resolution the `ask` strategy returns. */
 export type ConflictChoice = "local" | "remote" | "both";
@@ -461,6 +467,9 @@ export async function runDriveSync(args: {
   // (legacy / not yet stamped). When two DIFFERENT Drive files claim the SAME explicit
   // momentumPath, that's a multi-device duplicate race → consolidate non-destructively: keep the
   // newest, preserve the loser's content locally as a .conflict copy, then trash the loser.
+  // Endpoints reserved by a Drive-side move this cycle — excluded from the normal decision loop so
+  // a partially-applied move can never present as a duplicate; it just defers to the next run.
+  const movedPaths = new Set<string>();
   {
     const rawEntries: [string, DriveFile][] = [
       ...remoteByPath.entries(),
@@ -469,34 +478,43 @@ export async function runDriveSync(args: {
 
     // ---- DRIVE-SIDE MOVE PROPAGATION (Drive is the source of truth) ----------------------
     // A file whose stored momentumPath differs from its CURRENT tree path was renamed/moved on
-    // Drive. Mirror that into the vault (rename the local file to follow Drive) and realign the
-    // Drive tag so we don't re-detect the move forever. Only for a CONFIRMED same file: the
-    // baseline at the old path points to this exact Drive id. The rekeyed baseline keeps the OLD
-    // md5, so if the file's content ALSO changed on Drive, the normal loop still pulls it.
+    // Drive. Mirror that into the vault. Both endpoints are EXCLUDED from the normal loop this
+    // cycle (movedPaths), so a partial failure can only DEFER the move, never duplicate. Ordering
+    // is idempotent: local move → realign the Drive tag → only then rekey the baseline. Any failure
+    // leaves baseline[mp] intact, so the move is simply re-detected and retried next cycle. The
+    // rekeyed baseline keeps the OLD md5, so a concurrent content change is still pulled.
+    let moves = 0;
     for (const [treePath, f] of rawEntries) {
       if (args.shouldStop?.()) break;
       const mp = f.appProperties?.[MOMENTUM_PATH_KEY];
       if (!mp || mp === treePath) continue;
       const bFrom = baselines.get(mp);
       if (!bFrom || bFrom.fileId !== f.id) continue;
+      if (moves >= DRIVE_MAX_MOVES_PER_RUN) { result.notes.push(`Move propagation capped at ${DRIVE_MAX_MOVES_PER_RUN} this run.`); break; }
+      // The old path is vacated regardless. The destination is excluded ONLY if the move is
+      // deferred (failure below); on success it's left in so the normal loop can still pull the
+      // new content if the file changed on Drive as well as being renamed.
+      movedPaths.add(mp);
+      moves++;
       try {
         if (await fs.exists(mp)) {
           if (isBinaryName(treePath)) {
-            if (fs.readBinary && fs.writeBinary) { await fs.writeBinary(treePath, await fs.readBinary(mp)); await fs.trash(mp); }
+            if (!fs.readBinary || !fs.writeBinary) { movedPaths.add(treePath); result.notes.push(`Move of binary "${mp}" deferred (enable Sync binary files).`); continue; }
+            await fs.writeBinary(treePath, await fs.readBinary(mp));
+            await fs.trash(mp);
           } else {
             await fs.write(treePath, await fs.read(mp));
             await fs.trash(mp);
           }
         }
+        const updated = await setAppProperties(token, f.id, momentumProps(treePath, args.deviceId));
+        f.appProperties = updated.appProperties ?? { ...(f.appProperties ?? {}), [MOMENTUM_PATH_KEY]: treePath };
         baselines.remove(mp);
-        baselines.set(treePath, { ...bFrom, tagged: true }); // rekey; keep old md5 so a concurrent edit still pulls
-        try {
-          const updated = await setAppProperties(token, f.id, momentumProps(treePath, args.deviceId));
-          f.appProperties = updated.appProperties ?? { ...(f.appProperties ?? {}), [MOMENTUM_PATH_KEY]: treePath };
-        } catch { f.appProperties = { ...(f.appProperties ?? {}), [MOMENTUM_PATH_KEY]: treePath }; }
+        baselines.set(treePath, { ...bFrom, tagged: true });
         result.notes.push(`Drive move mirrored to the vault: "${mp}" → "${treePath}".`);
       } catch (e) {
-        result.errors.push(`move ${mp}->${treePath}: ${e instanceof Error ? e.message : String(e)}`);
+        movedPaths.add(treePath); // deferred → exclude the destination too so nothing can duplicate
+        result.errors.push(`move ${mp}->${treePath} (deferred, will retry): ${e instanceof Error ? e.message : String(e)}`);
       }
     }
 
@@ -522,8 +540,26 @@ export async function runDriveSync(args: {
       }
     }
 
+    // Consolidation TRASHES the extra copies on Drive — a destructive op — so a large batch is
+    // gated behind the same confirmation as a mass deletion (small batches proceed; content is
+    // always preserved first). A byte-identical duplicate (same md5 as the canonical) is trashed
+    // WITHOUT a .conflict copy, since keeping an identical copy is pure noise.
+    const totalLosers = [...dupLosers.values()].reduce((n, a) => n + a.length, 0);
+    let consolidationAllowed = true;
+    if (totalLosers > DRIVE_MAX_DELETES_PER_RUN && !confirmed) {
+      const ok = args.confirmDelete
+        ? await args.confirmDelete(`Momentum Drive: found ${totalLosers} duplicate files (same identity) to consolidate. The newest is kept; each differing extra copy is preserved locally as a .conflict, then the duplicate is trashed on Drive (reversible). Proceed?`)
+        : false;
+      if (!ok) {
+        consolidationAllowed = false;
+        result.blocked += totalLosers;
+        for (const [logical, losers] of dupLosers) result.issues.push(...losers.map(() => ({ path: logical, reason: "duplicate consolidation held — run Sync now to confirm", category: "held" as const })));
+        result.notes.push(`Duplicate consolidation withheld (${totalLosers} > ${DRIVE_MAX_DELETES_PER_RUN}); confirm with Sync now.`);
+      }
+    }
     let consolidated = 0;
-    for (const [logical, losers] of dupLosers) {
+    const groups = consolidationAllowed ? dupLosers : new Map<string, DriveFile[]>();
+    for (const [logical, losers] of groups) {
       const canonical = remoteByPath.get(logical);
       const b = baselines.get(logical);
       if (canonical && b && losers.some((l) => l.id === b.fileId)) {
@@ -536,21 +572,24 @@ export async function runDriveSync(args: {
           break;
         }
         try {
-          // Preserve the loser's content locally as a .conflict BEFORE trashing (never lose data).
+          const identical = !!loser.md5Checksum && !!canonical?.md5Checksum && loser.md5Checksum === canonical.md5Checksum;
           const isBin = isBinaryName(logical);
-          if (isBin && !fs.writeBinary) {
-            result.notes.push(`Duplicate for "${logical}" left as-is (binary; enable Sync binary files to consolidate).`);
-            continue; // can't safely preserve the binary → don't trash it
+          if (!identical) {
+            // Preserve the loser's content locally as a .conflict BEFORE trashing (never lose data).
+            if (isBin && !fs.writeBinary) {
+              result.notes.push(`Duplicate for "${logical}" left as-is (binary; enable Sync binary files to consolidate).`);
+              continue; // can't safely preserve the binary → don't trash it
+            }
+            const taken = new Set<string>();
+            let cName = conflictName(logical, (x) => taken.has(x));
+            while (await fs.exists(cName)) { taken.add(cName); cName = conflictName(logical, (x) => taken.has(x)); }
+            if (isBin) await fs.writeBinary!(cName, await downloadFile(token, loser.id));
+            else await fs.write(cName, new TextDecoder().decode(await downloadFile(token, loser.id)));
           }
-          const taken = new Set<string>();
-          let cName = conflictName(logical, (x) => taken.has(x));
-          while (await fs.exists(cName)) { taken.add(cName); cName = conflictName(logical, (x) => taken.has(x)); }
-          if (isBin) await fs.writeBinary!(cName, await downloadFile(token, loser.id));
-          else await fs.write(cName, new TextDecoder().decode(await downloadFile(token, loser.id)));
           await trashFile(token, loser.id);
           result.conflicted++;
-          result.issues.push({ path: logical, reason: "duplicate on Drive consolidated — kept newest, extra copy saved as .conflict", category: "conflict" });
-          result.notes.push(`Consolidated duplicate for "${logical}": extra Drive file ${loser.id} → .conflict + trash.`);
+          result.issues.push({ path: logical, reason: identical ? "identical duplicate on Drive removed (kept one copy)" : "duplicate on Drive consolidated — kept newest, extra copy saved as .conflict", category: "conflict" });
+          result.notes.push(`Consolidated duplicate for "${logical}": extra Drive file ${loser.id}${identical ? " (identical) → trash." : " → .conflict + trash."}`);
           consolidated++;
         } catch (e) {
           result.errors.push(`consolidate ${logical}: ${e instanceof Error ? e.message : String(e)}`);
@@ -565,6 +604,7 @@ export async function runDriveSync(args: {
 
   const localPaths = new Set(await fs.list());
   const allPaths = new Set<string>([...remoteByPath.keys(), ...localPaths]);
+  for (const m of movedPaths) allPaths.delete(m); // move endpoints are already reconciled this cycle
 
   // ---- ADMISSION (decide every file, then guard) ----------------------------------------
   // `create` = a brand-new file on the destination side (safe, non-destructive). The mass-change
@@ -1002,6 +1042,17 @@ async function this_push(
   let meta: DriveFile;
   let tagged = true;
   if (existing?.fileId) {
+    // Lost-update guard: re-check the remote right before overwriting. If it advanced past our
+    // baseline since we observed it (another device wrote during our run), don't clobber it — skip
+    // the push; next cycle sees remoteChanged and routes to merge/conflict.
+    try {
+      const cur = await getFileMeta(token, existing.fileId);
+      if (cur.md5Checksum && existing.md5 && cur.md5Checksum !== existing.md5) {
+        result.issues.push({ path, reason: "push skipped — remote changed during sync; reconciled next run", category: "held" });
+        result.notes.push(`Push of "${path}" skipped: remote advanced since baseline.`);
+        return;
+      }
+    } catch { /* best-effort re-check; fall through to overwrite if it fails */ }
     meta = await updateTextFile(token, existing.fileId, content);
     // Lazily stamp identity on a file created before this feature existed (once).
     if (!existing.tagged) {
@@ -1155,6 +1206,15 @@ async function this_pushBinary(
   let meta: DriveFile;
   let tagged = true;
   if (existing?.fileId) {
+    // Lost-update guard (see this_push): don't clobber a remote that advanced during our run.
+    try {
+      const cur = await getFileMeta(token, existing.fileId);
+      if (cur.md5Checksum && existing.md5 && cur.md5Checksum !== existing.md5) {
+        result.issues.push({ path, reason: "push skipped — remote changed during sync; reconciled next run", category: "held" });
+        result.notes.push(`Binary push of "${path}" skipped: remote advanced since baseline.`);
+        return;
+      }
+    } catch { /* best-effort */ }
     meta = await updateBinaryFile(token, existing.fileId, buf, baseOf(path));
     if (!existing.tagged) {
       try { meta = await setAppProperties(token, existing.fileId, props); }

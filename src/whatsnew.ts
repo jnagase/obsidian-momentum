@@ -6,6 +6,21 @@ export interface ChangeEntry { version: string; sections: ChangeSection[]; }
 /** Release notes shown in the "What's new" dialog, newest first. */
 export const CHANGELOG: ChangeEntry[] = [
   {
+    version: "0.8.6",
+    sections: [
+      {
+        title: "Improved — Google Drive sync robustness (beta)",
+        items: [
+          "Much steadier on flaky connections and large vaults: Drive requests now retry with backoff when Google rate-limits (429) or hiccups (5xx), instead of failing that file until the next sync.",
+          "Safer conflict default: \"keep both\" is the default again (never loses data). \"Newer wins\" is still there as an option, but across devices with slightly different clocks it can drop the genuinely newer edit — so it's opt-in.",
+          "A file being renamed on Drive can no longer momentarily duplicate if the network blips mid-operation — the rename is applied atomically or safely retried next sync.",
+          "A file you edited locally is never overwritten by a stale copy if another device wrote to it during the same sync; the change is reconciled next run instead.",
+          "Identical duplicate copies on Drive are now just removed (one kept), without leaving a redundant .conflict file behind.",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.8.5",
     sections: [
       {

@@ -2010,10 +2010,10 @@ class PASettingTab extends PluginSettingTab {
 
         new Setting(containerEl)
           .setName("Conflict resolution")
-          .setDesc("What happens when a file changed on both sides since the last sync. Newer wins follows drive's clock (the source of truth). Keep both never overwrites — it saves a .conflict copy instead.")
+          .setDesc("What happens when a file changed on both sides since the last sync. Keep both never loses data (saves a .conflict copy). Newer wins uses drive's clock, but across devices with skewed clocks it can drop the genuinely newer edit.")
           .addDropdown((d) => {
-            d.addOption("newer-wins", "Newer wins (recommended)");
-            d.addOption("keep-both", "Keep both (never lose either side)");
+            d.addOption("keep-both", "Keep both (recommended, never loses data)");
+            d.addOption("newer-wins", "Newer wins (drive's clock)");
             d.addOption("remote-wins", "Drive always wins");
             d.addOption("local-wins", "This device always wins");
             d.addOption("ask", "Ask me each time");

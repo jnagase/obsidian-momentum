@@ -1,4 +1,4 @@
-import { requestUrl } from "obsidian";
+import { requestUrl, RequestUrlParam, RequestUrlResponse } from "obsidian";
 
 // Google Drive API v3 client. Mirrors the conventions of googletasks.ts: every call uses
 // Obsidian's requestUrl with `throw: false` and checks status manually, so a failure carries
@@ -10,6 +10,31 @@ import { requestUrl } from "obsidian";
 
 const DRIVE = "https://www.googleapis.com/drive/v3";
 const UPLOAD = "https://www.googleapis.com/upload/drive/v3";
+
+/** Max automatic retries on a transient Drive failure (429 rate-limit / 5xx). */
+const DRIVE_MAX_RETRIES = 4;
+
+const sleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => { window.setTimeout(resolve, ms); });
+
+/**
+ * requestUrl with retry + exponential backoff (and jitter) on transient failures — 429 (rate
+ * limit) and 5xx. Honours a `Retry-After` header when present. Always uses `throw:false` so the
+ * caller keeps its existing status-based error handling; after the retries are exhausted the last
+ * response is returned unchanged. Drive rate-limits readily on a large-vault sync, so this turns a
+ * burst of hard failures into a brief wait.
+ */
+async function driveRequest(params: RequestUrlParam): Promise<RequestUrlResponse> {
+  for (let attempt = 0; ; attempt++) {
+    const r = await requestUrl({ ...params, throw: false });
+    const transient = r.status === 429 || (r.status >= 500 && r.status <= 599);
+    if (!transient || attempt >= DRIVE_MAX_RETRIES) return r;
+    const retryAfterRaw = r.headers?.["retry-after"] ?? r.headers?.["Retry-After"];
+    const retryAfterMs = Number(retryAfterRaw) > 0 ? Number(retryAfterRaw) * 1000 : 0;
+    const backoff = retryAfterMs || Math.min(1000 * 2 ** attempt, 16000);
+    await sleep(backoff + Math.floor(Math.random() * 300));
+  }
+}
 
 /**
  * Thrown by listChanges when the stored change cursor (startPageToken) is no longer valid
@@ -101,7 +126,7 @@ export async function listFiles(
         spaces: "drive",
         pageToken,
       });
-    const r = await requestUrl({ url, headers: { Authorization: `Bearer ${token}` }, throw: false });
+    const r = await driveRequest({ url, headers: { Authorization: `Bearer ${token}` }, throw: false });
     if (r.status >= 400) throw new Error(`Drive files.list failed: ${r.status}${fmtErr(r.text)}`);
     const j = r.json as { files?: DriveFile[]; nextPageToken?: string };
     if (j.files) out.push(...j.files);
@@ -113,7 +138,7 @@ export async function listFiles(
 /** Metadata for one file. */
 export async function getFileMeta(token: string, fileId: string): Promise<DriveFile> {
   const url = `${DRIVE}/files/${fileId}` + q({ fields: FILE_FIELDS });
-  const r = await requestUrl({ url, headers: { Authorization: `Bearer ${token}` }, throw: false });
+  const r = await driveRequest({ url, headers: { Authorization: `Bearer ${token}` }, throw: false });
   if (r.status >= 400) throw new Error(`Drive files.get(meta) failed: ${r.status}${fmtErr(r.text)}`);
   return r.json as DriveFile;
 }
@@ -121,7 +146,7 @@ export async function getFileMeta(token: string, fileId: string): Promise<DriveF
 /** Download a binary/text file's content (files.get?alt=media). Returns raw bytes. */
 export async function downloadFile(token: string, fileId: string): Promise<ArrayBuffer> {
   const url = `${DRIVE}/files/${fileId}` + q({ alt: "media" });
-  const r = await requestUrl({ url, headers: { Authorization: `Bearer ${token}` }, throw: false });
+  const r = await driveRequest({ url, headers: { Authorization: `Bearer ${token}` }, throw: false });
   if (r.status >= 400) throw new Error(`Drive files.get(media) failed: ${r.status}${fmtErr(r.text)}`);
   return r.arrayBuffer;
 }
@@ -132,7 +157,7 @@ export async function downloadFile(token: string, fileId: string): Promise<Array
  */
 export async function exportFile(token: string, fileId: string, mimeType: string): Promise<string> {
   const url = `${DRIVE}/files/${fileId}/export` + q({ mimeType });
-  const r = await requestUrl({ url, headers: { Authorization: `Bearer ${token}` }, throw: false });
+  const r = await driveRequest({ url, headers: { Authorization: `Bearer ${token}` }, throw: false });
   if (r.status >= 400) throw new Error(`Drive files.export failed: ${r.status}${fmtErr(r.text)}`);
   return r.text;
 }
@@ -158,7 +183,7 @@ export async function createTextFile(
     `--${boundary}\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n` +
     `${content}\r\n--${boundary}--`;
   const url = `${UPLOAD}/files` + q({ uploadType: "multipart", fields: FILE_FIELDS });
-  const r = await requestUrl({
+  const r = await driveRequest({
     url,
     method: "POST",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": `multipart/related; boundary=${boundary}` },
@@ -182,7 +207,7 @@ export async function createFolder(token: string, name: string, parentId?: strin
   const metadata: Record<string, unknown> = { name, mimeType: "application/vnd.google-apps.folder" };
   if (parentId) metadata.parents = [parentId];
   const url = `${DRIVE}/files` + q({ fields: FILE_FIELDS });
-  const r = await requestUrl({
+  const r = await driveRequest({
     url,
     method: "POST",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
@@ -206,7 +231,7 @@ export async function findChildFolder(token: string, name: string, parentId: str
 /** Overwrite an existing file's text content (media upload). Returns updated metadata. */
 export async function updateTextFile(token: string, fileId: string, content: string): Promise<DriveFile> {
   const url = `${UPLOAD}/files/${fileId}` + q({ uploadType: "media", fields: FILE_FIELDS });
-  const r = await requestUrl({
+  const r = await driveRequest({
     url,
     method: "PATCH",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "text/plain; charset=UTF-8" },
@@ -224,7 +249,7 @@ export async function updateTextFile(token: string, fileId: string, content: str
  */
 export async function setAppProperties(token: string, fileId: string, appProperties: Record<string, string>): Promise<DriveFile> {
   const url = `${DRIVE}/files/${fileId}` + q({ fields: FILE_FIELDS });
-  const r = await requestUrl({
+  const r = await driveRequest({
     url,
     method: "PATCH",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
@@ -271,7 +296,7 @@ export async function createBinaryFile(token: string, name: string, data: ArrayB
   if (parentId) metadata.parents = [parentId];
   if (appProperties) metadata.appProperties = appProperties;
   const url = `${UPLOAD}/files` + q({ uploadType: "multipart", fields: FILE_FIELDS });
-  const r = await requestUrl({
+  const r = await driveRequest({
     url, method: "POST",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": `multipart/related; boundary=${boundary}` },
     body: multipartBinaryBody(metadata, mimeForName(name), data, boundary),
@@ -284,7 +309,7 @@ export async function createBinaryFile(token: string, name: string, data: ArrayB
 /** Overwrite an existing file's binary content (media upload). Returns updated metadata. */
 export async function updateBinaryFile(token: string, fileId: string, data: ArrayBuffer, name: string): Promise<DriveFile> {
   const url = `${UPLOAD}/files/${fileId}` + q({ uploadType: "media", fields: FILE_FIELDS });
-  const r = await requestUrl({
+  const r = await driveRequest({
     url, method: "PATCH",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": mimeForName(name) },
     body: data,
@@ -297,7 +322,7 @@ export async function updateBinaryFile(token: string, fileId: string, data: Arra
 /** Move a file to the trash (soft delete — recoverable). */
 export async function trashFile(token: string, fileId: string): Promise<void> {
   const url = `${DRIVE}/files/${fileId}`;
-  const r = await requestUrl({
+  const r = await driveRequest({
     url,
     method: "PATCH",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
@@ -312,7 +337,7 @@ export async function trashFile(token: string, fileId: string): Promise<void> {
 /** Get the current change cursor ("synced up to here"). Store it; pass it to listChanges next. */
 export async function getStartPageToken(token: string): Promise<string> {
   const url = `${DRIVE}/changes/startPageToken`;
-  const r = await requestUrl({ url, headers: { Authorization: `Bearer ${token}` }, throw: false });
+  const r = await driveRequest({ url, headers: { Authorization: `Bearer ${token}` }, throw: false });
   if (r.status >= 400) throw new Error(`Drive changes.getStartPageToken failed: ${r.status}${fmtErr(r.text)}`);
   return (r.json as { startPageToken: string }).startPageToken;
 }
@@ -340,7 +365,7 @@ export async function listChanges(
         fields: `newStartPageToken,nextPageToken,changes(fileId,removed,file(${FILE_FIELDS}))`,
         pageSize: "1000",
       });
-    const r = await requestUrl({ url, headers: { Authorization: `Bearer ${token}` }, throw: false });
+    const r = await driveRequest({ url, headers: { Authorization: `Bearer ${token}` }, throw: false });
     // A 400 here almost always means the stored page token expired/became invalid. Signal it
     // distinctly so the engine can reseed the cursor with a full reconciliation (no data loss).
     if (r.status === 400) throw new InvalidDriveCursorError(`Drive changes.list rejected the cursor: 400${fmtErr(r.text)}`);

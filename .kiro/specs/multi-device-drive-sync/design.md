@@ -253,3 +253,50 @@ entrada no `whatsnew.ts`. Nada é commitado/publicado sem ordem explícita do us
   durante o sync".
 - **Migração:** guardada por schema, não-destrutiva, com fallback a full-scan que nunca
   apaga por ausência — então um upgrade não pode disparar deleção em massa.
+
+
+---
+
+## Limitações conhecidas (assumidas conscientemente)
+
+Estas são limitações **de projeto**, não bugs — documentadas para não serem
+"descobertas" em campo:
+
+1. **Estado por-dispositivo (baseline/cursor/tombstones em `data.json`, não sincronizado).**
+   Se o `data.json` de um aparelho for perdido/resetado (reinstalação, novo aparelho,
+   corrupção), ele fica sem baseline e sem cursor → vê arquivos locais como "novos" e pode
+   **re-empurrar arquivos que foram deletados** em outro lugar (o evento de remoção ele
+   nunca viu). `appProperties` resolve **identidade**, não **existência-pós-deleção**. O fix
+   estrutural seria um tombstone/version log compartilhado no remoto — deliberadamente
+   evitado (o remotely-save tentou e removeu). Mitigação: backup antes de ativar; e, ao
+   trocar de aparelho, deixar o Drive semear o vault em vez de empurrar um vault "novo".
+
+2. **Deleção com o app fechado não propaga.** A evidência de deleção local vem do evento
+   `delete`/`rename` do vault (só dispara com o Obsidian aberto). Deletar via Finder/Explorer
+   com o app fechado → no boot, o arquivo ausente + presente no Drive vira **re-pull** (o
+   arquivo volta localmente). Orientação: deletar/renomear **de dentro do Obsidian**.
+
+3. **`newer-wins` é LWW em wall-clock.** Compara `mtime` local (relógio do aparelho) com
+   `modifiedTime` do Drive (relógio do servidor). Sob skew de relógio entre aparelhos, pode
+   descartar a edição *genuinamente* mais nova. Por isso o **default é `keep-both`** (nunca
+   perde); `newer-wins` é opt-in consciente.
+
+4. **Sync não é transacional.** É uma sequência de chamadas REST independentes; uma queda no
+   meio deixa parte aplicada. O cursor só avança em ciclo limpo, e cada arquivo grava seu
+   baseline ao ser aplicado, então o próximo ciclo reconcilia o resto. Operações compostas
+   (move) são idempotentes e re-tentáveis; seus dois endpoints são excluídos do ciclo enquanto
+   pendentes, para nunca duplicar.
+
+5. **Lock multi-dispositivo é advisório (best-effort), não exclusão mútua real.** Dois
+   aparelhos sincronizando a MESMA pasta ao mesmo tempo é o cenário mais hostil. A segurança
+   real vem de identidade estável + keep-both + deleção-por-evento, não do lock. Recomendação
+   de uso desta beta: manter o Drive sync ativo em **um aparelho por vez** enquanto o modelo
+   é validado em campo.
+
+## Fora de escopo desta fase (candidatos futuros)
+- Separar `runDriveSync` em **plan puro → apply com efeitos** (hoje move/consolidação fazem
+  I/O na fase de observação).
+- Batching / paralelismo controlado das chamadas Drive (primeiro sync de vault grande é
+  O(arquivos) sequencial).
+- Scope OAuth `drive.file` (menor blast radius) em vez de `drive` completo.
+- Observabilidade estruturada (log JSONL rotativo por ciclo) para diagnosticar campo.

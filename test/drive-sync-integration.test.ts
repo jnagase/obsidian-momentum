@@ -60,7 +60,9 @@ const D = vi.hoisted(() => {
   };
   const live = (): F[] => [...files.values()].filter((f) => !f.trashed);
   const byName = (name: string): F | undefined => live().find((f) => f.name === name);
-  return { files, FOLDER, hash, hashBuf, nextId, reset, seed, seedFolder, seedBinary, live, byName };
+  const flags = { failSetAppProps: false, bumpMetaMd5: false };
+  const reset2 = (): void => { reset(); flags.failSetAppProps = false; flags.bumpMetaMd5 = false; };
+  return { files, FOLDER, hash, hashBuf, nextId, reset: reset2, seed, seedFolder, seedBinary, live, byName, flags };
 });
 
 vi.mock("../src/googledrive", () => {
@@ -80,7 +82,11 @@ vi.mock("../src/googledrive", () => {
       }
       return list.map(meta);
     },
-    getFileMeta: async (_t: string, id: string) => meta(D.files.get(id) as F),
+    getFileMeta: async (_t: string, id: string) => {
+      const m = meta(D.files.get(id) as F);
+      if (D.flags.bumpMetaMd5) m.md5Checksum = `${m.md5Checksum ?? ""}X`; // simulate the remote advancing mid-run
+      return m;
+    },
     downloadFile: async (_t: string, id: string) => {
       const f = D.files.get(id);
       if (f?.bin) return f.bin.buffer.slice(f.bin.byteOffset, f.bin.byteOffset + f.bin.byteLength);
@@ -109,6 +115,7 @@ vi.mock("../src/googledrive", () => {
       return meta(f);
     },
     setAppProperties: async (_t: string, id: string, appProperties: Record<string, string>) => {
+      if (D.flags.failSetAppProps) throw new Error("setAppProperties: simulated transient failure");
       const f = D.files.get(id);
       if (!f) throw new Error(`setAppProperties: no file ${id}`);
       f.appProperties = { ...(f.appProperties ?? {}), ...appProperties };
@@ -435,6 +442,47 @@ describe("stable identity via appProperties.momentumPath (Req 2, Phase 5)", () =
     expect(f?.appProperties?.momentumPath).toBe("fresh.md");
     expect(f?.appProperties?.momentumOrigin).toBe("dev-1");
     expect(b.m.get("fresh.md")?.tagged).toBe(true);
+  });
+
+  it("a Drive rename whose tag-realign fails is deferred (no duplicate), then completes next run", async () => {
+    const id = D.seed("renamed.md", "content", { appProperties: { momentumPath: "note.md" } });
+    const v = makeVault({ "note.md": "content" });
+    const b = makeBaselines({ "note.md": { fileId: id, md5: D.hash("content"), modifiedTime: "2020-01-01T00:00:00.000Z", base: "content", tagged: true } });
+    D.flags.failSetAppProps = true;
+    await run(v.fs, b.store, { deviceId: "dev-1" });
+    // No duplicate: at most one of the two endpoints exists locally, and the baseline stayed at
+    // the old path so the move is retried (not lost).
+    expect([...v.map.keys()].filter((n) => n === "note.md" || n === "renamed.md").length).toBeLessThanOrEqual(1);
+    expect(b.m.has("note.md")).toBe(true);
+    // Next run (failure cleared) completes the move.
+    D.flags.failSetAppProps = false;
+    await run(v.fs, b.store, { deviceId: "dev-1" });
+    expect(v.map.get("renamed.md")).toBe("content");
+    expect(v.map.has("note.md")).toBe(false);
+    expect(b.m.get("renamed.md")?.fileId).toBe(id);
+    expect(b.m.has("note.md")).toBe(false);
+  });
+
+  it("lost-update guard: skips the overwrite when the remote advanced during the run", async () => {
+    const id = D.seed("note.md", "v1", { appProperties: { momentumPath: "note.md" } });
+    const v = makeVault({ "note.md": "v2" }); // local edited since baseline
+    const b = makeBaselines({ "note.md": { fileId: id, md5: D.hash("v1"), modifiedTime: "2020-01-01T00:00:00.000Z", base: "v1", tagged: true } });
+    D.flags.bumpMetaMd5 = true; // getFileMeta reports a different md5 than the walk → remote moved mid-run
+    const r = await run(v.fs, b.store);
+    expect(r.pushed).toBe(0);
+    expect(D.byName("note.md")?.content).toBe("v1"); // NOT clobbered with v2
+    expect(r.issues.some((i) => i.reason.includes("push skipped"))).toBe(true);
+  });
+
+  it("removes an identical duplicate without creating a .conflict copy", async () => {
+    const older = D.seed("dup.md", "SAME", { appProperties: { momentumPath: "dup.md" }, modifiedTime: "2020-01-01T00:00:00.000Z" });
+    D.seed("dup.md", "SAME", { appProperties: { momentumPath: "dup.md" }, modifiedTime: "2024-01-01T00:00:00.000Z" });
+    const v = makeVault();
+    const b = makeBaselines();
+    await run(v.fs, b.store);
+    expect(D.files.get(older)?.trashed).toBe(true);
+    expect(v.map.has("dup.conflict.md")).toBe(false); // identical → no .conflict noise
+    expect(v.map.get("dup.md")).toBe("SAME");
   });
 
   it("consolidates two Drive files sharing the same momentumPath — keeps newest, saves loser as .conflict", async () => {

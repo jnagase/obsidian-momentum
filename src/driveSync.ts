@@ -466,6 +466,40 @@ export async function runDriveSync(args: {
       ...remoteByPath.entries(),
       ...remoteDups.map((d) => [d.rel, d.file] as [string, DriveFile]),
     ];
+
+    // ---- DRIVE-SIDE MOVE PROPAGATION (Drive is the source of truth) ----------------------
+    // A file whose stored momentumPath differs from its CURRENT tree path was renamed/moved on
+    // Drive. Mirror that into the vault (rename the local file to follow Drive) and realign the
+    // Drive tag so we don't re-detect the move forever. Only for a CONFIRMED same file: the
+    // baseline at the old path points to this exact Drive id. The rekeyed baseline keeps the OLD
+    // md5, so if the file's content ALSO changed on Drive, the normal loop still pulls it.
+    for (const [treePath, f] of rawEntries) {
+      if (args.shouldStop?.()) break;
+      const mp = f.appProperties?.[MOMENTUM_PATH_KEY];
+      if (!mp || mp === treePath) continue;
+      const bFrom = baselines.get(mp);
+      if (!bFrom || bFrom.fileId !== f.id) continue;
+      try {
+        if (await fs.exists(mp)) {
+          if (isBinaryName(treePath)) {
+            if (fs.readBinary && fs.writeBinary) { await fs.writeBinary(treePath, await fs.readBinary(mp)); await fs.trash(mp); }
+          } else {
+            await fs.write(treePath, await fs.read(mp));
+            await fs.trash(mp);
+          }
+        }
+        baselines.remove(mp);
+        baselines.set(treePath, { ...bFrom, tagged: true }); // rekey; keep old md5 so a concurrent edit still pulls
+        try {
+          const updated = await setAppProperties(token, f.id, momentumProps(treePath, args.deviceId));
+          f.appProperties = updated.appProperties ?? { ...(f.appProperties ?? {}), [MOMENTUM_PATH_KEY]: treePath };
+        } catch { f.appProperties = { ...(f.appProperties ?? {}), [MOMENTUM_PATH_KEY]: treePath }; }
+        result.notes.push(`Drive move mirrored to the vault: "${mp}" → "${treePath}".`);
+      } catch (e) {
+        result.errors.push(`move ${mp}->${treePath}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+
     const dupLosers = new Map<string, DriveFile[]>();
     remoteByPath = new Map<string, DriveFile>();
     for (const [treePath, f] of rawEntries) {

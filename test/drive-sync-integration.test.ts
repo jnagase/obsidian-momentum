@@ -399,19 +399,32 @@ describe("event-driven deletion — absence is never proof (anti-resurrection)",
 });
 
 describe("stable identity via appProperties.momentumPath (Req 2, Phase 5)", () => {
-  it("a file renamed on Drive is matched by momentumPath — no duplicate in the vault", async () => {
-    // Drive file's tree name is "renamed.md" but it carries momentumPath "note.md" (renamed on
-    // Drive). Local + baseline are at "note.md" → must be recognised as the same file, not pulled
-    // in again under the new name.
+  it("a file renamed on Drive is mirrored into the vault (move, not duplicate)", async () => {
+    // Drive file's tree name is "renamed.md" but it still carries momentumPath "note.md" (it was
+    // renamed on Drive). Drive is the source of truth → the vault follows: note.md becomes
+    // renamed.md, no duplicate, and the Drive tag is realigned to the new path.
     const id = D.seed("renamed.md", "content", { appProperties: { momentumPath: "note.md" } });
     const v = makeVault({ "note.md": "content" });
     const b = makeBaselines({ "note.md": { fileId: id, md5: D.hash("content"), modifiedTime: "2020-01-01T00:00:00.000Z", base: "content", tagged: true } });
-    const r = await run(v.fs, b.store);
-    expect(r.pulled).toBe(0);
-    expect(r.pushed).toBe(0);
+    const r = await run(v.fs, b.store, { deviceId: "dev-1" });
+    expect(v.map.has("note.md")).toBe(false);            // old local name gone
+    expect(v.map.get("renamed.md")).toBe("content");     // moved to the new name
+    expect(b.m.has("note.md")).toBe(false);              // baseline rekeyed
+    expect(b.m.get("renamed.md")?.fileId).toBe(id);
+    expect(D.files.get(id)?.appProperties?.momentumPath).toBe("renamed.md"); // Drive tag realigned
     expect(r.conflicted).toBe(0);
-    expect(v.map.has("renamed.md")).toBe(false);
-    expect(v.map.get("note.md")).toBe("content");
+  });
+
+  it("mirrors a Drive rename AND pulls the new content when it also changed", async () => {
+    // The file was renamed on Drive AND its content changed. The vault should end up at the new
+    // path with the new content (rekeyed baseline keeps the old md5, so the loop pulls).
+    const id = D.seed("renamed.md", "NEW BODY", { appProperties: { momentumPath: "note.md" } });
+    const v = makeVault({ "note.md": "OLD BODY" });
+    const b = makeBaselines({ "note.md": { fileId: id, md5: D.hash("OLD BODY"), modifiedTime: "2020-01-01T00:00:00.000Z", base: "OLD BODY", tagged: true } });
+    const r = await run(v.fs, b.store, { deviceId: "dev-1" });
+    expect(v.map.has("note.md")).toBe(false);
+    expect(v.map.get("renamed.md")).toBe("NEW BODY");
+    expect(r.pulled).toBe(1);
   });
 
   it("stamps momentumPath on a newly pushed file", async () => {

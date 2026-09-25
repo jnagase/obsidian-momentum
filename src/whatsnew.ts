@@ -6,6 +6,17 @@ export interface ChangeEntry { version: string; sections: ChangeSection[]; }
 /** Release notes shown in the "What's new" dialog, newest first. */
 export const CHANGELOG: ChangeEntry[] = [
   {
+    version: "0.8.5",
+    sections: [
+      {
+        title: "Improved — Google Drive sync (beta)",
+        items: [
+          "Renaming or moving a file directly on Google Drive now flows into your vault: the file is renamed/moved to match Drive (the source of truth) instead of just being left under its old name. No duplicate, and if the content changed too it's pulled as well.",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.8.4",
     sections: [
       {

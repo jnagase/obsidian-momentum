@@ -46,6 +46,7 @@ interface PASettings {
   driveSyncOnChange?: boolean;    // event-driven: sync (debounced) when vault files change
   driveSyncBinaries?: boolean;    // include binary files (real upload/download) instead of skipping
   driveIncremental?: boolean;     // use Changes API to skip the full scan when remote is unchanged
+  driveScopeDefaultMigrated?: boolean; // one-time: flipped the stale "Drive" default scope to whole vault
   driveDeviceId?: string;         // stable per-device id for the multi-device Drive lock
   driveLastSync?: DriveSyncSummary; // persisted summary of the last sync (status panel)
   // Momentum Pro (one-time unlock; license key validated against the store, see pro.ts).
@@ -73,17 +74,18 @@ const DEFAULT_SETTINGS: PASettings = {
   driveToken: null,
   driveFolderId: "",
   driveFolderName: "",
-  driveMirrorDir: "Drive",
+  driveMirrorDir: "", // "" = whole vault (the safe, obvious default; a fresh vault has no "Drive/" folder)
   driveSyncInterval: 0,
   driveBaselines: {},
   driveLocalDeletes: {},
   driveDeclinedDeletions: {},
   driveCursor: "",
   driveConflictStrategy: DEFAULT_CONFLICT_STRATEGY,
-  driveSyncOnStartup: false,
-  driveSyncOnChange: false,
-  driveSyncBinaries: false,
-  driveIncremental: false,
+  driveSyncOnStartup: true,   // on by default: keep devices in step without the user opting in
+  driveSyncOnChange: true,    // on by default: edits flow automatically (debounced, incremental)
+  driveSyncBinaries: false,   // Pro-gated; stays off until Pro is active and the user turns it on
+  driveIncremental: true,     // on by default: fast change-check, auto-falls back to a full scan
+  driveScopeDefaultMigrated: false,
 };
 const LEGACY_DATA_ROOT = "Personal Assistant";
 /**
@@ -132,6 +134,19 @@ export default class MomentumPlugin extends Plugin implements PAHost {
     }
     setDataRoot(this.settings.dataRoot);
     this.store = new PADataStore(this.app);
+
+    // One-time (transparent): the old default local Drive scope was a folder literally named
+    // "Drive". On a fresh vault with no such folder that silently synced NOTHING. Flip that stale
+    // default to "whole vault" — but ONLY when there's no local "Drive" folder, so anyone who
+    // deliberately mirrors a real "Drive" folder keeps it. Guarded so it runs once.
+    if (!this.settings.driveScopeDefaultMigrated) {
+      if (this.settings.driveMirrorDir === "Drive"
+          && !(this.app.vault.getAbstractFileByPath("Drive") instanceof TFolder)) {
+        this.settings.driveMirrorDir = "";
+      }
+      this.settings.driveScopeDefaultMigrated = true;
+      await this.saveSettings();
+    }
 
     this.registerView(VIEW_TYPE_PA, (leaf) => new PAView(leaf, this.store, this, this.manifest.name));
     this.registerView(VIEW_TYPE_PA_NAV, (leaf) => new PANavView(leaf, this, this.manifest.name));
@@ -792,7 +807,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
   private driveViewConfig(): DriveViewConfig {
     return {
       getToken: () => this.driveAccessToken(),
-      mirrorDir: () => this.settings.driveMirrorDir ?? "Drive",
+      mirrorDir: () => this.settings.driveMirrorDir ?? "",
       driveFolderId: () => this.settings.driveFolderId ?? "",
       dataRoot: () => this.settings.dataRoot ?? "",
       syncNow: (onProgress, incremental) => this.syncGoogleDrive(true, onProgress, incremental),
@@ -822,7 +837,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
    *  the path is outside the Drive sync scope. Used to record explicit local deletions. */
   private driveRelKey(path: string): string | null {
     if (!this.driveInScope(path)) return null;
-    const raw = this.settings.driveMirrorDir ?? "Drive";
+    const raw = this.settings.driveMirrorDir ?? "";
     const base = raw === "" ? "" : normalizePath(raw);
     return base ? path.slice(base.length + 1) : path;
   }
@@ -843,7 +858,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
    * and the status panel so both always agree on what syncs. See driveVaultFS for the rules.
    */
   private driveInScope(path: string): boolean {
-    const raw = this.settings.driveMirrorDir ?? "Drive";
+    const raw = this.settings.driveMirrorDir ?? "";
     const base = raw === "" ? "" : normalizePath(raw); // "" = whole vault
     if (base) return path === base || path.startsWith(`${base}/`);
     const dataRoot = normalizePath(this.settings.dataRoot || "");
@@ -859,7 +874,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
   }
 
   private driveVaultFS(): VaultFS {
-    const raw = this.settings.driveMirrorDir ?? "Drive";
+    const raw = this.settings.driveMirrorDir ?? "";
     const base = raw === "" ? "" : normalizePath(raw); // "" = whole vault
     const toFull = (rel: string) => normalizePath(base ? `${base}/${rel}` : rel);
     const inScope = (path: string): boolean => this.driveInScope(path);
@@ -1014,7 +1029,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       });
       this.settings.driveLastSync = {
         time: new Date().toISOString(),
-        scope: this.settings.driveMirrorDir === "" ? "whole vault" : (this.settings.driveMirrorDir || "Drive"),
+        scope: (this.settings.driveMirrorDir ?? "") === "" ? "whole vault" : this.settings.driveMirrorDir!,
         pushed: result.pushed, pulled: result.pulled, merged: result.merged, conflicted: result.conflicted,
         deletedLocal: result.deletedLocal, deletedRemote: result.deletedRemote, skippedBinary: result.skippedBinary,
         blocked: result.blocked, errorCount: result.errors.length,
@@ -1068,7 +1083,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
   private async writeDriveDebugLog(result: DriveSyncResult | null, fatal?: string): Promise<void> {
     try {
       const path = `${this.settings.dataRoot}/Config/google-drive-debug.md`;
-      const scope = this.settings.driveMirrorDir === "" ? "whole vault" : (this.settings.driveMirrorDir || "Drive");
+      const scope = (this.settings.driveMirrorDir ?? "") === "" ? "whole vault" : this.settings.driveMirrorDir;
       const lines: string[] = [];
       lines.push(`## ${new Date().toISOString()}`);
       lines.push(`- scope: ${scope} · driveFolder: ${this.settings.driveFolderName || "My Drive root"} (${this.settings.driveFolderId || "root"})`);
@@ -1123,7 +1138,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
   /** Instant Drive status for the File Manager panel: last-sync summary + compliance counts
    *  (baselines that are still in-scope local files vs total in-scope files). No network. */
   getDriveStatus(): { last?: DriveSyncSummary; tracked: number; inScope: number; logPath: string; files: { path: string; status: "synced" | "local"; at?: string; mtime: number }[] } {
-    const raw = this.settings.driveMirrorDir ?? "Drive";
+    const raw = this.settings.driveMirrorDir ?? "";
     const base = raw === "" ? "" : normalizePath(raw);
     const inScope: { rel: string; mtime: number }[] = [];
     for (const f of this.app.vault.getFiles()) {
@@ -1154,7 +1169,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
 
   /** Is `path` inside the current Drive sync scope (a subfolder, or whole vault minus dataRoot)? */
   private pathInDriveScope(path: string): boolean {
-    const raw = this.settings.driveMirrorDir ?? "Drive";
+    const raw = this.settings.driveMirrorDir ?? "";
     if (raw === "") {
       const dr = this.settings.dataRoot || "";
       return !(dr && (path === dr || path.startsWith(`${dr}/`)));
@@ -1918,27 +1933,24 @@ class PASettingTab extends PluginSettingTab {
     const driveConnected = !!this.plugin.settings.driveToken;
     new Setting(containerEl).setName("Google Drive (beta)").setHeading();
 
-    // Source-of-truth + backup warning: Drive wins, and its changes (including deletions) flow to
-    // every device. Make the user read this before enabling, and tell them to back up first.
-    const driveWarn = containerEl.createDiv({ cls: "pa-drive-sot-warning" });
-    driveWarn.createEl("strong", { text: "Google Drive is the source of truth." });
-    driveWarn.createEl("span", {
-      text: " When sync is on, changes made on Drive win and flow to every device — including deletions "
-        + "(delete a file on Drive and it's removed on your devices too). Back up your vault before you "
-        + "enable this. Still beta.",
+    // A calm, informational callout (not an alarming red box): Drive is authoritative and its
+    // changes — including deletions — flow to every device, so a backup before the first sync is
+    // wise. Styled neutrally (see .pa-drive-sot-warning in styles.css).
+    const driveInfo = containerEl.createDiv({ cls: "pa-drive-sot-warning" });
+    driveInfo.createEl("strong", { text: "Google Drive is the source of truth." });
+    driveInfo.createEl("span", {
+      text: " When sync is on, changes made on Drive win and flow to every device — including "
+        + "deletions. It's a good idea to back up your vault before the first sync.",
     });
 
-    // Scope A: text notes sync on every plan, so the controls are always available. Only real
-    // binary sync is gated (the "Sync binary files" toggle below), pointing at Momentum pro.
     const driveProOn = this.plugin.isProEnabled();
 
     new Setting(containerEl)
       .setName("Enable Google Drive (beta)")
       .setDesc(
-        "Browse and sync files between a drive folder and a vault folder. Uses a SEPARATE Google " +
-        "sign-in from Tasks. Full drive access is in Google verification — until it completes, " +
-        "connect with a test-user account. Text notes sync on every plan; syncing images, pdfs and " +
-        "other binaries is a Momentum pro feature (free during the beta).",
+        "Two-way sync between Google Drive and your vault, on a SEPARATE Google sign-in from Tasks. " +
+        "Text notes always sync; images, PDFs and other file types are a Google Drive Pro feature " +
+        "(free during the beta).",
       )
       .addToggle((t) =>
         t.setValue(!!this.plugin.settings.googleDriveEnabled).onChange(async (v) => {
@@ -1965,58 +1977,87 @@ class PASettingTab extends PluginSettingTab {
           }
         });
 
-      // Local scope: a vault folder, or the whole vault.
-      new Setting(containerEl)
-        .setName("Vault folder to sync")
-        .setDesc("Which local folder mirrors drive. Choose \"whole vault\" to sync everything (the plugin's own data folder is excluded to stay safe).")
-        .addDropdown((d) => {
-          d.addOption("", "🗂️ whole vault");
-          const cur = this.plugin.settings.driveMirrorDir ?? "Drive";
-          const folders = this.app.vault.getRoot().children
-            .filter((c): c is TFolder => c instanceof TFolder)
-            .map((f) => f.name)
-            .sort((a, b) => a.localeCompare(b));
-          if (cur && !folders.includes(cur)) folders.push(cur); // keep a custom/nested value visible
-          for (const name of folders) d.addOption(name, name);
-          d.setValue(cur);
-          d.onChange(async (v) => {
-            this.plugin.settings.driveMirrorDir = v; // "" = whole vault
-            await this.plugin.saveSettings();
-          });
-        });
-
-      // Remote scope: which Drive folder, via the in-plugin picker.
-      new Setting(containerEl)
-        .setName("Google Drive folder")
-        .setDesc(`Currently: ${this.plugin.settings.driveFolderName || "My Drive (root)"}. Files sync into this folder on Drive.`)
-        .addButton((b) =>
-          b.setButtonText("Choose folder…").onClick(() => {
-            void (async () => {
-              const token = await this.plugin.getDriveToken();
-              if (!token) { new Notice("Connect Google Drive first."); return; }
-              new DriveFolderPicker(this.app, token, async (choice) => {
-                this.plugin.settings.driveFolderId = choice.id;
-                this.plugin.settings.driveFolderName = choice.name;
-                await this.plugin.saveSettings();
-                rerender();
-              }).open();
-            })();
-          })
-        );
-
-      new Setting(containerEl)
-        .setName("Open drive browser")
-        .setDesc("Two-column view: drive files on one side, vault files on the other.")
-        .addButton((b) =>
-          b.setButtonText("Open").setCta().onClick(() => { void this.plugin.activateDriveView(); })
-        );
-
+      // Everything below needs a connection; keep it hidden until connected so the panel isn't
+      // cluttered with controls that can't work yet.
       if (driveConnected) {
+        // ── What syncs ────────────────────────────────────────────────────
+        new Setting(containerEl).setName("What syncs").setHeading();
+
         new Setting(containerEl)
-          .setName("Drive auto-sync interval")
-          .setDesc("How often to sync the drive folder with the vault mirror folder.")
+          .setName("Vault folder to sync")
+          .setDesc("The local folder mirrored to drive. \"whole vault\" syncs everything (the plugin's own data folder is excluded to stay safe).")
           .addDropdown((d) => {
-            d.addOption("0", "Manual only");
+            d.addOption("", "🗂️ whole vault");
+            const cur = this.plugin.settings.driveMirrorDir ?? "";
+            const folders = this.app.vault.getRoot().children
+              .filter((c): c is TFolder => c instanceof TFolder)
+              .map((f) => f.name)
+              .sort((a, b) => a.localeCompare(b));
+            if (cur && !folders.includes(cur)) folders.push(cur); // keep a custom/nested value visible
+            for (const name of folders) d.addOption(name, name);
+            d.setValue(cur);
+            d.onChange(async (v) => {
+              this.plugin.settings.driveMirrorDir = v; // "" = whole vault
+              await this.plugin.saveSettings();
+            });
+          });
+
+        new Setting(containerEl)
+          .setName("Google Drive folder")
+          .setDesc(`Currently: ${this.plugin.settings.driveFolderName || "My Drive (root)"}. Files sync into this folder on Drive.`)
+          .addButton((b) =>
+            b.setButtonText("Choose folder…").onClick(() => {
+              void (async () => {
+                const token = await this.plugin.getDriveToken();
+                if (!token) { new Notice("Connect Google Drive first."); return; }
+                new DriveFolderPicker(this.app, token, async (choice) => {
+                  this.plugin.settings.driveFolderId = choice.id;
+                  this.plugin.settings.driveFolderName = choice.name;
+                  await this.plugin.saveSettings();
+                  rerender();
+                }).open();
+              })();
+            })
+          );
+
+        // ── Automatic sync ────────────────────────────────────────────────
+        new Setting(containerEl).setName("Automatic sync").setHeading();
+
+        new Setting(containerEl)
+          .setName("Sync on startup")
+          .setDesc("Sync a few seconds after Obsidian launches (incremental — fast).")
+          .addToggle((t) =>
+            t.setValue(!!this.plugin.settings.driveSyncOnStartup).onChange(async (v) => {
+              this.plugin.settings.driveSyncOnStartup = v;
+              await this.plugin.saveSettings();
+            })
+          );
+
+        new Setting(containerEl)
+          .setName("Sync on change")
+          .setDesc("Sync a few seconds after you edit files in scope (event-driven, debounced).")
+          .addToggle((t) =>
+            t.setValue(!!this.plugin.settings.driveSyncOnChange).onChange(async (v) => {
+              this.plugin.settings.driveSyncOnChange = v;
+              await this.plugin.saveSettings();
+            })
+          );
+
+        new Setting(containerEl)
+          .setName("Incremental sync")
+          .setDesc("Skip the full scan when nothing changed on drive (faster). Falls back to a full scan on any remote change.")
+          .addToggle((t) =>
+            t.setValue(!!this.plugin.settings.driveIncremental).onChange(async (v) => {
+              this.plugin.settings.driveIncremental = v;
+              await this.plugin.saveSettings();
+            })
+          );
+
+        new Setting(containerEl)
+          .setName("Auto-sync interval")
+          .setDesc("Also sync on a timer, on top of startup/on-change.")
+          .addDropdown((d) => {
+            d.addOption("0", "Off (rely on startup/on-change)");
             d.addOption("5", "Every 5 minutes");
             d.addOption("15", "Every 15 minutes");
             d.addOption("60", "Every hour");
@@ -2029,6 +2070,23 @@ class PASettingTab extends PluginSettingTab {
               this.plugin.resetDriveSyncInterval();
             });
           });
+
+        // ── Advanced ──────────────────────────────────────────────────────
+        new Setting(containerEl).setName("Advanced").setHeading();
+
+        new Setting(containerEl)
+          .setName("Sync Google Drive pro")
+          .setDesc(driveProOn
+            ? "Pro is active: images, PDFs and every other file type sync as real uploads/downloads. Turn off to sync text and Markdown only."
+            : "Free syncs your text and Markdown notes. Pro adds images, PDFs and every other file type (real binary upload/download). Unlock pro in the section below.")
+          .addToggle((t) =>
+            t.setValue(driveProOn && !!this.plugin.settings.driveSyncBinaries)
+              .setDisabled(!driveProOn)
+              .onChange(async (v) => {
+                this.plugin.settings.driveSyncBinaries = v;
+                await this.plugin.saveSettings();
+              })
+          );
 
         new Setting(containerEl)
           .setName("Conflict resolution")
@@ -2046,53 +2104,19 @@ class PASettingTab extends PluginSettingTab {
             });
           });
 
+        // ── Actions ───────────────────────────────────────────────────────
+        new Setting(containerEl).setName("Actions").setHeading();
+
         new Setting(containerEl)
-          .setName("Sync on startup")
-          .setDesc("Run a drive sync a few seconds after Obsidian launches.")
-          .addToggle((t) =>
-            t.setValue(!!this.plugin.settings.driveSyncOnStartup).onChange(async (v) => {
-              this.plugin.settings.driveSyncOnStartup = v;
-              await this.plugin.saveSettings();
-            })
+          .setName("Open drive browser")
+          .setDesc("Two-column view: drive files on one side, vault files on the other.")
+          .addButton((b) =>
+            b.setButtonText("Open").onClick(() => { void this.plugin.activateDriveView(); })
           );
 
         new Setting(containerEl)
-          .setName("Sync on change")
-          .setDesc("Automatically sync a few seconds after you edit files in scope (event-driven, debounced).")
-          .addToggle((t) =>
-            t.setValue(!!this.plugin.settings.driveSyncOnChange).onChange(async (v) => {
-              this.plugin.settings.driveSyncOnChange = v;
-              await this.plugin.saveSettings();
-            })
-          );
-
-        new Setting(containerEl)
-          .setName("Sync binary files")
-          .setDesc(driveProOn
-            ? "Upload/download images, pdfs and other binaries too (off = text/Markdown only, binaries skipped)."
-            : "🔒 Momentum pro — text notes always sync; unlock Pro (section below) to also sync images, pdfs and other binaries.")
-          .addToggle((t) =>
-            t.setValue(driveProOn && !!this.plugin.settings.driveSyncBinaries)
-              .setDisabled(!driveProOn)
-              .onChange(async (v) => {
-                this.plugin.settings.driveSyncBinaries = v;
-                await this.plugin.saveSettings();
-              })
-          );
-
-        new Setting(containerEl)
-          .setName("Incremental sync")
-          .setDesc("Skip the full scan when nothing changed on drive (faster). Falls back to a full scan on any remote change.")
-          .addToggle((t) =>
-            t.setValue(!!this.plugin.settings.driveIncremental).onChange(async (v) => {
-              this.plugin.settings.driveIncremental = v;
-              await this.plugin.saveSettings();
-            })
-          );
-
-        new Setting(containerEl)
-          .setName("Sync drive now")
-          .setDesc("Bidirectional sync: push, pull, 3-way merge, and safe deletion.")
+          .setName("Sync now")
+          .setDesc("Run a full two-way sync now: push, pull, 3-way merge and safe deletion.")
           .addButton((b) =>
             b.setButtonText("Sync now").setCta().onClick(() => { void this.plugin.syncGoogleDrive(true); })
           );

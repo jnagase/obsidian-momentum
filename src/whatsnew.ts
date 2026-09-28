@@ -6,6 +6,20 @@ export interface ChangeEntry { version: string; sections: ChangeSection[]; }
 /** Release notes shown in the "What's new" dialog, newest first. */
 export const CHANGELOG: ChangeEntry[] = [
   {
+    version: "0.8.10",
+    sections: [
+      {
+        title: "Improved — Google Drive sync setup (beta)",
+        items: [
+          "Whole vault is now the default: when you turn on Drive sync, your notes actually sync out of the box. Before, the default pointed at a local folder named \"Drive\" that a fresh vault didn't have — so a first sync could silently do nothing. If you were on that stale default with no \"Drive\" folder, you're switched to whole vault automatically (a folder you deliberately mirror is left alone).",
+          "Automatic sync is on by default now (sync on startup and after edits, using the fast incremental check). You can still turn any of it off.",
+          "The binary-files toggle is now clearly labelled as a Google Drive pro feature, with a plain explanation: text and Markdown always sync for free; pro adds images, PDFs and every other file type.",
+          "The Drive settings are reorganised into clear groups (what syncs, automatic sync, advanced, actions) and the alarming red warning is now a calm info note.",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.8.9",
     sections: [
       {

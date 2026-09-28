@@ -32,7 +32,7 @@ nossas conversas. Vale para toda interação neste repositório.
 - Lint: `npx eslint src --ext .ts`. O warning `'ymdLocal' is defined but never used` em
   `src/data.ts` é **pré-existente e inofensivo** — pode ignorar.
 - Deploy (cópia local pro vault de teste):
-  `cp main.js manifest.json styles.css "/Users/jnagase/Documents/obsidian_1/.obsidian/plugins/momentum-life/"`
+  `cp main.js manifest.json styles.css "/Users/jnagase/Documents/secondbrain/.obsidian/plugins/momentum-life/"`
 - **Depois do deploy, avise o usuário para recarregar o plugin** (Community plugins →
   desliga e liga o Momentum Life; ou fecha/reabre o Obsidian).
 
@@ -52,9 +52,11 @@ nossas conversas. Vale para toda interação neste repositório.
   unblock; o antigo continua público nos `main.js` de releases ≤0.5.0 → rotacionar.)
 
 ## Ambiente (importante)
-- **Vault de teste:** `/Users/jnagase/Documents/obsidian_1/` (NÃO é `Obsidian_jnagase`).
-  Data root dentro do vault: `Momentum Life`. Plugin em
-  `/Users/jnagase/Documents/obsidian_1/.obsidian/plugins/momentum-life/`.
+- **Vault de teste:** `/Users/jnagase/Documents/secondbrain/` (o antigo `obsidian_1` não existe
+  mais — foi substituído por este). Data root dentro do vault: `Momentum Life`. Plugin em
+  `/Users/jnagase/Documents/secondbrain/.obsidian/plugins/momentum-life/`. Se um dia o `cp` falhar
+  com "Not a directory", o vault de teste mudou de novo — descobrir o novo com
+  `ls -d /Users/jnagase/Documents/*/ | grep -i obsidian` (ou checar `.obsidian/plugins/`).
 - O **workspace (código) está no OneDrive**; o **vault NÃO está**. Operações no vault
   usam caminho absoluto e rodam normalmente.
 - **O shell (execute_bash) é instável**: saída às vezes vem truncada/"not a tty" e o
@@ -86,6 +88,12 @@ nossas conversas. Vale para toda interação neste repositório.
   botão) deve ser **sentence case**. Ex.: usar "Google tasks", não "Google Tasks".
   Depois de um emoji/símbolo, a próxima palavra fica minúscula. "Momentum Life" reprova
   (o lint quer "Momentum life").
+- **Palavras isoladas vão minúsculas no meio da frase**, mesmo que pareçam nome de produto:
+  `drive`, `pro`, `whole vault` — todas minúsculas. Só **"Google Drive"** (o serviço completo)
+  fica capitalizado, porque está no dicionário de nomes próprios do lint; "Drive" sozinho, não.
+  Ex.: nome de toggle "Sync Google Drive pro" (não "...Pro"); desc "mirrored to drive",
+  "drive's clock", "\"whole vault\" syncs everything". Isso morde em `setName`/`setDesc`/
+  `addOption` — rode `npx eslint src` e corrija antes de buildar.
 - Depois de editar um arquivo, o warning pré-existente do `ymdLocal` é o único aceitável.
 
 ## Arquitetura — Tasks / Boards

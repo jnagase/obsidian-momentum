@@ -320,7 +320,7 @@ export class FileManagerView extends ItemView {
     if (!info) return;
     const { last, inScope, files, logPath } = info;
 
-    const scope = last?.scope ?? (this.cfg.drive?.mirrorDir() === "" ? "whole vault" : (this.cfg.drive?.mirrorDir() || "Drive"));
+    const scope = last?.scope ?? (this.cfg.drive?.mirrorDir() ? this.cfg.drive.mirrorDir() : "whole vault");
 
     // Authoritative per-category counts (NOT the capped issues list). The issues list only
     // supplies the file NAMES shown when a pill is expanded.

@@ -432,7 +432,7 @@ export class GTSyncService {
     // that a load glitch — not a real deletion — caused the disappearance).
     if (opts.confirmed) {
       await this.reconcileDeletions(at, tasks, gtByList, listIds, result, opts.confirmMass);
-      await this.consolidateLists(at, tasks, boardToListId, gtLists, defaultListId, localStatus, result);
+      await this.consolidateLists(at, tasks, boardToListId, gtLists, defaultListId, localStatus, result, opts.confirmMass);
       // End-of-sync convergence: collapse duplicate Google tasks / notes created by the
       // multi-device race so two devices converge on one item each. Wrapped so a failure
       // in one group never aborts the run.
@@ -577,6 +577,7 @@ export class GTSyncService {
     at: string, tasks: Task[], boardToListId: Map<string, string>,
     gtLists: GTTaskList[], defaultListId: string,
     localStatus: (t: Task) => GTTask["status"], result: GTSyncResult,
+    confirmMass?: (msg: string) => Promise<boolean>,
   ): Promise<void> {
     // 1. Relocate mislinked tasks to their board's list.
     for (const t of tasks) {
@@ -594,10 +595,30 @@ export class GTSyncService {
         }
       } catch (e) { result.errors.push(`Relocate "${t.title}": ${String(e)}`); }
     }
-    // 2. Delete tombstoned lists (never the permanent default).
+    // 2. Delete tombstoned lists (never the permanent default) — but NEVER silently destroy a
+    // list that still holds tasks. A board can be tombstoned by INFERENCE (detectDeletedBoards,
+    // when its local folder goes missing), which across devices can be a FALSE POSITIVE — e.g.
+    // a board that only exists on another device yet. Deleting its non-empty Google list here
+    // would wipe real tasks on every device. So: an EMPTY tombstoned list is removed (safe — no
+    // data); a NON-EMPTY one is kept unless the user explicitly confirms, and the mismatch is
+    // surfaced so the board can be recovered (remove it from Config/deleted-boards.md).
     const ignored = new Set(this.store.loadIgnoredBoards());
     for (const l of gtLists) {
       if (!ignored.has(l.title) || l.id === defaultListId) continue;
+      let remaining: GTTask[];
+      try { remaining = await listTasks(at, l.id); }
+      catch (e) { result.errors.push(`Check list "${l.title}" before delete: ${String(e)}`); continue; }
+      const liveTasks = remaining.filter((t) => !isBlankTitle(t.title));
+      if (liveTasks.length > 0) {
+        const n = liveTasks.length;
+        const msg = `Momentum: the board "${l.title}" was removed on this device, but its Google Tasks list still has ${n} task${n === 1 ? "" : "s"}.\n\nThis can be a real deletion — or a sync glitch (a device that hasn't caught up). If you continue, the list and its ${n} task${n === 1 ? "" : "s"} are deleted from Google, on every device.\n\nDelete the list "${l.title}" and its ${n} task${n === 1 ? "" : "s"}?`;
+        const ok = confirmMass ? await confirmMass(msg) : false;
+        if (!ok) {
+          result.errors.push(`Kept tombstoned list "${l.title}" — still has ${n} task(s); not deleted without confirmation.`);
+          result.notes.push(`Kept "${l.title}" (${n} task(s)). To bring the board back, remove "${l.title}" from Config/deleted-boards.md; to really delete it, remove the board again and confirm.`);
+          continue;
+        }
+      }
       try { await deleteTaskList(at, l.id); result.deleted++; }
       catch (e) { result.errors.push(`Delete list "${l.title}": ${String(e)}`); }
     }

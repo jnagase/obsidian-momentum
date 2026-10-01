@@ -6,6 +6,18 @@ export interface ChangeEntry { version: string; sections: ChangeSection[]; }
 /** Release notes shown in the "What's new" dialog, newest first. */
 export const CHANGELOG: ChangeEntry[] = [
   {
+    version: "0.8.11",
+    sections: [
+      {
+        title: "Fixed — safer, consistent task sync across devices",
+        items: [
+          "Your devices now share one setting for who owns your tasks (Google Tasks or Google Drive), synced automatically. Before, one device on Google Tasks and another on Drive could disagree and, in the worst case, silently delete a board's tasks. Now every device follows the same policy — set it once in Settings, it applies everywhere.",
+          "Added a safety guard: a sync will never delete a Google Tasks list that still has tasks without asking you first — so a board that merely looks missing on one device can no longer wipe its tasks.",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.8.10",
     sections: [
       {

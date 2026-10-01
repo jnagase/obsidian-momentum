@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { colRank, mostAdvancedCol, pullCreateStatus, shouldMaterializeBoard } from "../src/gtSync";
-import { planBoardDeletions } from "../src/data";
+import { planBoardDeletions, resolveSyncPolicy } from "../src/data";
 import type { Task } from "../src/types";
 
 // =====================================================================================
@@ -141,5 +141,22 @@ describe("shouldMaterializeBoard — empty Google list becomes a board (bug 1)",
 
   it("skips the permanent 'My Tasks' list (handled separately)", () => {
     expect(shouldMaterializeBoard("My Tasks", none, none)).toBe(false);
+  });
+});
+
+describe("resolveSyncPolicy — multi-device task-owner lock", () => {
+  it("no policy yet → seed from this device, never adopt (first device wins)", () => {
+    expect(resolveSyncPolicy(null, "drive")).toEqual({ effectiveOwner: "drive", seed: true, adopt: false });
+    expect(resolveSyncPolicy(null, "gtasks")).toEqual({ effectiveOwner: "gtasks", seed: true, adopt: false });
+  });
+
+  it("policy matches this device → nothing to do", () => {
+    expect(resolveSyncPolicy("drive", "drive")).toEqual({ effectiveOwner: "drive", seed: false, adopt: false });
+    expect(resolveSyncPolicy("gtasks", "gtasks")).toEqual({ effectiveOwner: "gtasks", seed: false, adopt: false });
+  });
+
+  it("policy differs → adopt the policy (it always wins; the device switches, never the reverse)", () => {
+    expect(resolveSyncPolicy("drive", "gtasks")).toEqual({ effectiveOwner: "drive", seed: false, adopt: true });
+    expect(resolveSyncPolicy("gtasks", "drive")).toEqual({ effectiveOwner: "gtasks", seed: false, adopt: true });
   });
 });

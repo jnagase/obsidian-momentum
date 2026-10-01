@@ -1,5 +1,5 @@
 import { Plugin, WorkspaceLeaf, PluginSettingTab, App, Setting, TFolder, TFile, Notice, normalizePath } from "obsidian";
-import { PADataStore, setDataRoot, planBoardDeletions } from "./data";
+import { PADataStore, setDataRoot, planBoardDeletions, resolveSyncPolicy, TaskOwner } from "./data";
 import { PAView, VIEW_TYPE_PA, PAHost, PALocation } from "./view";
 import { PANavView, VIEW_TYPE_PA_NAV } from "./nav";
 import { PASideView, VIEW_TYPE_PA_SIDE, momentumNoteType } from "./side";
@@ -346,10 +346,33 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       this.maybeShowWhatsNew();
       // Adopt any tasks that arrived via sync without frontmatter.
       void this.adoptOrphanTasks();
-      // Always sync with Google Tasks on startup if connected.
-      if (this.settings.googleTasksEnabled && this.settings.googleToken) {
-        window.setTimeout(() => void this.syncGoogleTasks(true), 3000);
-      }
+      // Task-ownership policy (multi-device lock): converge every device on ONE task owner via a
+      // Drive-synced policy file, so a mixed setup (which silently deleted tasks) can't happen.
+      // Resolve it BEFORE the startup Google Tasks sync so a device never syncs under the wrong
+      // owner. No policy yet → seed from this device (preserves current behaviour, first device
+      // wins). Policy differs → adopt it here (this device switches to match; the policy always
+      // wins, never the reverse). Then run the startup sync only if still enabled + connected.
+      void (async () => {
+        try {
+          const deviceOwner: TaskOwner = this.settings.googleTasksEnabled ? "gtasks" : "drive";
+          const res = resolveSyncPolicy(await this.store.loadSyncPolicy(), deviceOwner);
+          if (res.seed) {
+            await this.store.writeSyncPolicy(deviceOwner);
+          } else if (res.adopt) {
+            this.settings.googleTasksEnabled = res.effectiveOwner === "gtasks";
+            await this.saveSettings();
+            this.resetGoogleSyncInterval();
+            new Notice(
+              `Momentum: applied your synced task-sync policy — tasks are owned by ${res.effectiveOwner === "gtasks" ? "Google tasks" : "Google Drive"} on all your devices.`,
+              9000,
+            );
+          }
+        } catch { /* best-effort: never block startup on the policy */ }
+        // Sync with Google Tasks on startup if (still) enabled and connected.
+        if (this.settings.googleTasksEnabled && this.settings.googleToken) {
+          window.setTimeout(() => void this.syncGoogleTasks(true), 3000);
+        }
+      })();
       // Start the periodic sync interval if a non-manual frequency is configured.
       this.resetGoogleSyncInterval();
       this.resetDriveSyncInterval();
@@ -1867,10 +1890,12 @@ class PASettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Enable Google tasks sync")
-      .setDesc("Sync momentum tasks bidirectionally with Google tasks.")
+      .setDesc("Sync momentum tasks bidirectionally with Google tasks. This choice is synced to all your devices so they never disagree — turning it on or off here applies everywhere (off = your tasks sync via Google Drive instead).")
       .addToggle((t) =>
         t.setValue(this.plugin.settings.googleTasksEnabled).onChange(async (v) => {
           this.plugin.settings.googleTasksEnabled = v;
+          // Propagate the choice to every device via the Drive-synced policy file.
+          await this.plugin.store.writeSyncPolicy(v ? "gtasks" : "drive");
           await this.plugin.saveSettings();
           rerender();
         })

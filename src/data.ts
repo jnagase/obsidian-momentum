@@ -90,6 +90,33 @@ export function collisionFreeRel(
   return rel;
 }
 
+// ── Task-ownership policy (multi-device lock) ─────────────────────────────────────────────
+// Which channel OWNS the Tasks/ notes across ALL devices: "gtasks" (Google Tasks sync) or
+// "drive" (Google Drive carries them like any folder). A MIXED setup — one device on gtasks,
+// another on drive — is what silently deleted a board's tasks: each device transported tasks by
+// a different channel, so one saw a board "missing" and deleted its Google list. The fix is to
+// store this choice in a Drive-synced file and have every device converge on the SAME owner.
+export type TaskOwner = "drive" | "gtasks";
+
+export interface SyncPolicyResolution {
+  /** The owner this device must operate under after resolving against the synced policy. */
+  effectiveOwner: TaskOwner;
+  /** No policy existed yet → write this device's current owner as the seed (first device wins). */
+  seed: boolean;
+  /** A policy existed and differs → this device must switch its local setting to match it. */
+  adopt: boolean;
+}
+
+/**
+ * Resolve the vault-wide task-ownership policy against this device's current setting. Pure &
+ * deterministic (unit-tested). The policy always wins; a device only ever switches TO the policy,
+ * never the reverse — so devices converge and a mixed setup becomes impossible.
+ */
+export function resolveSyncPolicy(fileOwner: TaskOwner | null, deviceOwner: TaskOwner): SyncPolicyResolution {
+  if (fileOwner === null) return { effectiveOwner: deviceOwner, seed: true, adopt: false };
+  return { effectiveOwner: fileOwner, seed: false, adopt: fileOwner !== deviceOwner };
+}
+
 /**
  * True for a file a sync tool created to hold a conflict copy, so every loader can skip it.
  * These are NOT plugin data — the plugin never writes a `.conflict` file — yet without this
@@ -431,6 +458,29 @@ export class PADataStore {
     await this.writeFile(this.knownBoardsFile, this.buildDoc(
       { type: "known-boards", boards: state.boards, pending_removal: state.pendingRemoval },
       "# Known boards\n\nBoards the plugin has observed, used to detect deletions across devices. Managed automatically — do not edit by hand.\n",
+    ));
+  }
+
+  // ── Task-ownership policy (multi-device lock) ─────────────────────────────
+  // Stored in a Drive-synced file (NOT in DRIVE_DATA_EXCLUDE) so every device reads the SAME
+  // owner and converges on it. Read from the raw file text (not the metadata cache) so it's
+  // reliable at startup, before the cache is warm — reading null when the file actually exists
+  // would re-seed and could clobber/propagate the wrong owner.
+  private syncPolicyFile = "Config/sync-policy.md";
+  async loadSyncPolicy(): Promise<TaskOwner | null> {
+    const f = this.fileAt(this.syncPolicyFile);
+    if (!(f instanceof TFile)) return null;
+    try {
+      const txt = await this.app.vault.read(f);
+      const m = txt.match(/task_owner:\s*"?(drive|gtasks)"?/);
+      return m ? (m[1] as TaskOwner) : null;
+    } catch { return null; }
+  }
+  async writeSyncPolicy(owner: TaskOwner): Promise<void> {
+    await this.writeFile(this.syncPolicyFile, this.buildDoc(
+      { type: "sync-policy", task_owner: owner, updated: new Date().toISOString() },
+      "# Task sync policy\n\nWho owns your task notes across devices: `gtasks` (Google Tasks) or `drive` (Google Drive). " +
+      "Synced across your devices so they never disagree — never mix. Change it from Settings → Google tasks.\n",
     ));
   }
 

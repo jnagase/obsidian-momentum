@@ -6,6 +6,20 @@ export interface ChangeEntry { version: string; sections: ChangeSection[]; }
 /** Release notes shown in the "What's new" dialog, newest first. */
 export const CHANGELOG: ChangeEntry[] = [
   {
+    version: "0.8.12",
+    sections: [
+      {
+        title: "Improved — Google Drive sync (beta)",
+        items: [
+          "Opening Obsidian no longer triggers a needless full sync. Drive's change feed covers your whole Google account, so unrelated activity used to make every launch do a full scan. The sync now tells apart changes inside your synced folder from the rest — when nothing in your vault changed, it does nothing, fast and quiet.",
+          "Fixed a sync that kept re-pulling the same files on every cycle. Files that live on Drive but aren't synced on this device (like your task notes when Google Tasks is handling them) are now left alone instead of being rewritten over and over.",
+          "Tasks never sync through Google Drive — Google Tasks is the only channel for syncing tasks across devices. Turn it on in Settings to sync tasks; a note in the Drive settings now spells this out. This also removes an old multi-device setup that could get devices out of step.",
+          "The File Manager's storage overview now counts your Obsidian config files (theme, snippets, enabled plugins), so the file-type breakdown and totals reflect them too.",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.8.11",
     sections: [
       {

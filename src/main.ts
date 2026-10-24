@@ -1,5 +1,5 @@
 import { Plugin, WorkspaceLeaf, PluginSettingTab, App, Setting, TFolder, TFile, Notice, normalizePath } from "obsidian";
-import { PADataStore, setDataRoot, planBoardDeletions, resolveSyncPolicy, TaskOwner } from "./data";
+import { PADataStore, setDataRoot, planBoardDeletions } from "./data";
 import { PAView, VIEW_TYPE_PA, PAHost, PALocation } from "./view";
 import { PANavView, VIEW_TYPE_PA_NAV } from "./nav";
 import { PASideView, VIEW_TYPE_PA_SIDE, momentumNoteType } from "./side";
@@ -13,7 +13,7 @@ import {
 import { GTSyncService } from "./gtSync";
 import { FileManagerView, VIEW_TYPE_QUICK } from "./quickAccess";
 import { DriveBrowserView, VIEW_TYPE_DRIVE, DriveViewConfig } from "./driveBrowser";
-import { runDriveSync, DriveBaselineStore, VaultFS, DriveConflictStrategy, DEFAULT_CONFLICT_STRATEGY, ConflictChoice, DriveSyncResult, DriveSyncSummary, DriveProgress, acquireDriveLock, releaseDriveLock } from "./driveSync";
+import { runDriveSync, DriveBaselineStore, VaultFS, DriveConflictStrategy, DEFAULT_CONFLICT_STRATEGY, ConflictChoice, DriveSyncResult, DriveSyncSummary, DriveProgress, acquireDriveLock, releaseDriveLock, isObsidianConfigSyncPath } from "./driveSync";
 import { authorizeDrive, completeDriveAuth, ensureFreshDriveToken, revokeDriveToken, DriveAuthExpiredError, DRIVE_PROTOCOL_ACTION } from "./driveAuth";
 import { DriveFolderPicker } from "./driveFolderPicker";
 import { isProActive, proNeedsRecheck, validateLicense, PRO_BETA_FREE, PRO_PRICE, PRO_CHECKOUT_URL, PRO_BETA_OFFER, ProState } from "./pro";
@@ -42,10 +42,9 @@ interface PASettings {
   driveLocalDeletes?: Record<string, number>;     // paths the user deleted locally (evidence for delete_remote)
   driveDeclinedDeletions?: Record<string, string>; // path → situation signature the user declined to delete
   driveConflictStrategy?: DriveConflictStrategy; // how two-sided conflicts resolve (default keep-both)
-  driveSyncOnStartup?: boolean;   // run a Drive sync shortly after launch
-  driveSyncOnChange?: boolean;    // event-driven: sync (debounced) when vault files change
+  // Auto-sync (on startup, on change, incremental) is now CORE — always on, no user toggle.
   driveSyncBinaries?: boolean;    // include binary files (real upload/download) instead of skipping
-  driveIncremental?: boolean;     // use Changes API to skip the full scan when remote is unchanged
+  driveSyncObsidianConfig?: boolean; // Pro: replicate .obsidian config (theme/plugins) across devices
   driveScopeDefaultMigrated?: boolean; // one-time: flipped the stale "Drive" default scope to whole vault
   driveDeviceId?: string;         // stable per-device id for the multi-device Drive lock
   driveLastSync?: DriveSyncSummary; // persisted summary of the last sync (status panel)
@@ -56,6 +55,7 @@ interface PASettings {
   proCheckedAt?: number;
   proLicenseSeeded?: boolean; // true once the key has been mirrored into the vault (Config/pro.md)
   driveCursor?: string;            // Changes API page token (last clean cycle)
+  driveFolderIds?: string[];       // Drive folder ids of our tree (for scoping the account-wide change feed)
 }
 const DEFAULT_SETTINGS: PASettings = {
   dataRoot: "Momentum Life",
@@ -80,11 +80,10 @@ const DEFAULT_SETTINGS: PASettings = {
   driveLocalDeletes: {},
   driveDeclinedDeletions: {},
   driveCursor: "",
+  driveFolderIds: [],
   driveConflictStrategy: DEFAULT_CONFLICT_STRATEGY,
-  driveSyncOnStartup: true,   // on by default: keep devices in step without the user opting in
-  driveSyncOnChange: true,    // on by default: edits flow automatically (debounced, incremental)
   driveSyncBinaries: false,   // Pro-gated; stays off until Pro is active and the user turns it on
-  driveIncremental: true,     // on by default: fast change-check, auto-falls back to a full scan
+  driveSyncObsidianConfig: false, // Pro-gated, opt-in; off by default
   driveScopeDefaultMigrated: false,
 };
 const LEGACY_DATA_ROOT = "Personal Assistant";
@@ -346,33 +345,13 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       this.maybeShowWhatsNew();
       // Adopt any tasks that arrived via sync without frontmatter.
       void this.adoptOrphanTasks();
-      // Task-ownership policy (multi-device lock): converge every device on ONE task owner via a
-      // Drive-synced policy file, so a mixed setup (which silently deleted tasks) can't happen.
-      // Resolve it BEFORE the startup Google Tasks sync so a device never syncs under the wrong
-      // owner. No policy yet → seed from this device (preserves current behaviour, first device
-      // wins). Policy differs → adopt it here (this device switches to match; the policy always
-      // wins, never the reverse). Then run the startup sync only if still enabled + connected.
-      void (async () => {
-        try {
-          const deviceOwner: TaskOwner = this.settings.googleTasksEnabled ? "gtasks" : "drive";
-          const res = resolveSyncPolicy(await this.store.loadSyncPolicy(), deviceOwner);
-          if (res.seed) {
-            await this.store.writeSyncPolicy(deviceOwner);
-          } else if (res.adopt) {
-            this.settings.googleTasksEnabled = res.effectiveOwner === "gtasks";
-            await this.saveSettings();
-            this.resetGoogleSyncInterval();
-            new Notice(
-              `Momentum: applied your synced task-sync policy — tasks are owned by ${res.effectiveOwner === "gtasks" ? "Google tasks" : "Google Drive"} on all your devices.`,
-              9000,
-            );
-          }
-        } catch { /* best-effort: never block startup on the policy */ }
-        // Sync with Google Tasks on startup if (still) enabled and connected.
-        if (this.settings.googleTasksEnabled && this.settings.googleToken) {
-          window.setTimeout(() => void this.syncGoogleTasks(true), 3000);
-        }
-      })();
+      // Sync with Google Tasks on startup if enabled and connected. Google Tasks is the SOLE
+      // task-sync channel — Drive never carries task notes — so this is a plain per-device
+      // setting with no cross-device owner to reconcile; a mixed setup can no longer clobber
+      // anything (one device syncs its tasks with Google, another simply keeps them local).
+      if (this.settings.googleTasksEnabled && this.settings.googleToken) {
+        window.setTimeout(() => void this.syncGoogleTasks(true), 3000);
+      }
       // Start the periodic sync interval if a non-manual frequency is configured.
       this.resetGoogleSyncInterval();
       this.resetDriveSyncInterval();
@@ -382,7 +361,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       // (fast); it auto-escalates to a full walk when the feed reports changes (e.g. something
       // edited/deleted on Drive while closed), and the very first sync (no cursor yet) is a full
       // walk anyway to seed. So "first sync is full, every open after is incremental" — for free.
-      if (this.settings.driveSyncOnStartup && this.settings.googleDriveEnabled && this.settings.driveToken) {
+      if (this.settings.googleDriveEnabled && this.settings.driveToken) {
         window.setTimeout(() => void this.syncGoogleDrive(false, undefined, true), 4000);
       }
       // Optional event-driven Drive sync: watch vault changes and sync (debounced).
@@ -847,6 +826,8 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       names: () => Object.keys(map),
       getCursor: () => this.settings.driveCursor || undefined,
       setCursor: (t) => { this.settings.driveCursor = t; },
+      getFolderIds: () => this.settings.driveFolderIds ?? [],
+      setFolderIds: (ids) => { this.settings.driveFolderIds = ids; },
       save: async () => { await this.saveSettings(); },
       getLocalDeletes: () => (this.settings.driveLocalDeletes ??= {}),
       clearLocalDelete: (n) => { delete (this.settings.driveLocalDeletes ??= {})[n]; },
@@ -871,10 +852,9 @@ export default class MomentumPlugin extends Plugin implements PAHost {
    * (dataRoot) IS synced too (so your Momentum data and the pro.md license travel), with one
    * exception per file so nothing fights over the same note:
    *  - volatile control/debug files (DRIVE_DATA_EXCLUDE) are always skipped (loop / per-device);
-   *  - derived task mirrors (Tasks/Lists) and the orphan archive (Tasks/_orphaned) are skipped —
-   *    each device rebuilds the mirrors locally;
-   *  - task NOTES (Tasks/…) are skipped ONLY while Google Tasks sync is enabled, since that sync
-   *    is their sole owner. With Google Tasks off, Drive carries the task notes too.
+   *  - task notes (Tasks/…) are NEVER carried by Drive — Google Tasks is the sole task-sync
+   *    channel (the user enables it in settings to sync tasks across devices). This keeps the
+   *    scope symmetric so a task note can't be re-pulled over the Google-Tasks-owned copy.
    */
   /**
    * Whether a vault file path is in the Drive sync scope. Shared by the sync engine's VaultFS
@@ -889,8 +869,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       const rel = path.slice(dataRoot.length + 1); // "" for the data-root folder itself
       if (!rel) return false;
       if (DRIVE_DATA_EXCLUDE.has(rel)) return false;                                    // volatile/per-device
-      if (rel.startsWith("Tasks/Lists/") || rel.startsWith("Tasks/_orphaned/")) return false; // derived / archive
-      if (this.settings.googleTasksEnabled && rel.startsWith("Tasks/")) return false;   // Google Tasks owns notes
+      if (rel.startsWith("Tasks/")) return false;                                       // tasks NEVER sync via Drive — use Google Tasks sync
       return true;                                                                      // sync the rest (data, pro.md)
     }
     return true;
@@ -901,6 +880,24 @@ export default class MomentumPlugin extends Plugin implements PAHost {
     const base = raw === "" ? "" : normalizePath(raw); // "" = whole vault
     const toFull = (rel: string) => normalizePath(base ? `${base}/${rel}` : rel);
     const inScope = (path: string): boolean => this.driveInScope(path);
+    // Pro + opt-in: also mirror SAFE .obsidian config files (theme, which plugins are enabled,
+    // hotkeys…) across devices. Whole-vault scope only. Accessed via the raw adapter because the
+    // vault API (getFiles/getAbstractFileByPath) never sees the .obsidian config folder. The
+    // allowlist (isObsidianConfigSyncPath) guarantees data.json/workspace.json never sync.
+    const cfgDir = this.app.vault.configDir; // not necessarily ".obsidian" — the user can customise it
+    const cfgOn = base === "" && this.isProEnabled() && !!this.settings.driveSyncObsidianConfig;
+    const adapter = this.app.vault.adapter;
+    const isCfg = (rel: string): boolean => rel.startsWith(`${cfgDir}/`);
+    const ensureAdapterDir = async (filePath: string): Promise<void> => {
+      const slash = filePath.lastIndexOf("/");
+      if (slash < 0) return;
+      const parts = filePath.slice(0, slash).split("/");
+      let cur = "";
+      for (const seg of parts) {
+        cur = cur ? `${cur}/${seg}` : seg;
+        if (!(await adapter.exists(cur))) await adapter.mkdir(cur).catch(() => {});
+      }
+    };
     const ensureFolders = async (fullPath: string): Promise<void> => {
       const slash = fullPath.lastIndexOf("/");
       if (slash < 0) return;
@@ -920,21 +917,34 @@ export default class MomentumPlugin extends Plugin implements PAHost {
           if (!inScope(f.path)) continue;
           out.push(base ? f.path.slice(base.length + 1) : f.path);
         }
+        if (cfgOn) {
+          const queue = [cfgDir];
+          while (queue.length) {
+            const dir = queue.shift()!;
+            let listing: { files: string[]; folders: string[] };
+            try { listing = await adapter.list(dir); } catch { continue; }
+            for (const sub of listing.folders) queue.push(sub);
+            for (const file of listing.files) if (isObsidianConfigSyncPath(file, cfgDir)) out.push(file);
+          }
+        }
         return out;
       },
       read: async (rel) => {
+        if (isCfg(rel)) return (await adapter.exists(rel)) ? adapter.read(rel) : "";
         const f = this.app.vault.getAbstractFileByPath(toFull(rel));
         return f instanceof TFile ? this.app.vault.read(f) : "";
       },
       write: async (rel, content) => {
+        if (isCfg(rel)) { await ensureAdapterDir(rel); await adapter.write(rel, content); return; }
         const full = toFull(rel);
         await ensureFolders(full);
         const f = this.app.vault.getAbstractFileByPath(full);
         if (f instanceof TFile) await this.app.vault.modify(f, content);
         else await this.app.vault.create(full, content);
       },
-      exists: async (rel) => this.app.vault.getAbstractFileByPath(toFull(rel)) instanceof TFile,
+      exists: async (rel) => isCfg(rel) ? adapter.exists(rel) : this.app.vault.getAbstractFileByPath(toFull(rel)) instanceof TFile,
       trash: async (rel) => {
+        if (isCfg(rel)) { if (await adapter.exists(rel)) await adapter.remove(rel).catch(() => {}); return; }
         const full = toFull(rel);
         const f = this.app.vault.getAbstractFileByPath(full);
         if (f instanceof TFile) await this.app.fileManager.trashFile(f); // reversible, respects user preference
@@ -950,14 +960,17 @@ export default class MomentumPlugin extends Plugin implements PAHost {
         }
       },
       mtime: async (rel) => {
+        if (isCfg(rel)) { const st = await adapter.stat(rel).catch(() => null); return st?.mtime ?? 0; }
         const f = this.app.vault.getAbstractFileByPath(toFull(rel));
         return f instanceof TFile ? f.stat.mtime : 0;
       },
       readBinary: async (rel) => {
+        if (isCfg(rel)) return (await adapter.exists(rel)) ? adapter.readBinary(rel) : new ArrayBuffer(0);
         const f = this.app.vault.getAbstractFileByPath(toFull(rel));
         return f instanceof TFile ? this.app.vault.readBinary(f) : new ArrayBuffer(0);
       },
       writeBinary: async (rel, data) => {
+        if (isCfg(rel)) { await ensureAdapterDir(rel); await adapter.writeBinary(rel, data); return; }
         const full = toFull(rel);
         await ensureFolders(full);
         const f = this.app.vault.getAbstractFileByPath(full);
@@ -1008,7 +1021,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
     this.driveSyncing = true;
     this.driveSyncActive = true;
     this.driveStopRequested = false;
-    const useIncremental = incremental ?? !!this.settings.driveIncremental;
+    const useIncremental = incremental ?? true; // auto runs are always incremental (core); the Full-sync button passes false
     this.updateDriveStatus("Drive: syncing…");
     this.emitDriveProgress({ phase: "scanning", done: 0, total: 0, incremental: useIncremental }); // flip cards to "syncing" with the right mode
     const progress = (p: DriveProgress): void => {
@@ -1046,9 +1059,21 @@ export default class MomentumPlugin extends Plugin implements PAHost {
         // Per-call override (Incremental/Full buttons) wins over the saved toggle. Incremental is
         // still safe: it falls back to a full walk whenever there's no cursor or any remote change.
         incremental: useIncremental,
-        lastSyncMs: (() => { const t = Date.parse(this.settings.driveLastSync?.time ?? ""); return Number.isFinite(t) ? t : undefined; })(),
+        // mtime fast-path ONLY on incremental runs (speed). A FULL scan must be exhaustive: using
+        // the fast-path there let a local edit whose mtime predates lastSyncMs stay masked forever
+        // (if an earlier sync advanced lastSyncMs without pushing it — e.g. a blocked/fatal run),
+        // so diverged files never pushed. Full sync now re-reads content and reconciles them.
+        lastSyncMs: useIncremental ? (() => { const t = Date.parse(this.settings.driveLastSync?.time ?? ""); return Number.isFinite(t) ? t : undefined; })() : undefined,
         shouldStop: () => this.driveStopRequested,
         deviceId,
+        // Mirror the local listing's scope onto the remote walk, so a file that lives on Drive but
+        // is out of scope on THIS device (e.g. Momentum Life/Tasks/* when Google Tasks owns the
+        // notes here) is ignored instead of being re-pulled over the owned copy every cycle.
+        inScope: (rel) => {
+          const raw = this.settings.driveMirrorDir ?? "";
+          const base = raw === "" ? "" : normalizePath(raw);
+          return this.driveInScope(base ? normalizePath(`${base}/${rel}`) : rel);
+        },
       });
       this.settings.driveLastSync = {
         time: new Date().toISOString(),
@@ -1200,11 +1225,11 @@ export default class MomentumPlugin extends Plugin implements PAHost {
     return path === raw || path.startsWith(`${raw}/`);
   }
 
-  /** Event-driven Drive sync: on any in-scope vault change, schedule a debounced sync. Gated by
-   *  driveSyncOnChange; skips the sync's own writes via driveSyncing. */
+  /** Event-driven Drive sync (CORE — always on): on any in-scope vault change, schedule a
+   *  debounced incremental sync. Skips the sync's own writes via driveSyncing. */
   private registerDriveChangeWatcher(): void {
     const schedule = (path: string): void => {
-      if (!this.settings.driveSyncOnChange || !this.settings.googleDriveEnabled || !this.settings.driveToken) return;
+      if (!this.settings.googleDriveEnabled || !this.settings.driveToken) return;
       if (this.driveSyncing) return; // our own writes during a sync must not re-trigger it
       if (!this.pathInDriveScope(path)) return;
       if (this.driveChangeTimer !== null) window.clearTimeout(this.driveChangeTimer);
@@ -1217,7 +1242,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
         // common case. This is independent of the "Incremental sync" toggle (which governs manual/
         // interval runs); an event reaction should never pay for a full scan of the whole Drive.
         void this.syncGoogleDrive(false, undefined, true);
-      }, 8000); // debounce: wait for a lull in edits before syncing
+      }, 3000); // debounce: wait for a short lull in edits, then push promptly
     };
     this.registerEvent(this.app.vault.on("modify", (f) => schedule(f.path)));
     this.registerEvent(this.app.vault.on("create", (f) => schedule(f.path)));
@@ -1890,12 +1915,10 @@ class PASettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Enable Google tasks sync")
-      .setDesc("Sync momentum tasks bidirectionally with Google tasks. This choice is synced to all your devices so they never disagree — turning it on or off here applies everywhere (off = your tasks sync via Google Drive instead).")
+      .setDesc("Sync momentum tasks bidirectionally with Google tasks. Google tasks is the only way tasks sync across devices — they never travel through Google Drive. This is a per-device setting, so with it off your tasks stay on this device only.")
       .addToggle((t) =>
         t.setValue(this.plugin.settings.googleTasksEnabled).onChange(async (v) => {
           this.plugin.settings.googleTasksEnabled = v;
-          // Propagate the choice to every device via the Drive-synced policy file.
-          await this.plugin.store.writeSyncPolicy(v ? "gtasks" : "drive");
           await this.plugin.saveSettings();
           rerender();
         })
@@ -2048,39 +2071,12 @@ class PASettingTab extends PluginSettingTab {
         // ── Automatic sync ────────────────────────────────────────────────
         new Setting(containerEl).setName("Automatic sync").setHeading();
 
-        new Setting(containerEl)
-          .setName("Sync on startup")
-          .setDesc("Sync a few seconds after Obsidian launches (incremental — fast).")
-          .addToggle((t) =>
-            t.setValue(!!this.plugin.settings.driveSyncOnStartup).onChange(async (v) => {
-              this.plugin.settings.driveSyncOnStartup = v;
-              await this.plugin.saveSettings();
-            })
-          );
-
-        new Setting(containerEl)
-          .setName("Sync on change")
-          .setDesc("Sync a few seconds after you edit files in scope (event-driven, debounced).")
-          .addToggle((t) =>
-            t.setValue(!!this.plugin.settings.driveSyncOnChange).onChange(async (v) => {
-              this.plugin.settings.driveSyncOnChange = v;
-              await this.plugin.saveSettings();
-            })
-          );
-
-        new Setting(containerEl)
-          .setName("Incremental sync")
-          .setDesc("Skip the full scan when nothing changed on drive (faster). Falls back to a full scan on any remote change.")
-          .addToggle((t) =>
-            t.setValue(!!this.plugin.settings.driveIncremental).onChange(async (v) => {
-              this.plugin.settings.driveIncremental = v;
-              await this.plugin.saveSettings();
-            })
-          );
-
+        // Auto-sync is CORE now: Momentum always syncs on startup and as you edit (debounced,
+        // incremental). There's no on/off toggle — it's just how sync works. The only knob left
+        // is an optional extra timer below.
         new Setting(containerEl)
           .setName("Auto-sync interval")
-          .setDesc("Also sync on a timer, on top of startup/on-change.")
+          .setDesc("Momentum syncs automatically on startup and as you edit. This adds an extra sync on a timer.")
           .addDropdown((d) => {
             d.addOption("0", "Off (rely on startup/on-change)");
             d.addOption("5", "Every 5 minutes");
@@ -2109,6 +2105,20 @@ class PASettingTab extends PluginSettingTab {
               .setDisabled(!driveProOn)
               .onChange(async (v) => {
                 this.plugin.settings.driveSyncBinaries = v;
+                await this.plugin.saveSettings();
+              })
+          );
+
+        new Setting(containerEl)
+          .setName("Sync Obsidian appearance & plugins")
+          .setDesc(driveProOn
+            ? "Replicate your look and enabled plugins across devices: theme, snippets, hotkeys, and which plugins are on. Your tokens and window layout are never synced (only safe config files travel)."
+            : "🔒 unlock pro below to replicate your theme, plugins and hotkeys across devices. Your tokens and window layout are never synced.")
+          .addToggle((t) =>
+            t.setValue(driveProOn && !!this.plugin.settings.driveSyncObsidianConfig)
+              .setDisabled(!driveProOn)
+              .onChange(async (v) => {
+                this.plugin.settings.driveSyncObsidianConfig = v;
                 await this.plugin.saveSettings();
               })
           );
@@ -2145,6 +2155,14 @@ class PASettingTab extends PluginSettingTab {
           .addButton((b) =>
             b.setButtonText("Sync now").setCta().onClick(() => { void this.plugin.syncGoogleDrive(true); })
           );
+
+        // Footer note: tasks are deliberately out of Drive's scope — Google tasks is their only
+        // sync channel. Spelling this out here stops the "why didn't my tasks sync?" confusion.
+        const tasksNote = containerEl.createDiv({ cls: "pa-drive-tasks-note" });
+        tasksNote.createEl("strong", { text: "Note: " });
+        tasksNote.createEl("span", {
+          text: "Google Drive sync never syncs your tasks. To sync tasks across devices, enable Google tasks sync in the tasks section above.",
+        });
       }
     }
 

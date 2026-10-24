@@ -248,6 +248,46 @@ nossas conversas. Vale para toda interação neste repositório.
   endurecimento de verdade (lock de sync entre devices, ou reconciliar duplicatas por
   título+lista mesmo com ids distintos) é mudança estruturante → tratar via **spec**.
 
+## Google Drive sync — escopo e convergência (`src/driveSync.ts`, `src/main.ts`)
+- **Tasks NUNCA sincam pelo Google Drive.** O único canal de sync de tasks é o Google Tasks.
+  `driveInScope` (main.ts) sempre exclui `Tasks/` (antes só excluía quando `googleTasksEnabled`;
+  o modo "Drive dono das tasks" não existe mais). Settings do Drive têm uma nota de rodapé
+  explicando isso (`.pa-drive-tasks-note` em styles.css). A desc do toggle "Enable Google tasks
+  sync" também reflete: tasks não viajam pelo Drive; com o toggle off, ficam locais no device.
+- **`googleTasksEnabled` é config LOCAL por device** — não há mais política sincronizada
+  ("drive owner"). O conceito foi removido (ex-`TaskOwner`/`resolveSyncPolicy`/`loadSyncPolicy`/
+  `writeSyncPolicy`/`Config/sync-policy.md`). Com o Drive nunca tocando em tasks, o conflito
+  cross-device que a política guardava (que já causou perda de uma board) **é impossível**: um
+  device com Google Tasks on sinca suas tasks; outro off apenas mantém as dele locais, sem clobber.
+  O arquivo `Config/sync-policy.md` em vaults antigos vira órfão inofensivo (não é mais lido).
+- **Simetria de escopo (lição que custou uma sessão de debug):** o `fs.list()` local filtra por
+  `driveInScope`, mas o **walk do Drive é scope-agnostic**. Sem alinhar os dois, um arquivo que
+  existe no Drive mas está fora de escopo neste device (ex.: `Momentum Life/Tasks/*` com Google
+  Tasks ligado) entra em `remoteExists && !localExists → pull` **todo ciclo**, reescreve a cópia
+  local e nunca converge (o `list()` seguinte continua excluindo). `runDriveSync` tem o arg
+  `inScope?: (rel) => boolean` (passado do main.ts a partir do `driveInScope`); o engine descarta
+  entradas fora de escopo do `remoteByPath`/`remoteDups` logo após montar a visão remota, nos dois
+  lados. Diagnóstico-chave: `pulled=N` constante com 0 divergência de md5 e arquivos presentes no
+  disco = assimetria de escopo (não é NFC/NFD nem md5 drift — esses eu descartei por dados).
+- **O feed de mudanças do Drive (`listChanges`) é da CONTA INTEIRA** (`spaces=drive`,
+  `restrictToMyDrive=false`, de propósito pra nunca perder remoção/move). Logo, "Incremental check
+  found N remote change(s)" conta atividade de **qualquer** lugar do Drive do usuário → o fast-path
+  "0 mudanças" nunca disparava e **todo open fazia full scan**. Fix: contar só mudanças
+  **relevantes à nossa pasta** — arquivo rastreado por id, ou `change.file.parents` ∈ `{rootId} ∪
+  folder ids do último walk`. Os folder ids são persistidos em `settings.driveFolderIds` via
+  `getFolderIds/setFolderIds` (gravados só em walk completo/autoritativo). É seguro contra arquivo
+  novo em subpasta funda: toda criação emite ao menos um evento cujo pai é uma pasta conhecida.
+- **Pull só muda estado se o baseline for atualizado.** `this_pull` grava `base.md5 = remote.md5`;
+  se um arquivo puxa todo ciclo sem o md5 convergir, ou o remoto não tem md5 (fica `""` e
+  `undefined !== "" → true` pra sempre), ou é duplicata alternando id, ou — o caso real — está
+  fora de escopo local e nunca entra no `list()`. Checar essas três antes de suspeitar do engine.
+- **Diagnóstico seguro do Drive:** dá pra bater direto na Drive API com o `refresh_token` do
+  `data.json` (campo `driveToken`) → `POST ${DRIVE_WORKER_BASE}/refresh` → `access_token`;
+  `DRIVE_WORKER_BASE` vem de `drive-domain.json` (`momentumlife-drive.jnagase.com`), folder id em
+  `data.json.driveFolderId`. Escrever o diagnóstico como `.mjs` e rodar com `node` (heredoc no
+  shell corrompe). **NUNCA imprimir tokens/md5 completos** — só agregados e prefixos. Apagar o
+  script e o log depois.
+
 ## MCP (`mcp/src/*.mjs`)
 - O MCP é um port Node do data layer do plugin (ESM `.mjs`, **sem build** — roda direto;
   "aplicar" = **reiniciar o servidor MCP** no Kiro). Valida sintaxe com `node --check`.
@@ -267,6 +307,10 @@ nossas conversas. Vale para toda interação neste repositório.
 - Não reintroduzir recurrency de tasks.
 - Não criar uma única lista "Momentum Life" no Google (erro antigo de sub-agente) — é uma
   lista por board.
+- Não reintroduzir o conceito "drive owner" / política sincronizada de tasks (ex-`TaskOwner`/
+  `resolveSyncPolicy`/`sync-policy.md`). Tasks só sincam via Google Tasks; `googleTasksEnabled`
+  é local por device.
+- Não fazer o Drive sincronizar `Tasks/` (sempre fora de escopo no `driveInScope`).
 - Não buildar sem perguntar.
 - Não commitar/publicar no git sem ordem explícita.
 

@@ -892,3 +892,15 @@ a.pa-drive-tname:hover{color:var(--text-accent)}
   line-height: 1.5;
 }
 .pa-drive-sot-warning strong { color: var(--text-normal); }
+
+/* Google Drive settings footer note: tasks never sync via Drive (use Google tasks). */
+.pa-drive-tasks-note {
+  margin: 0.75em 0 0.25em;
+  padding: 0.6em 0.8em;
+  border-radius: 8px;
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  font-size: 0.82em;
+  line-height: 1.45;
+}
+.pa-drive-tasks-note strong { color: var(--text-normal); }

@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { colRank, mostAdvancedCol, pullCreateStatus, shouldMaterializeBoard } from "../src/gtSync";
-import { planBoardDeletions, resolveSyncPolicy } from "../src/data";
+import { isObsidianConfigSyncPath } from "../src/driveSync";
+import { planBoardDeletions } from "../src/data";
 import type { Task } from "../src/types";
 
 // =====================================================================================
@@ -144,19 +145,33 @@ describe("shouldMaterializeBoard — empty Google list becomes a board (bug 1)",
   });
 });
 
-describe("resolveSyncPolicy — multi-device task-owner lock", () => {
-  it("no policy yet → seed from this device, never adopt (first device wins)", () => {
-    expect(resolveSyncPolicy(null, "drive")).toEqual({ effectiveOwner: "drive", seed: true, adopt: false });
-    expect(resolveSyncPolicy(null, "gtasks")).toEqual({ effectiveOwner: "gtasks", seed: true, adopt: false });
+describe("isObsidianConfigSyncPath — allowlist-only (.obsidian config sync, Pro)", () => {
+  it("NEVER syncs secrets or per-device state (the safety-critical property)", () => {
+    expect(isObsidianConfigSyncPath(".obsidian/plugins/momentum-life/data.json", ".obsidian")).toBe(false);
+    expect(isObsidianConfigSyncPath(".obsidian/plugins/any-plugin/data.json", ".obsidian")).toBe(false);
+    expect(isObsidianConfigSyncPath(".obsidian/data.json", ".obsidian")).toBe(false);
+    expect(isObsidianConfigSyncPath(".obsidian/workspace.json", ".obsidian")).toBe(false);
+    expect(isObsidianConfigSyncPath(".obsidian/workspace-mobile.json", ".obsidian")).toBe(false);
+    // Honours a custom config dir too.
+    expect(isObsidianConfigSyncPath("my-config/plugins/x/data.json", "my-config")).toBe(false);
+    expect(isObsidianConfigSyncPath("my-config/appearance.json", "my-config")).toBe(true);
   });
 
-  it("policy matches this device → nothing to do", () => {
-    expect(resolveSyncPolicy("drive", "drive")).toEqual({ effectiveOwner: "drive", seed: false, adopt: false });
-    expect(resolveSyncPolicy("gtasks", "gtasks")).toEqual({ effectiveOwner: "gtasks", seed: false, adopt: false });
+  it("allows the safe config files, snippets, themes, and plugin CODE only", () => {
+    expect(isObsidianConfigSyncPath(".obsidian/appearance.json", ".obsidian")).toBe(true);
+    expect(isObsidianConfigSyncPath(".obsidian/community-plugins.json", ".obsidian")).toBe(true);
+    expect(isObsidianConfigSyncPath(".obsidian/hotkeys.json", ".obsidian")).toBe(true);
+    expect(isObsidianConfigSyncPath(".obsidian/snippets/my.css", ".obsidian")).toBe(true);
+    expect(isObsidianConfigSyncPath(".obsidian/themes/Catppuccin/theme.css", ".obsidian")).toBe(true);
+    expect(isObsidianConfigSyncPath(".obsidian/plugins/dataview/manifest.json", ".obsidian")).toBe(true);
+    expect(isObsidianConfigSyncPath(".obsidian/plugins/dataview/main.js", ".obsidian")).toBe(true);
+    expect(isObsidianConfigSyncPath(".obsidian/plugins/dataview/styles.css", ".obsidian")).toBe(true);
   });
 
-  it("policy differs → adopt the policy (it always wins; the device switches, never the reverse)", () => {
-    expect(resolveSyncPolicy("drive", "gtasks")).toEqual({ effectiveOwner: "drive", seed: false, adopt: true });
-    expect(resolveSyncPolicy("gtasks", "drive")).toEqual({ effectiveOwner: "gtasks", seed: false, adopt: true });
+  it("refuses anything outside the config dir and unknown plugin files", () => {
+    expect(isObsidianConfigSyncPath("Books/Antifrágil.md", ".obsidian")).toBe(false);
+    expect(isObsidianConfigSyncPath(".obsidian/plugins/x/cache.db", ".obsidian")).toBe(false);
+    expect(isObsidianConfigSyncPath(".obsidian/plugins/x/secret.json", ".obsidian")).toBe(false);
+    expect(isObsidianConfigSyncPath(".obsidian/unknown-config.json", ".obsidian")).toBe(false);
   });
 });

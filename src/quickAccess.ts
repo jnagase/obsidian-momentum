@@ -2,7 +2,7 @@ import { ItemView, WorkspaceLeaf, TFile, TFolder, setIcon, setTooltip, Notice, n
 import { drawDonut, drawTreemap, drawLineChart, drawRing, drawClockProgress } from "./charts";
 import { DriveViewConfig } from "./driveBrowser";
 import { ConfirmModal } from "./ui";
-import { DriveSyncSummary, DriveIssueCategory, DriveProgress, walkRemoteTree } from "./driveSync";
+import { DriveSyncSummary, DriveIssueCategory, DriveProgress, walkRemoteTree, isObsidianConfigSyncPath } from "./driveSync";
 
 /** Enriched per-file status after an on-demand "Check Drive" (adds drive-only / diverged / remote). */
 type CheckStatus = "synced" | "local" | "pending" | "diverged" | "remote" | "drive";
@@ -92,6 +92,11 @@ export class FileManagerView extends ItemView {
   private driveSettleTimer = 0;
   /** The "⏹ Stop" button, shown only while a sync runs. */
   private driveStopBtnEl: HTMLButtonElement | null = null;
+  /** Obsidian config files (theme, snippets, enabled plugins, hotkeys…) the vault API can't see.
+   *  Gathered via the raw adapter (async) and cached, then folded into the storage overview so the
+   *  dashboard reflects the config too. Uses the same allowlist as Drive config-sync, so it's a
+   *  bounded set — never caches, data.json or per-device state. */
+  private configFiles: { ext: string; size: number }[] = [];
 
   constructor(leaf: WorkspaceLeaf, cfg: QuickAccessConfig) {
     super(leaf);
@@ -110,6 +115,7 @@ export class FileManagerView extends ItemView {
     h.createSpan({ cls: "pa-beta-tag", text: "beta" });
     this.bodyEl = root.createDiv();
     this.render();
+    void this.gatherObsidianConfig(); // async: folds .obsidian config into the overview, re-renders when ready
     this.registerEvent(this.app.workspace.on("file-open", () => this.render()));
     // Keep the dashboard fresh as the vault changes (new/removed/renamed/edited files) — debounced,
     // and skipped WHILE a sync runs so it doesn't fight the live fills (the sync re-renders at its end).
@@ -152,7 +158,9 @@ export class FileManagerView extends ItemView {
       this.setFolderSyncLabel();
       this.updateStopBtn();
       window.clearTimeout(this.driveSettleTimer);
-      this.driveSettleTimer = window.setTimeout(() => this.render(), 400);
+      // Re-gather config too: a config-sync pull may have changed the .obsidian files, and
+      // gatherObsidianConfig re-renders at the end (so this also settles the folder colours).
+      this.driveSettleTimer = window.setTimeout(() => void this.gatherObsidianConfig(), 400);
       return;
     }
     this.driveSyncing = true;
@@ -174,6 +182,31 @@ export class FileManagerView extends ItemView {
     if (p.phase === "scanning") this.setLive(p.incremental ? "Checking for changes… (incremental)" : p.reason ? `Scanning Drive… (full — ${p.reason})` : "Scanning Drive… (full)", null);
     else if (p.phase === "planning") this.setLive(p.total ? `Comparing files… ${p.done}/${p.total}` : "Comparing files…", frac);
     else { const pc = p.total ? Math.round((p.done / p.total) * 100) : 0; this.setLive(p.total ? `Applying changes… ${p.done}/${p.total} (${pc}%)` : "Applying changes…", frac); }
+  }
+
+  /** Walk the Obsidian config dir via the raw adapter (the vault API never lists it) and cache the
+   *  allowlisted config files, then re-render so the storage overview includes them. Best-effort:
+   *  any listing/stat failure is skipped so the dashboard never breaks on it. */
+  private async gatherObsidianConfig(): Promise<void> {
+    const adapter = this.app.vault.adapter;
+    const cfgDir = this.app.vault.configDir; // not necessarily ".obsidian" — honour the user's setting
+    const out: { ext: string; size: number }[] = [];
+    const queue = [cfgDir];
+    while (queue.length) {
+      const dir = queue.shift()!;
+      let listing: { files: string[]; folders: string[] };
+      try { listing = await adapter.list(dir); } catch { continue; }
+      for (const sub of listing.folders) queue.push(sub);
+      for (const file of listing.files) {
+        if (!isObsidianConfigSyncPath(file, cfgDir)) continue;
+        let size = 0;
+        try { size = (await adapter.stat(file))?.size ?? 0; } catch { /* ignore a single unreadable file */ }
+        const slash = file.lastIndexOf("/"); const dot = file.lastIndexOf(".");
+        out.push({ ext: dot > slash ? file.slice(dot + 1).toLowerCase() : "?", size });
+      }
+    }
+    this.configFiles = out;
+    this.render();
   }
 
   private render(): void {
@@ -198,8 +231,17 @@ export class FileManagerView extends ItemView {
       monthly.set(key, (monthly.get(key) ?? 0) + 1);
     }
 
+    // Fold in the Obsidian config files (theme, snippets, enabled plugins, hotkeys…) so the type
+    // donut and headline counters reflect them too. Kept out of the per-folder treemap/cards on
+    // purpose — those drive the "reveal in explorer" and sync-colour logic, which is vault-only.
+    for (const c of this.configFiles) {
+      totalSize += c.size;
+      const t = byType.get(c.ext) ?? { count: 0, size: 0 }; t.count++; t.size += c.size; byType.set(c.ext, t);
+    }
+    const fileCount = files.length + this.configFiles.length;
+
     const driveOn = !!(this.cfg.drive && this.cfg.driveEnabled?.());
-    this.renderTopRow(files.length, totalSize, byType);
+    this.renderTopRow(fileCount, totalSize, byType);
     this.renderTreemap(byFolder);
     // "Your folders" lives in the main flow only when Drive is off; when Drive is on it moves
     // INTO the Google Drive section (below the status) so its per-folder sync colours sit in context.
@@ -449,10 +491,16 @@ export class FileManagerView extends ItemView {
       drive:    { label: "☁ Drive only",   cls: "is-drive" },
     };
     // Fresh check (drive-only/diverged/…) if available; else baseline-derived (synced/local + pending).
+    // "Pending" = genuinely modified SINCE THE LAST SYNC. Compare the local mtime to the last
+    // sync time — NOT to the baseline's remote modifiedTime. The remote time is a different clock
+    // (when Drive recorded the file); any pulled/imported file has a newer local mtime even when
+    // its content is byte-identical to Drive, which used to flag hundreds of in-sync files as
+    // "pending". A file untouched since the last sync is synced; one edited after it is pending.
+    const lastSyncMs = this.driveCheck ? 0 : (last ? Date.parse(last.time) : 0);
     const rows0: CheckedFile[] = this.driveCheck
       ? this.driveCheck.files
       : files.map((f) => {
-          const pending = f.status === "synced" && !!f.at && f.mtime > Date.parse(f.at);
+          const pending = f.status === "synced" && lastSyncMs > 0 && f.mtime > lastSyncMs;
           const cstatus: CheckStatus = f.status === "local" ? "local" : pending ? "pending" : "synced";
           return { path: f.path, cstatus, mtime: f.mtime, at: f.at };
         });

@@ -89,6 +89,42 @@ export function isBinaryName(name: string): boolean {
   return ext === "" || !TEXT_EXT.has(ext);
 }
 
+/** Top-level `.obsidian/` config files safe to replicate across devices (theme, which plugins are
+ *  enabled, hotkeys, bookmarks, …). Deliberately an ALLOWLIST: nothing syncs unless named here. */
+const OBSIDIAN_CONFIG_FILES = new Set<string>([
+  "appearance.json", "app.json", "hotkeys.json", "community-plugins.json",
+  "core-plugins.json", "core-plugins-migration.json", "graph.json", "bookmarks.json",
+  "templates.json", "types.json", "backlink.json", "canvas.json", "page-preview.json",
+  "zk-prefixer.json", "daily-notes.json", "note-composer.json", "command-palette.json",
+]);
+
+/**
+ * ALLOWLIST-ONLY gate for syncing a `.obsidian/` config file across devices (a Pro feature).
+ * Returns true ONLY for explicitly safe files, so secrets and per-device state can NEVER leak:
+ *  - every plugin's `data.json` is REFUSED (ours holds the Drive/Google tokens, cursor, baselines
+ *    and device id — replicating it would leak tokens through Drive and clone sync state);
+ *  - `workspace.json`/`workspace-mobile.json` are REFUSED (per-device UI layout, constant churn).
+ * Allowed: a fixed set of top-level config JSONs, `snippets/` and `themes/` (whole folders), and
+ * each plugin's CODE only (`manifest.json`, `main.js`, `styles.css`) — never its data/state.
+ * Pure & deterministic (unit-tested) so the safety property is provable.
+ */
+export function isObsidianConfigSyncPath(rel: string, configDir: string): boolean {
+  const prefix = configDir.endsWith("/") ? configDir : `${configDir}/`;
+  if (!rel.startsWith(prefix)) return false;
+  const p = rel.slice(prefix.length);
+  if (!p || p.includes("/..") || p.startsWith("../")) return false;
+  // Hard denylist — refused even if a pattern below would otherwise match.
+  if (p === "workspace.json" || p === "workspace-mobile.json") return false;
+  if (p === "data.json" || p.endsWith("/data.json")) return false;
+  // Allowed top-level config files.
+  if (OBSIDIAN_CONFIG_FILES.has(p)) return true;
+  // Snippets and themes (whole folders are safe — plain CSS/theme assets).
+  if (p.startsWith("snippets/") || p.startsWith("themes/")) return true;
+  // Plugin CODE only — never a plugin's data.json/state.
+  if (/^plugins\/[^/]+\/(manifest\.json|main\.js|styles\.css)$/.test(p)) return true;
+  return false;
+}
+
 /**
  * Progress ticks for the UI. A sync moves through phases: `scanning` (list/compare the remote —
  * the long part of a full run; `incremental:true` means the fast change-check path was taken),
@@ -144,6 +180,13 @@ export interface DriveBaselineStore {
   getCursor(): string | undefined;
   setCursor(token: string): void;
   save(): Promise<void>;
+  /**
+   * Drive folder ids of our synced tree, captured on the last full walk. Lets the incremental
+   * change-check tell an in-folder change from unrelated account-wide Drive activity. Optional so
+   * the in-memory test store can omit it (then only the root id is known).
+   */
+  getFolderIds?: () => string[];
+  setFolderIds?: (ids: string[]) => void;
   /**
    * Paths the user explicitly deleted locally since the last sync (path → timestamp ms). This is
    * the evidence that turns a local absence into a real `delete_remote` (Req 1.2). Optional so the
@@ -380,6 +423,10 @@ export async function runDriveSync(args: {
   /** Stable id of this device — stamped into a created file's `momentumOrigin` appProperty so a
    *  multi-device duplicate race can be told apart in the logs. */
   deviceId?: string;
+  /** Scope predicate (REL path → in scope?) mirroring the local listing. The remote walk is
+   *  scope-agnostic, so without this an out-of-scope-but-on-Drive file is pulled every cycle.
+   *  When provided, out-of-scope remote entries are ignored on both sides. */
+  inScope?: (relPath: string) => boolean;
 }): Promise<DriveSyncResult> {
   const { token, driveFolderId, fs, baselines, confirmed } = args;
   const strategy = args.conflictStrategy ?? DEFAULT_CONFLICT_STRATEGY;
@@ -416,9 +463,22 @@ export async function runDriveSync(args: {
         const { changes, newStartPageToken } = await listChanges(token, cursor);
         cursorWasValid = true;
         chainedCursor = newStartPageToken;
-        changeCount = changes.length;
+        // The Changes feed is ACCOUNT-WIDE (spaces=drive, restrictToMyDrive=false — so a removal or
+        // move is never missed). For the incremental fast-path we must only react to changes INSIDE
+        // our folder; otherwise unrelated Drive activity (other apps, shared files, Photos…) makes
+        // every sync do a pointless full scan forever. A change is relevant when it touches a file
+        // we already track (by id) or lives under our folder — the root or any folder id recorded
+        // on the last full walk. Any addition under our tree always emits at least one event whose
+        // parent is a KNOWN folder (a new subfolder's own creation event has a known parent), so a
+        // brand-new deep file can't slip past. Removals carry no file object → counted only when
+        // they hit a tracked id.
+        const trackedIds = new Set<string>();
+        for (const n of baselines.names()) { const id = baselines.get(n)?.fileId; if (id) trackedIds.add(id); }
+        const knownFolders = new Set<string>([rootId, ...(baselines.getFolderIds?.() ?? [])]);
         for (const c of changes) {
-          if (c.removed || c.file?.trashed) removedFileIds.add(c.fileId);
+          if ((c.removed || c.file?.trashed) && trackedIds.has(c.fileId)) removedFileIds.add(c.fileId);
+          const relevant = trackedIds.has(c.fileId) || !!c.file?.parents?.some((p) => knownFolders.has(p));
+          if (relevant) changeCount++;
         }
       } catch (e) {
         if (e instanceof InvalidDriveCursorError) {
@@ -468,6 +528,22 @@ export async function runDriveSync(args: {
     remoteDups = tree.dups;
     folderCache = new Map(tree.folders); // seeds push so a subfolder is created at most once/cycle
     remoteAuthoritative = !tree.truncated; // a complete walk → absence means a real remote deletion
+    // Record our folder ids so the next incremental run can tell an in-folder change from unrelated
+    // account-wide Drive activity (see the Changes block above). Only on a complete walk.
+    if (remoteAuthoritative) baselines.setFolderIds?.([...tree.folders.values()]);
+  }
+
+  // ---- SCOPE SYMMETRY (remote walk must honour the SAME scope as the local listing) ------
+  // fs.list() only yields IN-SCOPE paths, but the Drive walk is scope-agnostic, so a file that
+  // lives on Drive yet is out of scope on THIS device (e.g. a task note when Google Tasks — not
+  // Drive — owns task notes here) shows up as "present remotely, absent locally" and gets PULLED
+  // every single cycle: it overwrites the locally-owned copy, never converges (the next listing
+  // still excludes it), and wastes a full scan forever. Drop out-of-scope remote entries so they
+  // are ignored on BOTH sides — never pulled, pushed, moved, deleted or consolidated here. Their
+  // Drive copies are left untouched for any device where those paths ARE in scope.
+  if (args.inScope) {
+    for (const k of [...remoteByPath.keys()]) if (!args.inScope(k)) remoteByPath.delete(k);
+    remoteDups = remoteDups.filter((d) => args.inScope!(d.rel));
   }
 
   // ---- IDENTITY RECONCILIATION (Req 2: stable identity, anti-duplicate) ------------------
@@ -859,7 +935,12 @@ export async function runDriveSync(args: {
       }
     } catch (e) {
       okThis = false;
-      fatal = true;
+      // A PUSH failure (local→Drive) loses no REMOTE change, so it must NOT mark the cycle fatal
+      // or block the change cursor — otherwise one unpushable file (e.g. a path too long for a
+      // Drive app property) forces a full re-scan of thousands of changes on EVERY sync, forever,
+      // and nothing ever converges. Pull/merge/delete-local failures DO mean a remote change
+      // wasn't applied locally, so those still hold the cursor back.
+      if (p.action !== "push") fatal = true;
       const msg = e instanceof Error ? e.message : String(e);
       result.errors.push(`${p.action} ${p.path}: ${msg}`);
       result.issues.push({ path: p.path, reason: `${p.action} failed: ${msg}`, category: "error" });
@@ -1035,10 +1116,22 @@ async function ensureRemoteFolderPath(
 
 // ---- per-action helpers (free functions; `this_` prefix avoids clashing with class methods) --
 
-/** Build the appProperties that stamp a file's stable identity (its logical path + origin). */
+/** Google caps EACH app property at 124 bytes (key + value, UTF-8). A very long vault path makes
+ *  files.create/update return 403 — which used to fail the file's push on every sync and (before
+ *  the cursor fix) stall convergence. When a value doesn't fit we simply OMIT that property: the
+ *  file then keys by its tree path (no move-detection for that one file), which is harmless and
+ *  never trips the API limit. */
+const APP_PROPERTY_MAX_BYTES = 124;
+function fitsAppProperty(key: string, value: string): boolean {
+  return new TextEncoder().encode(key).length + new TextEncoder().encode(value).length <= APP_PROPERTY_MAX_BYTES;
+}
+
+/** Build the appProperties that stamp a file's stable identity (its logical path + origin),
+ *  omitting any that would exceed Google's 124-byte-per-property limit (see above). */
 function momentumProps(path: string, deviceId?: string): Record<string, string> {
-  const props: Record<string, string> = { [MOMENTUM_PATH_KEY]: path };
-  if (deviceId) props[MOMENTUM_ORIGIN_KEY] = deviceId;
+  const props: Record<string, string> = {};
+  if (fitsAppProperty(MOMENTUM_PATH_KEY, path)) props[MOMENTUM_PATH_KEY] = path;
+  if (deviceId && fitsAppProperty(MOMENTUM_ORIGIN_KEY, deviceId)) props[MOMENTUM_ORIGIN_KEY] = deviceId;
   return props;
 }
 

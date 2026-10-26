@@ -315,6 +315,7 @@ export class PADataStore {
     if (m.protein_target) cfg.proteinTarget = num(m.protein_target);
     if (m.carbs_target) cfg.carbsTarget = num(m.carbs_target);
     if (m.water_target) cfg.waterTarget = num(m.water_target);
+    if (m.weight_target != null) cfg.weightTarget = num(m.weight_target);
     if (m.task_columns) cfg.taskColumns = coerce(m.task_columns, cfg.taskColumns);
     if (m.task_column_names) cfg.taskColumnNames = coerce(m.task_column_names, cfg.taskColumnNames);
     if (m.study_columns) cfg.studyColumns = coerce(m.study_columns, cfg.studyColumns);
@@ -348,6 +349,7 @@ export class PADataStore {
       protein_target: cfg.proteinTarget,
       carbs_target: cfg.carbsTarget,
       water_target: cfg.waterTarget,
+      weight_target: cfg.weightTarget,
       task_columns: cfg.taskColumns,
       task_column_names: cfg.taskColumnNames,
       study_columns: cfg.studyColumns,
@@ -2046,6 +2048,45 @@ export class PADataStore {
     const log: Record<string, number> = {};
     log[date] = Math.max(0, deltaLiters);
     await this.writeFile("Nutrition/water.md", this.buildDoc({ type: "water-log", log, modified: new Date().toISOString() }, "# Water log\n"));
+  }
+
+  // ---- Body weight (manual, stored in Fitness/weight.md as a {date: kg} map) ----
+  // Mirrors the Water model: one file, one map, source of truth. A weight is a point-in-time
+  // measurement (SET, not accumulate), one value per day (logging again overwrites that day).
+  loadWeightLog(): Record<string, number> {
+    const f = this.fileAt("Fitness/weight.md");
+    if (!f) return {};
+    return coerce<Record<string, number>>(this.frontmatter(f).log, {});
+  }
+
+  /** Record (or correct) the body weight for a date. kg <= 0 removes that day's entry. */
+  async logWeight(date: string, kg: number): Promise<void> {
+    const value = Math.round(kg * 10) / 10; // 0.1 kg precision
+    const f = this.fileAt("Fitness/weight.md");
+    if (f) {
+      await this.patchFrontmatter(f, (fm) => {
+        const log = coerce<Record<string, number>>(fm.log, {});
+        if (value > 0) log[date] = value; else delete log[date];
+        fm.log = log;
+        fm.modified = new Date().toISOString();
+      });
+      return;
+    }
+    if (value <= 0) return;
+    const log: Record<string, number> = { [date]: value };
+    await this.writeFile("Fitness/weight.md", this.buildDoc({ type: "weight-log", log, modified: new Date().toISOString() }, "# Body weight log\n"));
+  }
+
+  /** Remove a day's weight entry. */
+  async removeWeight(date: string): Promise<void> {
+    const f = this.fileAt("Fitness/weight.md");
+    if (!f) return;
+    await this.patchFrontmatter(f, (fm) => {
+      const log = coerce<Record<string, number>>(fm.log, {});
+      delete log[date];
+      fm.log = log;
+      fm.modified = new Date().toISOString();
+    });
   }
 
   // ============================================================

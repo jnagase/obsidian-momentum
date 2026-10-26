@@ -120,16 +120,38 @@ export function colRank(status: string, cols: string[]): number { return cols.in
 export function mostAdvancedCol(tasks: Task[], cols: string[]): string {
   return tasks.reduce((best, t) => (colRank(t.status, cols) > colRank(best, cols) ? t.status : best), tasks[0].status);
 }
+// ── Kanban column over Google Tasks (via the notes field) ──────────────────────
+// Google Tasks has NO column concept — only a done-bit. Momentum's column (backlog / in
+// progress / …) is carried in the one field Google round-trips: the task `notes`. The sync has
+// always owned that field (it sent it blank), so we write a single marker line that other devices
+// read back when they first materialize the task (pullCreate). Without this, a task made in
+// "in progress" on one device lands in the first column (backlog) on another, because the column
+// never crossed the wire.
+const COL_MARK_RE = /\[momentum:col=([^\]]*)\]/i;
+/** The notes string to send to Google for a task in the given column (marker only — we own notes). */
+function encodeCol(status: string): string {
+  return `[momentum:col=${(status || "").trim()}]`;
+}
+/** Read the Momentum column out of a Google task's notes; null when absent or not a known column. */
+function decodeCol(notes: string | undefined, cols: string[]): string | null {
+  const m = (notes || "").match(COL_MARK_RE);
+  if (!m) return null;
+  const col = m[1].trim();
+  return col && cols.includes(col) ? col : null;
+}
+
 /**
  * Column a pullCreate should assign to a note materialized from the Google side. Google has no
- * column: a completed remote lands in done; otherwise inherit an equivalent local note's column
- * (preserving "in progress" across the multi-device race), falling back to the first column for
- * a genuinely new task.
+ * column: a completed remote lands in done; otherwise use the column carried in the task notes
+ * (`notesCol`, written by any device's push), then an equivalent local note's column (the
+ * multi-device race), falling back to the first column for a genuinely new task.
  */
 export function pullCreateStatus(
   gtStatus: string, sig: string, localColBySig: Map<string, string>, firstCol: string, doneCol: string,
+  notesCol?: string | null,
 ): string {
-  return gtStatus === "completed" ? doneCol : (localColBySig.get(sig) ?? firstCol);
+  if (gtStatus === "completed") return doneCol;
+  return notesCol ?? localColBySig.get(sig) ?? firstCol;
 }
 
 /**
@@ -368,7 +390,7 @@ export class GTSyncService {
         if (!sameBase(local, base)) {
           ops.push({
             kind: "patch", listId, gtId: gt.id, base: local,
-            body: { title: local.title, status: local.status as GTTask["status"], due: toGTDue(local.due), notes: "" },
+            body: { title: local.title, status: local.status as GTTask["status"], due: toGTDue(local.due), notes: encodeCol(t.status) },
           });
         } else if (!sameBase(remote, base)) {
           const changes: Partial<Task> = {};
@@ -412,7 +434,7 @@ export class GTSyncService {
       result.errors.push(`Mass-change guard: ${writeOps} changes pending (limit ${MAX_WRITES_PER_RUN}). Run "Sync now" manually to confirm.`);
       const links = ops.filter((o) => o.kind === "link");
       let dl = 0;
-      for (const op of links) { await this.applyOp(at, op, result, localStatus, firstCol, localColBySig, doneCol); report({ phase: "applying", done: ++dl, total: links.length }); }
+      for (const op of links) { await this.applyOp(at, op, result, localStatus, firstCol, localColBySig, doneCol, cols); report({ phase: "applying", done: ++dl, total: links.length }); }
       await this.baselines.save();
       return result;
     }
@@ -420,7 +442,7 @@ export class GTSyncService {
     // ---- APPLY ----
     let done = 0;
     for (const op of ops) {
-      try { await this.applyOp(at, op, result, localStatus, firstCol, localColBySig, doneCol); }
+      try { await this.applyOp(at, op, result, localStatus, firstCol, localColBySig, doneCol, cols); }
       catch (e) { result.errors.push(`${op.kind}: ${String(e)}`); }
       report({ phase: "applying", done: ++done, total: ops.length });
     }
@@ -585,7 +607,7 @@ export class GTSyncService {
       const target = boardToListId.get(t.kanbanName || "My Tasks");
       if (!target || target === t.googleList) continue;
       try {
-        const created = await createTask(at, target, { title: t.title, notes: "", status: localStatus(t), due: toGTDue(t.due) });
+        const created = await createTask(at, target, { title: t.title, notes: encodeCol(t.status), status: localStatus(t), due: toGTDue(t.due) });
         try { await deleteTask(at, t.googleList, t.googleId); } catch { /* old copy may already be gone */ }
         if (created.id) {
           await this.store.setTaskGoogleLink(t, created.id, target);
@@ -747,7 +769,7 @@ export class GTSyncService {
   private async applyOp(
     at: string, op: SyncOp, result: GTSyncResult,
     localStatus: (t: Task) => GTTask["status"], firstCol: string,
-    localColBySig: Map<string, string>, doneCol: string,
+    localColBySig: Map<string, string>, doneCol: string, cols: string[],
   ): Promise<void> {
     switch (op.kind) {
       case "link":
@@ -756,7 +778,7 @@ export class GTSyncService {
         result.linked++;
         break;
       case "create": {
-        const created = await createTask(at, op.listId, { title: op.task.title, notes: "", status: localStatus(op.task), due: toGTDue(op.task.due) });
+        const created = await createTask(at, op.listId, { title: op.task.title, notes: encodeCol(op.task.status), status: localStatus(op.task), due: toGTDue(op.task.due) });
         if (created.id) {
           await this.store.setTaskGoogleLink(op.task, created.id, op.listId);
           this.baselines.set(created.id, { title: op.task.title, status: localStatus(op.task), due: normalizeYmd(op.task.due) });
@@ -779,7 +801,8 @@ export class GTSyncService {
         // column of an equivalent local note when one exists (preserves "in progress" across
         // the multi-device race), falling back to the first column for a genuinely new task.
         const sig = sigKey(op.gt.title, fromGTDue(op.gt.due), op.gt.status);
-        const status = pullCreateStatus(op.gt.status, sig, localColBySig, firstCol, doneCol);
+        const notesCol = decodeCol(op.gt.notes, cols);
+        const status = pullCreateStatus(op.gt.status, sig, localColBySig, firstCol, doneCol, notesCol);
         await this.store.createTask({
           title: op.gt.title, status, priority: "medium",
           kanbanName: op.board,

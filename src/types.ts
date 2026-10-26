@@ -200,6 +200,8 @@ export interface PAConfig {
   proteinTarget: number;
   carbsTarget: number;
   waterTarget: number;
+  /** Goal body weight (kg). 0 = no goal (no goal line on the weight chart). */
+  weightTarget: number;
   taskColumns: string[];
   taskColumnNames: Record<string, string>;
   studyColumns: string[];
@@ -258,6 +260,7 @@ export function defaultConfig(): PAConfig {
     proteinTarget: 120,
     carbsTarget: 200,
     waterTarget: 2.5,
+    weightTarget: 0,
     taskColumns: DEFAULT_TASK_COLUMNS.slice(),
     taskColumnNames: { ...DEFAULT_TASK_COLUMN_NAMES },
     studyColumns: DEFAULT_STUDY_COLUMNS.slice(),

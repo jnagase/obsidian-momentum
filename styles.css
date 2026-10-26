@@ -904,3 +904,22 @@ a.pa-drive-tname:hover{color:var(--text-accent)}
   line-height: 1.45;
 }
 .pa-drive-tasks-note strong { color: var(--text-normal); }
+
+/* ===== Fitness — body weight (manual tracker) ===== */
+.pa-weight-goal{display:flex;align-items:center;gap:4px;font-size:.78rem;color:var(--text-muted)}
+.pa-weight-goal-input{width:64px}
+.pa-weight-summary{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin:2px 0 10px}
+.pa-weight-current{font-size:1.5rem;font-weight:700;color:var(--text-normal)}
+.pa-weight-delta{font-size:.8rem;font-weight:600}
+.pa-weight-down{color:#16a34a}
+.pa-weight-up{color:#d97706}
+.pa-weight-add{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+.pa-weight-add input[type="date"]{width:auto}
+.pa-weight-list{margin-top:10px;display:flex;flex-direction:column;gap:2px}
+.pa-weight-row{display:flex;align-items:center;gap:8px;font-size:.82rem;padding:2px 0;border-top:1px solid var(--background-modifier-border)}
+.pa-weight-row-date{color:var(--text-muted);min-width:92px}
+.pa-weight-row-kg{font-weight:600;flex:1}
+
+/* Storage overview footer tip (keep screen awake for a long mobile sync) */
+.pa-storage-note{margin-top:12px;padding:0.6em 0.8em;border-radius:8px;background:var(--background-secondary);color:var(--text-muted);font-size:0.8em;line-height:1.45}
+.pa-storage-note strong{color:var(--text-normal)}

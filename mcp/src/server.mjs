@@ -35,9 +35,9 @@ const tools = {
   // ---------- Config ----------
   get_config: { description: "Get the vault configuration (currency, targets, task/study columns, categories, splits).", inputSchema: NONE, handler: () => store.loadConfig() },
   update_config: {
-    description: "Update config fields (only the provided ones): currency, calorieTarget, proteinTarget, carbsTarget, waterTarget, monthlyBudget.",
-    inputSchema: S.obj({ currency: S.str(), calorieTarget: S.num(), proteinTarget: S.num(), carbsTarget: S.num(), waterTarget: S.num(), monthlyBudget: S.num() }),
-    handler: async (a) => { const cfg = await store.loadConfig(); for (const k of ["currency","calorieTarget","proteinTarget","carbsTarget","waterTarget","monthlyBudget"]) if (a[k] !== undefined) cfg[k] = a[k]; await store.saveConfig(cfg); return { ok: true }; },
+    description: "Update config fields (only the provided ones): currency, calorieTarget, proteinTarget, carbsTarget, waterTarget, weightTarget, monthlyBudget.",
+    inputSchema: S.obj({ currency: S.str(), calorieTarget: S.num(), proteinTarget: S.num(), carbsTarget: S.num(), waterTarget: S.num(), weightTarget: S.num("Goal body weight in kg (0 = no goal)"), monthlyBudget: S.num() }),
+    handler: async (a) => { const cfg = await store.loadConfig(); for (const k of ["currency","calorieTarget","proteinTarget","carbsTarget","waterTarget","weightTarget","monthlyBudget"]) if (a[k] !== undefined) cfg[k] = a[k]; await store.saveConfig(cfg); return { ok: true }; },
   },
 
   // ---------- Boards ----------
@@ -80,6 +80,8 @@ const tools = {
   list_workouts: { description: "List logged workouts, optionally by month (YYYY-MM).", inputSchema: S.obj({ month: S.str("YYYY-MM") }), handler: async (a) => { let w = await store.loadWorkouts(); if (a.month) w = w.filter((x) => x.date.startsWith(a.month)); return w.map(({ path, ...r }) => r); } },
   log_workout: { description: "Log a workout (creates a readable session + updates the Fitness month hub). exercises: [{exercise, weight, sets, feel}].", inputSchema: S.obj({ split: S.str("Split id or name"), duration: S.num("Minutes"), date: S.str("YYYY-MM-DD"), exercises: S.arr(S.obj({ exercise: S.str(), weight: S.num(), sets: S.str(), feel: S.str() }, ["exercise"])) }, ["split", "duration"]), handler: (a) => store.logWorkout(a) },
   delete_workout: { description: "Delete a workout by id or path.", inputSchema: S.obj({ id: S.str() }, ["id"]), handler: (a) => store.deleteWorkout(a.id) },
+  get_weight: { description: "Get the body-weight log (date -> kg).", inputSchema: NONE, handler: () => store.loadWeight() },
+  log_weight: { description: "Record (or correct) body weight for a date. One value per day; kg <= 0 removes that day's entry.", inputSchema: S.obj({ date: S.str("YYYY-MM-DD (defaults today)"), kg: S.num("Weight in kg") }, ["kg"]), handler: (a) => store.logWeight(a.date, a.kg) },
 
   // ---------- Habits ----------
   list_habits: { description: "List habits with their logs.", inputSchema: NONE, handler: async () => (await store.loadHabits()).map(({ path, ...r }) => r) },

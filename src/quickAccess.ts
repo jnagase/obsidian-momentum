@@ -623,6 +623,12 @@ export class FileManagerView extends ItemView {
     stat("Total size", humanSize(totalSize));
     stat("File types", String(byType.size));
     stat("Notes", String(this.app.vault.getMarkdownFiles().length));
+
+    // Mobile tip: a big first sync can outlast the phone's screen timeout, and a locked screen
+    // can suspend the sync mid-run. Tell users how to keep the screen awake until it finishes.
+    const note = sec.createDiv({ cls: "pa-storage-note" });
+    note.createEl("strong", { text: "Big sync on mobile? " });
+    note.createEl("span", { text: "Keep the screen on so it can finish — on Android, use the caffeine app; on iphone, set auto-lock to never in settings → display & brightness. Turn it back afterwards." });
   }
 
   // ---- treemap by top-level folder (WinDirStat style) --------------------------------

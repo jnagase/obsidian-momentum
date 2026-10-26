@@ -154,7 +154,7 @@ export class MomentumStore {
   // ============================================================
   async loadConfig() {
     const cfg = {
-      calorieTarget: 2000, proteinTarget: 120, carbsTarget: 200, waterTarget: 2.5,
+      calorieTarget: 2000, proteinTarget: 120, carbsTarget: 200, waterTarget: 2.5, weightTarget: 0,
       taskColumns: DEFAULT_TASK_COLUMNS.slice(), taskColumnNames: { ...DEFAULT_TASK_COLUMN_NAMES },
       studyColumns: DEFAULT_TASK_COLUMNS.slice(), studyColumnNames: { ...DEFAULT_TASK_COLUMN_NAMES },
       studyTopics: [], customSplits: [], splitNames: {}, currency: "$", monthlyBudget: 0, startingBalance: 0,
@@ -168,6 +168,7 @@ export class MomentumStore {
     if (m.protein_target) cfg.proteinTarget = num(m.protein_target);
     if (m.carbs_target) cfg.carbsTarget = num(m.carbs_target);
     if (m.water_target) cfg.waterTarget = num(m.water_target);
+    if (m.weight_target != null) cfg.weightTarget = num(m.weight_target);
     if (m.task_columns) cfg.taskColumns = coerce(m.task_columns, cfg.taskColumns);
     if (m.task_column_names) cfg.taskColumnNames = coerce(m.task_column_names, cfg.taskColumnNames);
     if (m.study_columns) cfg.studyColumns = coerce(m.study_columns, cfg.studyColumns);
@@ -189,7 +190,7 @@ export class MomentumStore {
     const meta = {
       type: "config",
       calorie_target: cfg.calorieTarget, protein_target: cfg.proteinTarget,
-      carbs_target: cfg.carbsTarget, water_target: cfg.waterTarget,
+      carbs_target: cfg.carbsTarget, water_target: cfg.waterTarget, weight_target: cfg.weightTarget,
       task_columns: cfg.taskColumns, task_column_names: cfg.taskColumnNames,
       study_columns: cfg.studyColumns, study_column_names: cfg.studyColumnNames,
       study_topics: cfg.studyTopics, custom_splits: cfg.customSplits, split_names: cfg.splitNames,
@@ -722,6 +723,22 @@ export class MomentumStore {
     log[d] = Math.max(0, Math.round(((log[d] || 0) + num(deltaLiters)) * 100) / 100);
     await this.writeRel("Nutrition/water.md", this.buildDoc({ type: "water-log", log, modified: new Date().toISOString() }, "# Water log\n"));
     return { date: d, liters: log[d] };
+  }
+
+  // Body weight: manual {date: kg} map in Fitness/weight.md (mirrors the plugin). A weight is a
+  // point-in-time value (SET, not accumulate); one value per day. kg <= 0 removes that day.
+  async loadWeight() {
+    const raw = await this.readRaw("Fitness/weight.md");
+    if (!raw) return {};
+    return coerce(this.parse(raw).fm.log, {});
+  }
+  async logWeight(date, kg) {
+    const d = (date || todayLocal()).slice(0, 10);
+    const value = Math.round(num(kg) * 10) / 10;
+    const log = await this.loadWeight();
+    if (value > 0) log[d] = value; else delete log[d];
+    await this.writeRel("Fitness/weight.md", this.buildDoc({ type: "weight-log", log, modified: new Date().toISOString() }, "# Body weight log\n"));
+    return { date: d, kg: log[d] ?? null };
   }
 
   // ============================================================

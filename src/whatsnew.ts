@@ -6,6 +6,30 @@ export interface ChangeEntry { version: string; sections: ChangeSection[]; }
 /** Release notes shown in the "What's new" dialog, newest first. */
 export const CHANGELOG: ChangeEntry[] = [
   {
+    version: "0.8.13",
+    sections: [
+      {
+        title: "New — Body weight tracker",
+        items: [
+          "Fitness has a new \"body weight\" panel: log your weight by hand (any date), see your latest value and the change since last time, set an optional goal, and watch the trend on a chart with a goal line. Your weigh-ins are stored as plain data in your vault and travel with Drive sync like everything else.",
+        ],
+      },
+      {
+        title: "Fixed — task columns now sync across devices",
+        items: [
+          "A task made in \"In progress\" (or any column) on your phone used to land back in \"Backlog\" when you opened another device. Google Tasks only knows done/not-done, so the column never crossed over. Momentum now carries the column through the sync, so a task keeps its column wherever you open it. New tasks are covered; moving an existing task between columns across devices is a follow-up.",
+        ],
+      },
+      {
+        title: "Improved — File manager",
+        items: [
+          "The storage overview now counts your Obsidian config files (theme, snippets, enabled plugins), so the file-type breakdown and totals reflect them too.",
+          "Added a tip for mobile: on a big first sync, keep the screen awake so it can finish (Android: a keep-awake app; iPhone: set Auto-Lock to Never while it runs).",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.8.12",
     sections: [
       {

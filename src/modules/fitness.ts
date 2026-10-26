@@ -54,6 +54,7 @@ export class FitnessModule {
 
     const cols = root.createDiv({ cls: "pa-two-col" });
     this.renderCalendar(cols, workouts);
+    this.renderBodyWeight(cols);
     this.renderWeightProgress(cols, exercises, workouts);
     this.renderCardioProgress(cols, exercises, workouts);
 
@@ -176,6 +177,99 @@ export class FitnessModule {
   }
 
   // ---- Weight progress (strength exercises only) ----
+  // ---- Body weight (manual entry): latest + trend chart + goal + recent log ----
+  private renderBodyWeight(root: HTMLElement): void {
+    const card = root.createDiv({ cls: "pa-panel" });
+    const head = card.createDiv({ cls: "pa-section-head" });
+    head.createEl("h3", { text: "⚖️ body weight", cls: "pa-panel-title" });
+
+    // Goal weight (kg) — edited inline, persisted to config (0 = no goal).
+    const goal = this.ctx.config.weightTarget || 0;
+    const goalWrap = head.createDiv({ cls: "pa-weight-goal" });
+    goalWrap.createSpan({ text: "🎯", cls: "pa-muted" });
+    const goalInput = goalWrap.createEl("input", { cls: "pa-fit-input pa-weight-goal-input" });
+    goalInput.type = "number";
+    goalInput.step = "0.1";
+    goalInput.placeholder = "Goal";
+    if (goal > 0) goalInput.value = String(goal);
+    goalInput.setAttr("aria-label", "Goal weight in kilograms");
+    goalWrap.createSpan({ text: "kg", cls: "pa-muted" });
+    goalInput.onchange = () => void (async () => {
+      const cfg = await this.ctx.store.loadConfig();
+      cfg.weightTarget = Math.max(0, Math.round((parseFloat(goalInput.value) || 0) * 10) / 10);
+      await this.ctx.store.saveConfig(cfg);
+      await this.ctx.reloadConfig();
+      this.ctx.refresh();
+    })();
+
+    const log = this.ctx.store.loadWeightLog();
+    const dates = Object.keys(log).sort();
+
+    // Latest value + change since the previous entry + distance to goal.
+    const summary = card.createDiv({ cls: "pa-weight-summary" });
+    if (dates.length) {
+      const last = dates[dates.length - 1];
+      const latest = log[last];
+      summary.createSpan({ cls: "pa-weight-current", text: `${latest} kg` });
+      if (dates.length > 1) {
+        const prev = log[dates[dates.length - 2]];
+        const delta = Math.round((latest - prev) * 10) / 10;
+        const cls = delta < 0 ? "pa-weight-down" : delta > 0 ? "pa-weight-up" : "pa-muted";
+        summary.createSpan({ cls: `pa-weight-delta ${cls}`, text: `${delta > 0 ? "+" : ""}${delta} kg` });
+      }
+      summary.createSpan({ cls: "pa-muted", text: `· ${last}` });
+      if (goal > 0) {
+        const toGo = Math.round((latest - goal) * 10) / 10;
+        summary.createSpan({ cls: "pa-muted", text: toGo === 0 ? "· at goal 🎉" : `· ${Math.abs(toGo)} kg to goal` });
+      }
+    } else {
+      summary.createSpan({ cls: "pa-muted", text: "No weigh-ins yet. Log your first below." });
+    }
+
+    // Manual add row: weight (kg) + date (defaults today) + save.
+    const addRow = card.createDiv({ cls: "pa-weight-add" });
+    const kgInput = addRow.createEl("input", { cls: "pa-fit-input" });
+    kgInput.type = "number";
+    kgInput.step = "0.1";
+    kgInput.placeholder = "Weight (kg)";
+    kgInput.setAttr("aria-label", "Weight in kilograms");
+    const dateInput = addRow.createEl("input", { cls: "pa-fit-input" });
+    dateInput.type = "date";
+    dateInput.value = todayLocal();
+    dateInput.setAttr("aria-label", "Date of the weigh-in");
+    const save = addRow.createEl("button", { cls: "pa-btn", text: "Save" });
+    const doSave = () => {
+      const kg = Math.round((parseFloat(kgInput.value) || 0) * 10) / 10;
+      if (kg <= 0) { toast("Enter a weight in kg"); return; }
+      const date = dateInput.value || todayLocal();
+      void (async () => {
+        await this.ctx.store.logWeight(date, kg);
+        toast(`Logged ${kg} kg for ${date}`);
+        this.ctx.refresh();
+      })();
+    };
+    save.onclick = doSave;
+    kgInput.onkeydown = (e) => { if (e.key === "Enter") doSave(); };
+
+    // Trend chart (weight over time) with the goal line.
+    const labels = dates.map((d) => d.slice(5));
+    const series: LineSeries[] = [{ name: "Weight", color: "#7c3aed", values: dates.map((d) => log[d]) }];
+    drawLineChart(card, labels, series, { height: 200, goal: goal > 0 ? goal : undefined, format: (n) => `${n} kg` });
+
+    // Recent weigh-ins (newest first) with a delete for corrections.
+    if (dates.length) {
+      const list = card.createDiv({ cls: "pa-weight-list" });
+      for (const d of dates.slice(-8).reverse()) {
+        const row = list.createDiv({ cls: "pa-weight-row" });
+        row.createSpan({ cls: "pa-weight-row-date", text: d });
+        row.createSpan({ cls: "pa-weight-row-kg", text: `${log[d]} kg` });
+        const del = row.createEl("button", { cls: "pa-icon-btn", text: "🗑" });
+        del.setAttr("aria-label", `Delete weigh-in for ${d}`);
+        del.onclick = () => void (async () => { await this.ctx.store.removeWeight(d); this.ctx.refresh(); })();
+      }
+    }
+  }
+
   private renderWeightProgress(root: HTMLElement, exercises: Exercise[], workouts: Workout[]): void {
     const card = root.createDiv({ cls: "pa-panel" });
     const head = card.createDiv({ cls: "pa-section-head" });

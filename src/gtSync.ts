@@ -129,11 +129,11 @@ export function mostAdvancedCol(tasks: Task[], cols: string[]): string {
 // never crossed the wire.
 const COL_MARK_RE = /\[momentum:col=([^\]]*)\]/i;
 /** The notes string to send to Google for a task in the given column (marker only — we own notes). */
-function encodeCol(status: string): string {
+export function encodeCol(status: string): string {
   return `[momentum:col=${(status || "").trim()}]`;
 }
 /** Read the Momentum column out of a Google task's notes; null when absent or not a known column. */
-function decodeCol(notes: string | undefined, cols: string[]): string | null {
+export function decodeCol(notes: string | undefined, cols: string[]): string | null {
   const m = (notes || "").match(COL_MARK_RE);
   if (!m) return null;
   const col = m[1].trim();

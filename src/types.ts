@@ -195,13 +195,19 @@ export interface RecurringItem {
   weekday?: number; // weekly: 0=Sun .. 6=Sat
 }
 
+/** Measurement system for weights shown in the UI. Storage is ALWAYS canonical kg; this only
+ *  controls display + input conversion (metric = kg, imperial = lb). */
+export type UnitSystem = "metric" | "imperial";
+
 export interface PAConfig {
   calorieTarget: number;
   proteinTarget: number;
   carbsTarget: number;
   waterTarget: number;
-  /** Goal body weight (kg). 0 = no goal (no goal line on the weight chart). */
+  /** Goal body weight, stored in kg. 0 = no goal (no goal line on the weight chart). */
   weightTarget: number;
+  /** Weight display/input unit. Default "metric". Stored data stays in kg regardless. */
+  unitSystem: UnitSystem;
   taskColumns: string[];
   taskColumnNames: Record<string, string>;
   studyColumns: string[];
@@ -261,6 +267,7 @@ export function defaultConfig(): PAConfig {
     carbsTarget: 200,
     waterTarget: 2.5,
     weightTarget: 0,
+    unitSystem: "metric",
     taskColumns: DEFAULT_TASK_COLUMNS.slice(),
     taskColumnNames: { ...DEFAULT_TASK_COLUMN_NAMES },
     studyColumns: DEFAULT_STUDY_COLUMNS.slice(),

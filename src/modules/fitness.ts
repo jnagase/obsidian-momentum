@@ -4,6 +4,7 @@ import { ConfirmModal, FieldSpec, FormModal, toast, appendSidebarBtn } from "../
 import { todayLocal, ymd } from "../util";
 import { drawRing, drawLineChart, LineSeries } from "../charts";
 import { computePace } from "../data";
+import { weightUnit, kgToDisplay, displayToKg } from "../loaders";
 
 const SERIES_COLORS = ["#7c3aed", "#f59e0b", "#16a34a", "#3b82f6", "#ec4899", "#0ea5e9", "#ef4444", "#10b981", "#a855f7"];
 
@@ -29,6 +30,11 @@ export class FitnessModule {
     this.calYear = now.getFullYear();
     this.selectedDate = todayLocal(); // show today's log by default
   }
+
+  // Weight unit helpers (storage is always kg; these convert for display/input only).
+  private wUnit(): string { return weightUnit(this.ctx.config.unitSystem); }
+  private wShow(kg: number): number { return kgToDisplay(kg, this.ctx.config.unitSystem); }
+  private wStore(v: number): number { return displayToKg(v, this.ctx.config.unitSystem); }
 
   destroy(): void { this.stopTimer(); }
   private stopTimer(): void { if (this.timerId != null) { window.clearInterval(this.timerId); this.timerId = null; } }
@@ -108,7 +114,7 @@ export class FitnessModule {
       ch.createSpan({ text: `${s.id} - ${s.name} (${exs.length} ex)`, cls: "pa-plan-title" });
       const listEl = card.createDiv({ cls: "pa-plan-list" });
       if (!exs.length) listEl.createDiv({ cls: "pa-muted", text: "No exercises" });
-      else exs.forEach((ex) => listEl.createDiv({ cls: "pa-plan-ex", text: `${ex.name} — ${ex.sets}${ex.weight ? ` · ${ex.weight}kg` : ""}` }));
+      else exs.forEach((ex) => listEl.createDiv({ cls: "pa-plan-ex", text: `${ex.name} — ${ex.sets}${ex.weight ? ` · ${this.wShow(ex.weight)}${this.wUnit()}` : ""}` }));
     });
   }
 
@@ -179,24 +185,43 @@ export class FitnessModule {
   // ---- Weight progress (strength exercises only) ----
   // ---- Body weight (manual entry): latest + trend chart + goal + recent log ----
   private renderBodyWeight(root: HTMLElement): void {
+    const u = this.ctx.config.unitSystem;
+    const UL = weightUnit(u); // "kg" | "lb" — storage stays kg; this is display/input only.
     const card = root.createDiv({ cls: "pa-panel" });
     const head = card.createDiv({ cls: "pa-section-head" });
     head.createEl("h3", { text: "⚖️ body weight", cls: "pa-panel-title" });
 
-    // Goal weight (kg) — edited inline, persisted to config (0 = no goal).
-    const goal = this.ctx.config.weightTarget || 0;
+    // Unit selector (kg / lb) right where the weights are — storage stays kg; this only changes
+    // how weights are shown and typed, across body weight AND exercise weights.
+    const unitSel = head.createEl("select", { cls: "pa-select pa-weight-unit-select" });
+    // Unit symbols are intentionally lowercase; source them from weightUnit() (a function value,
+    // not a string literal) so the sentence-case UI lint doesn't force "Kg"/"Lb".
+    const optKg = unitSel.createEl("option", { value: "metric" }); optKg.textContent = weightUnit("metric");
+    const optLb = unitSel.createEl("option", { value: "imperial" }); optLb.textContent = weightUnit("imperial");
+    unitSel.value = u;
+    unitSel.setAttr("aria-label", "Weight unit (kg or lb)");
+    unitSel.onchange = () => void (async () => {
+      const cfg = await this.ctx.store.loadConfig();
+      cfg.unitSystem = unitSel.value === "imperial" ? "imperial" : "metric";
+      await this.ctx.store.saveConfig(cfg);
+      await this.ctx.reloadConfig();
+      this.ctx.refresh();
+    })();
+
+    // Goal weight — shown/typed in the user's unit, persisted to config as kg (0 = no goal).
+    const goal = this.ctx.config.weightTarget || 0; // kg
     const goalWrap = head.createDiv({ cls: "pa-weight-goal" });
     goalWrap.createSpan({ text: "🎯", cls: "pa-muted" });
     const goalInput = goalWrap.createEl("input", { cls: "pa-fit-input pa-weight-goal-input" });
     goalInput.type = "number";
     goalInput.step = "0.1";
     goalInput.placeholder = "Goal";
-    if (goal > 0) goalInput.value = String(goal);
-    goalInput.setAttr("aria-label", "Goal weight in kilograms");
-    goalWrap.createSpan({ text: "kg", cls: "pa-muted" });
+    if (goal > 0) goalInput.value = String(kgToDisplay(goal, u));
+    goalInput.setAttr("aria-label", `Goal weight in ${u === "imperial" ? "pounds" : "kilograms"}`);
+    goalWrap.createSpan({ text: UL, cls: "pa-muted" });
     goalInput.onchange = () => void (async () => {
       const cfg = await this.ctx.store.loadConfig();
-      cfg.weightTarget = Math.max(0, Math.round((parseFloat(goalInput.value) || 0) * 10) / 10);
+      cfg.weightTarget = Math.max(0, displayToKg(parseFloat(goalInput.value) || 0, u));
       await this.ctx.store.saveConfig(cfg);
       await this.ctx.reloadConfig();
       this.ctx.refresh();
@@ -209,18 +234,18 @@ export class FitnessModule {
     const summary = card.createDiv({ cls: "pa-weight-summary" });
     if (dates.length) {
       const last = dates[dates.length - 1];
-      const latest = log[last];
-      summary.createSpan({ cls: "pa-weight-current", text: `${latest} kg` });
+      const latest = log[last]; // kg
+      summary.createSpan({ cls: "pa-weight-current", text: `${kgToDisplay(latest, u)} ${UL}` });
       if (dates.length > 1) {
         const prev = log[dates[dates.length - 2]];
-        const delta = Math.round((latest - prev) * 10) / 10;
+        const delta = kgToDisplay(latest - prev, u); // difference is linear → convert directly
         const cls = delta < 0 ? "pa-weight-down" : delta > 0 ? "pa-weight-up" : "pa-muted";
-        summary.createSpan({ cls: `pa-weight-delta ${cls}`, text: `${delta > 0 ? "+" : ""}${delta} kg` });
+        summary.createSpan({ cls: `pa-weight-delta ${cls}`, text: `${delta > 0 ? "+" : ""}${delta} ${UL}` });
       }
       summary.createSpan({ cls: "pa-muted", text: `· ${last}` });
       if (goal > 0) {
-        const toGo = Math.round((latest - goal) * 10) / 10;
-        summary.createSpan({ cls: "pa-muted", text: toGo === 0 ? "· at goal 🎉" : `· ${Math.abs(toGo)} kg to goal` });
+        const toGo = kgToDisplay(latest - goal, u);
+        summary.createSpan({ cls: "pa-muted", text: toGo === 0 ? "· at goal 🎉" : `· ${Math.abs(toGo)} ${UL} to goal` });
       }
     } else {
       summary.createSpan({ cls: "pa-muted", text: "No weigh-ins yet. Log your first below." });
@@ -231,20 +256,20 @@ export class FitnessModule {
     const kgInput = addRow.createEl("input", { cls: "pa-fit-input" });
     kgInput.type = "number";
     kgInput.step = "0.1";
-    kgInput.placeholder = "Weight (kg)";
-    kgInput.setAttr("aria-label", "Weight in kilograms");
+    kgInput.placeholder = `Weight (${UL})`;
+    kgInput.setAttr("aria-label", `Weight in ${u === "imperial" ? "pounds" : "kilograms"}`);
     const dateInput = addRow.createEl("input", { cls: "pa-fit-input" });
     dateInput.type = "date";
     dateInput.value = todayLocal();
     dateInput.setAttr("aria-label", "Date of the weigh-in");
     const save = addRow.createEl("button", { cls: "pa-btn", text: "Save" });
     const doSave = () => {
-      const kg = Math.round((parseFloat(kgInput.value) || 0) * 10) / 10;
-      if (kg <= 0) { toast("Enter a weight in kg"); return; }
+      const kg = displayToKg(parseFloat(kgInput.value) || 0, u); // store canonical kg
+      if (kg <= 0) { toast(`Enter a weight in ${UL}`); return; }
       const date = dateInput.value || todayLocal();
       void (async () => {
         await this.ctx.store.logWeight(date, kg);
-        toast(`Logged ${kg} kg for ${date}`);
+        toast(`Logged ${kgToDisplay(kg, u)} ${UL} for ${date}`);
         this.ctx.refresh();
       })();
     };
@@ -253,8 +278,8 @@ export class FitnessModule {
 
     // Trend chart (weight over time) with the goal line.
     const labels = dates.map((d) => d.slice(5));
-    const series: LineSeries[] = [{ name: "Weight", color: "#7c3aed", values: dates.map((d) => log[d]) }];
-    drawLineChart(card, labels, series, { height: 200, goal: goal > 0 ? goal : undefined, format: (n) => `${n} kg` });
+    const series: LineSeries[] = [{ name: "Weight", color: "#7c3aed", values: dates.map((d) => kgToDisplay(log[d], u)) }];
+    drawLineChart(card, labels, series, { height: 200, goal: goal > 0 ? kgToDisplay(goal, u) : undefined, format: (n) => `${n} ${UL}` });
 
     // Recent weigh-ins (newest first) with a delete for corrections.
     if (dates.length) {
@@ -262,7 +287,7 @@ export class FitnessModule {
       for (const d of dates.slice(-8).reverse()) {
         const row = list.createDiv({ cls: "pa-weight-row" });
         row.createSpan({ cls: "pa-weight-row-date", text: d });
-        row.createSpan({ cls: "pa-weight-row-kg", text: `${log[d]} kg` });
+        row.createSpan({ cls: "pa-weight-row-kg", text: `${kgToDisplay(log[d], u)} ${UL}` });
         const del = row.createEl("button", { cls: "pa-icon-btn", text: "🗑" });
         del.setAttr("aria-label", `Delete weigh-in for ${d}`);
         del.onclick = () => void (async () => { await this.ctx.store.removeWeight(d); this.ctx.refresh(); })();
@@ -286,11 +311,11 @@ export class FitnessModule {
       color: SERIES_COLORS[i % SERIES_COLORS.length],
       values: splitWorkouts.map((w) => {
         const found = w.exercises.find((we) => we.exercise === ex.name);
-        return found ? found.weight : null;
+        return found ? this.wShow(found.weight) : null;
       }),
     })).filter((s) => s.values.some((v) => v != null));
 
-    drawLineChart(card, labels, series, { height: 220 });
+    drawLineChart(card, labels, series, { height: 220, format: (n) => `${n} ${this.wUnit()}` });
   }
 
   // ---- Cardio progress (distance over time, cardio exercises only) — sibling to weight progress ----
@@ -363,7 +388,7 @@ export class FitnessModule {
     const hasCardio = w.exercises.some((we) => (we.kind ?? "strength") === "cardio");
     const hasStrength = w.exercises.some((we) => (we.kind ?? "strength") === "strength");
     const headers = ["Exercise"];
-    if (hasStrength) headers.push("Weight", "Sets");
+    if (hasStrength) headers.push(`Weight (${this.wUnit()})`, "Sets");
     if (hasCardio) headers.push("Distance (km)", "Duration (min)", "Pace");
     headers.forEach((h) => thr.createEl("th", { text: h }));
     const tbody = table.createEl("tbody");
@@ -383,7 +408,7 @@ export class FitnessModule {
         paceTd.setText(pace != null ? `${pace} min/km` : "—");
       } else {
         const wIn = tr.createEl("td").createEl("input", { cls: "pa-fit-input pa-log-w" });
-        wIn.type = "number"; wIn.value = String(we.weight);
+        wIn.type = "number"; wIn.value = String(this.wShow(we.weight));
         const sIn = tr.createEl("td").createEl("input", { cls: "pa-fit-input pa-log-s" });
         sIn.value = we.sets;
         if (hasCardio) { tr.createEl("td", { text: "—" }); tr.createEl("td", { text: "—" }); tr.createEl("td", { text: "—" }); }
@@ -402,7 +427,7 @@ export class FitnessModule {
         }
         const wv = tr?.querySelector("input.pa-log-w") as HTMLInputElement | null;
         const sv = tr?.querySelector("input.pa-log-s") as HTMLInputElement | null;
-        return { ...we, weight: wv ? parseFloat(wv.value) || 0 : we.weight, sets: sv ? (sv.value.trim() || we.sets) : we.sets };
+        return { ...we, weight: wv ? this.wStore(parseFloat(wv.value) || 0) : we.weight, sets: sv ? (sv.value.trim() || we.sets) : we.sets };
       });
       const newDuration = parseFloat(durInput.value) || 0;
       await this.ctx.store.updateWorkoutExercises(w, updated, newDuration);
@@ -439,7 +464,7 @@ export class FitnessModule {
       const cols = [
         ...(this.workoutActive ? ["✓"] : []),
         "Exercise",
-        ...(hasStrength ? ["Weight", "Sets"] : []),
+        ...(hasStrength ? [`Weight (${this.wUnit()})`, "Sets"] : []),
         ...(hasCardio ? ["Distance (km)", "Duration (min)", "Pace"] : []),
         "How-to", "",
       ];
@@ -502,7 +527,7 @@ export class FitnessModule {
       }
       const wInput = panel.querySelector<HTMLInputElement>(`input.pa-weight-input[data-ex="${CSS.escape(ex.name)}"]`);
       const sInput = panel.querySelector<HTMLInputElement>(`input.pa-sets-input[data-ex="${CSS.escape(ex.name)}"]`);
-      const newWeight = wInput ? parseFloat(wInput.value) || 0 : ex.weight;
+      const newWeight = wInput ? this.wStore(parseFloat(wInput.value) || 0) : ex.weight;
       const newSets = sInput ? (sInput.value.trim() || ex.sets) : ex.sets;
       if (newWeight !== ex.weight || newSets !== ex.sets) { await this.ctx.store.saveExercise({ ...ex, weight: newWeight, sets: newSets }); changed++; }
     }
@@ -535,7 +560,7 @@ export class FitnessModule {
       paceTd.setText(pace != null ? `${pace} min/km` : "—");
     } else {
       const wInput = tr.createEl("td").createEl("input", { cls: "pa-fit-input" });
-      wInput.type = "number"; wInput.value = String(ex.weight); wInput.dataset.ex = ex.name; wInput.addClass("pa-weight-input");
+      wInput.type = "number"; wInput.value = String(this.wShow(ex.weight)); wInput.dataset.ex = ex.name; wInput.addClass("pa-weight-input");
 
       const setsInput = tr.createEl("td").createEl("input", { cls: "pa-fit-input" });
       setsInput.value = ex.sets; setsInput.dataset.ex = ex.name; setsInput.addClass("pa-sets-input");
@@ -580,7 +605,7 @@ export class FitnessModule {
     }
     const wInput = panel.querySelector<HTMLInputElement>(`input.pa-weight-input[data-ex="${CSS.escape(ex.name)}"]`);
     const sInput = panel.querySelector<HTMLInputElement>(`input.pa-sets-input[data-ex="${CSS.escape(ex.name)}"]`);
-    const weight = wInput ? parseFloat(wInput.value) || 0 : ex.weight;
+    const weight = wInput ? this.wStore(parseFloat(wInput.value) || 0) : ex.weight;
     const sets = sInput ? (sInput.value.trim() || ex.sets) : ex.sets;
     return { exercise: ex.name, weight, sets, kind: "strength", feel: "good", oldWeight: ex.weight };
   }
@@ -654,7 +679,7 @@ export class FitnessModule {
         value: ex?.kind || "strength",
       },
       { key: "sets", label: "Sets x reps", type: "text", value: ex?.sets || "3x10", visibleWhen: (v) => v.kind !== "cardio" },
-      { key: "weight", label: "Weight (kg)", type: "number", value: ex?.weight ?? 0, visibleWhen: (v) => v.kind !== "cardio" },
+      { key: "weight", label: `Weight (${this.wUnit()})`, type: "number", value: this.wShow(ex?.weight ?? 0), visibleWhen: (v) => v.kind !== "cardio" },
       { key: "targetDistance", label: "Target distance (km)", type: "number", value: ex?.targetDistance ?? 0, visibleWhen: (v) => v.kind === "cardio" },
       { key: "targetDuration", label: "Target duration (min)", type: "number", value: ex?.targetDuration ?? 0, visibleWhen: (v) => v.kind === "cardio" },
       { key: "howto", label: "How-to", type: "textarea", value: ex?.howto || "" },
@@ -665,7 +690,7 @@ export class FitnessModule {
       const kind: ExerciseKind = v.kind === "cardio" ? "cardio" : "strength";
       const ok = await this.ctx.store.saveExercise({
         name, split: v.split, kind,
-        sets: v.sets || "3x10", weight: parseFloat(v.weight) || 0,
+        sets: v.sets || "3x10", weight: this.wStore(parseFloat(v.weight) || 0),
         targetDistance: parseFloat(v.targetDistance) || 0, targetDuration: parseFloat(v.targetDuration) || 0,
         howto: v.howto || "",
         // preserve metadata not edited here

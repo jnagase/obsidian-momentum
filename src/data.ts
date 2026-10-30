@@ -5,8 +5,12 @@ import {
   PAConfig, defaultConfig, ExerciseKind,
 } from "./types";
 import { todayLocal } from "./util";
-import { monthHubTitle, monthKeyOf, monthName, financeTxTitle, mealLogTitle, workoutTitle, formatAmount, mergeBody } from "./readablenotes";
-import { mapTransaction, mapMealLog, mapWorkout, computePace, deriveWorkoutKind, totalCardioDistance } from "./loaders";
+import { monthHubTitle, monthKeyOf, monthName, financeTxTitle, mealLogTitle, workoutTitle, mergeBody } from "./readablenotes";
+import { mapTransaction, mapMealLog, mapWorkout, computePace, deriveWorkoutKind, totalCardioDistance,
+  txToEntry, entryToTransaction, mealLogToEntry, entryToMealLog, workoutToEntry, entryToWorkout,
+  renderFinanceTable, renderNutritionTable, renderFitnessTable, sortEntriesByDateId, mergeEntriesById,
+  taskDomainToEntry, taskEntryToDomain, renderBoardNoteBody, planBoardConsolidation,
+  sortTaskEntries, upsertTaskEntry, patchTaskEntry, removeTaskEntry, boardNoteGoogleIds } from "./loaders";
 import { JournalEntry, CHECKIN_QUESTIONS, checkinTags } from "./journal";
 
 /** Root folder inside the vault that holds all Personal Assistant data. */
@@ -142,6 +146,28 @@ export interface ModuleHubConfig<T extends MonthItem = MonthItem> {
   desiredTitle: (frontmatter: Record<string, unknown>) => string | null | Promise<string | null>;
 }
 
+/** A logged item the monthly ledger can store: it needs a date, a stable id and a vault path. */
+export type LedgerItem = MonthItem & { id: string; path: string };
+
+/**
+ * Per-module configuration for the monthly-ledger model (one consolidated note per month).
+ * - `module`/`hubFolder` locate the note (reusing the former hub path via `monthHubTitle`).
+ * - `noteType` tags the consolidated note (`finance-month` etc.) and is how reads find it.
+ * - `legacyFolder` holds the old per-item notes, folded into reads until migration trashes them.
+ * - `legacyMapper` reads one of those legacy notes; `toEntry`/`fromEntry` serialise an item to/from
+ *   a frontmatter `entries` object; `renderBody` produces the human-readable table.
+ */
+export interface MonthLedgerConfig<T extends LedgerItem> {
+  module: string;
+  hubFolder: string;
+  noteType: string;
+  legacyFolder: string;
+  legacyMapper: (fm: Record<string, unknown>, basename: string, path: string) => T;
+  toEntry: (item: T) => Record<string, unknown>;
+  fromEntry: (entry: Record<string, unknown>, notePath: string) => T;
+  renderBody: (items: T[], monthKey: string) => string | Promise<string>;
+}
+
 /**
  * Aggregate result of a `migrateReadableNotes` run for one module.
  * - `renamed`     files renamed to the readable scheme (counted in dry-run too).
@@ -213,6 +239,10 @@ export { computePace, deriveWorkoutKind, totalCardioDistance };
  */
 export class PADataStore {
   app: App;
+  /** Device flag mirrored from plugin settings (data.json). When true, tasks use the board-note
+   *  model (one `Tasks/<Board>.md` note with a `tasks[]` frontmatter array); when false (default),
+   *  the folder-per-board model is used and every task path below stays byte-identical to today. */
+  boardNoteTasks = false;
   constructor(app: App) { this.app = app; }
 
   full(path: string): string {
@@ -316,6 +346,7 @@ export class PADataStore {
     if (m.carbs_target) cfg.carbsTarget = num(m.carbs_target);
     if (m.water_target) cfg.waterTarget = num(m.water_target);
     if (m.weight_target != null) cfg.weightTarget = num(m.weight_target);
+    if (m.unit_system) cfg.unitSystem = str(m.unit_system) === "imperial" ? "imperial" : "metric";
     if (m.task_columns) cfg.taskColumns = coerce(m.task_columns, cfg.taskColumns);
     if (m.task_column_names) cfg.taskColumnNames = coerce(m.task_column_names, cfg.taskColumnNames);
     if (m.study_columns) cfg.studyColumns = coerce(m.study_columns, cfg.studyColumns);
@@ -350,6 +381,7 @@ export class PADataStore {
       carbs_target: cfg.carbsTarget,
       water_target: cfg.waterTarget,
       weight_target: cfg.weightTarget,
+      unit_system: cfg.unitSystem,
       task_columns: cfg.taskColumns,
       task_column_names: cfg.taskColumnNames,
       study_columns: cfg.studyColumns,
@@ -388,6 +420,7 @@ export class PADataStore {
    * intentionally not persisted in this model.
    */
   loadBoards(): Board[] {
+    if (this.boardNoteMode()) return this.loadBoardsBoardNote();
     const root = this.app.vault.getAbstractFileByPath(this.full("Tasks"));
     const names = new Set<string>(["My Tasks"]);
     if (root instanceof TFolder) {
@@ -492,6 +525,7 @@ export class PADataStore {
 
   /** Create a board = create its folder. Returns false for an invalid/reserved name. */
   async createBoard(name: string): Promise<boolean> {
+    if (this.boardNoteMode()) return this.createBoardBoardNote(name);
     const clean = safeName(name);
     if (!clean || clean === "Lists" || clean === "untitled") return false;
     await this.removeIgnoredBoard(clean); // re-creating clears any tombstone.
@@ -514,6 +548,7 @@ export class PADataStore {
    * hint in each note is refreshed afterwards so external readers stay consistent.
    */
   async renameBoard(oldName: string, newName: string): Promise<void> {
+    if (this.boardNoteMode()) return this.renameBoardBoardNote(oldName, newName);
     const from = this.full(this.taskBoardFolder(oldName));
     const to = this.full(this.taskBoardFolder(newName));
     const folder = this.app.vault.getAbstractFileByPath(from);
@@ -537,6 +572,7 @@ export class PADataStore {
    * then trash the now-empty folder. General Tasks itself can't be deleted.
    */
   async deleteBoard(name: string): Promise<void> {
+    if (this.boardNoteMode()) return this.deleteBoardBoardNote(name);
     if (name === "My Tasks") return;
     await this.addIgnoredBoard(name); // tombstone so discovery won't resurrect it from Google.
     // Drop it from the known-boards registry so the deletion sweep doesn't re-flag it.
@@ -682,8 +718,15 @@ export class PADataStore {
     for (const f of files) {
       try {
         const raw = await this.app.vault.cachedRead(f);
-        const m = raw.match(/^google_id:\s*"?([A-Za-z0-9_-]+)"?\s*$/m);
-        if (m) ids.add(m[1]);
+        // Board-note mode: every entry's google_id lives inside the single-line JSON `tasks`
+        // array (`..."google_id":"xYz"...`), so collect them ALL — a board note that momentarily
+        // fails to parse must still shield every task it holds, not just one.
+        if (this.boardNoteMode()) {
+          for (const gid of boardNoteGoogleIds(raw)) ids.add(gid);
+        } else {
+          const m = raw.match(/^google_id:\s*"?([A-Za-z0-9_-]+)"?\s*$/m);
+          if (m) ids.add(m[1]);
+        }
       } catch { /* unreadable file → skip (it can't shield an id it doesn't show) */ }
     }
     return ids;
@@ -761,7 +804,314 @@ export class PADataStore {
   // ============================================================
   // TASKS
   // ============================================================
+
+  // ── Board-note model (flag ON) ───────────────────────────────────────────
+  // A board is a single note Tasks/<Board>.md whose `tasks` frontmatter array is the source of
+  // truth; the body is a read-only per-column view, regenerated on every write. Identity of an
+  // item is its `task_id`; it is located by (board note, task_id). All of this is inert unless
+  // `boardNoteTasks` is set, so the folder-per-board path below is untouched by default.
+
+  private boardNoteMode(): boolean { return this.boardNoteTasks; }
+
+  /** Vault-relative path of a board note (board-note mode): Tasks/<safe board name>.md. */
+  private boardNoteRel(board?: string): string {
+    return `Tasks/${safeName(this.boardOrDefault(board))}.md`;
+  }
+
+  /**
+   * Read a board note's `tasks` array AUTHORITATIVELY from the file text (not the metadata cache),
+   * so a tight update loop on the same note (e.g. a drag that reorders every card) never loses
+   * entries to a stale cache. Our writer serialises `tasks` as a single-line JSON array (buildDoc),
+   * so a line-parse is exact; falls back to the cache if that ever fails.
+   */
+  private async readTasksArray(rel: string): Promise<FM[]> {
+    const f = this.fileAt(rel);
+    if (!f) return [];
+    try {
+      const raw = await this.app.vault.read(f);
+      const { fmText } = this.splitFrontmatter(raw);
+      const m = /^tasks:\s*(.*)$/m.exec(fmText);
+      if (m) { const parsed: unknown = JSON.parse(m[1]); if (Array.isArray(parsed)) return parsed as FM[]; }
+    } catch { /* fall back to the metadata cache */ }
+    return coerce<FM[]>(this.frontmatter(f).tasks, []);
+  }
+
+  private async readBoardEntries(board: string): Promise<FM[]> {
+    return this.readTasksArray(this.boardNoteRel(board));
+  }
+
+  /**
+   * Write a board note from its task entries. Deterministic (entries sorted) + idempotent (writeFile
+   * skips identical content). An EMPTY board is valid — the note stays; only deleteBoard removes it.
+   */
+  private async writeBoardNote(board: string, entries: FM[]): Promise<void> {
+    const rel = this.boardNoteRel(board);
+    const sorted = sortTaskEntries(entries);
+    const cfg = await this.loadConfig();
+    const tasks = sorted.map((e) => taskEntryToDomain(e, this.full(rel), board));
+    const body = renderBoardNoteBody(board, tasks, cfg.taskColumns, cfg.taskColumnNames);
+    // No volatile `modified` on the note itself — the entries ARE the state (byte-stable).
+    const meta: FM = { type: "task-board", board, tasks: sorted };
+    await this.writeFile(rel, this.buildDoc(meta, body));
+  }
+
+  /** All boards in board-note mode: every Tasks/*.md tagged `task-board`, plus the fixed My Tasks. */
+  private loadBoardsBoardNote(): Board[] {
+    const root = this.app.vault.getAbstractFileByPath(this.full("Tasks"));
+    const names = new Set<string>(["My Tasks"]);
+    if (root instanceof TFolder) {
+      for (const c of root.children) {
+        if (c instanceof TFile && c.extension === "md" && str(this.frontmatter(c).type) === "task-board") {
+          names.add(str(this.frontmatter(c).board) || c.basename);
+        }
+      }
+    }
+    const sorted = [...names].sort((a, b) =>
+      a === "My Tasks" ? -1 : b === "My Tasks" ? 1 : a.localeCompare(b));
+    return sorted.map((name) => ({ id: safeName(name), name, emoji: "" }));
+  }
+
+  /** All tasks in board-note mode: flatten every board note's `tasks` array (board = the note). */
+  private loadTasksBoardNote(): Task[] {
+    const root = this.app.vault.getAbstractFileByPath(this.full("Tasks"));
+    const out: Task[] = [];
+    if (!(root instanceof TFolder)) return out;
+    for (const c of root.children) {
+      if (!(c instanceof TFile) || c.extension !== "md") continue;
+      const m = this.frontmatter(c);
+      if (str(m.type) !== "task-board") continue;
+      const board = str(m.board) || c.basename;
+      for (const e of coerce<FM[]>(m.tasks, [])) out.push(taskEntryToDomain(e, c.path, board));
+    }
+    return out;
+  }
+
+  /** Append a new task entry to its board note (board-note mode). Returns the board note path. */
+  private async createTaskBoardNote(t: Partial<Task>): Promise<string> {
+    const board = this.boardOrDefault(t.kanbanName);
+    const now = new Date().toISOString();
+    const entry: FM = taskDomainToEntry({
+      id: cryptoId(),
+      title: t.title || "Untitled",
+      status: t.status || "backlog",
+      priority: t.priority || "medium",
+      group: t.group || "",
+      due: t.due || "",
+      eisenhower: t.eisenhower || "",
+      created: now,
+      modified: now,
+      googleId: t.googleId || "",
+      googleList: t.googleList || "",
+      kanbanName: board,
+      path: this.full(this.boardNoteRel(board)),
+    });
+    const entries = await this.readBoardEntries(board);
+    await this.writeBoardNote(board, upsertTaskEntry(entries, entry));
+    return this.full(this.boardNoteRel(board));
+  }
+
+  /** Patch a task entry (board-note mode); a board change moves the entry between board notes. */
+  private async updateTaskBoardNote(task: Task, changes: Partial<Task>): Promise<void> {
+    const fromBoard = this.boardOrDefault(task.kanbanName);
+    const toBoard = this.boardOrDefault(changes.kanbanName);
+    const movingBoard = changes.kanbanName !== undefined && toBoard !== fromBoard;
+    const patch: FM = {};
+    if (changes.status !== undefined) patch.status = changes.status;
+    if (changes.priority !== undefined) patch.priority = changes.priority;
+    if (changes.title !== undefined) patch.title = changes.title;
+    if (changes.group !== undefined) patch.group = changes.group;
+    if (changes.due !== undefined) patch.due = changes.due;
+    if (changes.order !== undefined) patch.order = changes.order;
+    if (changes.eisenhower !== undefined) patch.eisenhower = changes.eisenhower;
+    patch.modified = new Date().toISOString();
+    if (!movingBoard) {
+      const entries = await this.readBoardEntries(fromBoard);
+      await this.writeBoardNote(fromBoard, patchTaskEntry(entries, task.id, patch));
+      return;
+    }
+    // Board change: pull the entry out of the old board note and upsert it (patched) into the new.
+    const fromEntries = await this.readBoardEntries(fromBoard);
+    const moving = fromEntries.find((e) => str(e.task_id) === task.id);
+    await this.writeBoardNote(fromBoard, removeTaskEntry(fromEntries, task.id));
+    const base = moving ?? taskDomainToEntry({ ...task, kanbanName: toBoard });
+    const toEntries = await this.readBoardEntries(toBoard);
+    await this.writeBoardNote(toBoard, upsertTaskEntry(toEntries, { ...base, ...patch }));
+  }
+
+  /** Remove a task entry from its board note (board-note mode). An emptied board note stays. */
+  private async deleteTaskBoardNote(task: Task): Promise<void> {
+    if (task.googleId) await this.addPendingGoogleDelete(task.googleId, task.googleList || "");
+    const board = this.boardOrDefault(task.kanbanName);
+    const entries = await this.readBoardEntries(board);
+    const after = removeTaskEntry(entries, task.id);
+    if (after.length !== entries.length) await this.writeBoardNote(board, after);
+  }
+
+  /**
+   * Archive an entry whose Google item is gone (board-note mode): remove it from its board note
+   * and append it to the orphan note `Tasks/_orphaned.md` (type `task-orphaned`, so it's invisible
+   * to boards/loadTasks). Never hard-deletes — the faithful equivalent of the folder-mode archive.
+   */
+  private async orphanTaskEntry(task: Task): Promise<void> {
+    const board = this.boardOrDefault(task.kanbanName);
+    const entries = await this.readBoardEntries(board);
+    const moving = entries.find((e) => str(e.task_id) === task.id);
+    if (!moving) return;
+    await this.writeBoardNote(board, removeTaskEntry(entries, task.id));
+    const orphanRel = "Tasks/_orphaned.md";
+    const prev = await this.readTasksArray(orphanRel);
+    const meta: FM = { type: "task-orphaned", tasks: upsertTaskEntry(prev, moving) };
+    await this.writeFile(orphanRel, this.buildDoc(meta,
+      "# Orphaned tasks\n\nTasks whose Google item was deleted remotely. Kept here (never hard-deleted) for recovery.\n"));
+  }
+
+  /** Persist the Google Tasks link onto an entry (board-note mode). */
+  private async setTaskGoogleLinkBoardNote(task: Task, googleId: string, googleList: string): Promise<void> {
+    const board = this.boardOrDefault(task.kanbanName);
+    const entries = await this.readBoardEntries(board);
+    await this.writeBoardNote(board, patchTaskEntry(entries, task.id,
+      { google_id: googleId, google_list: googleList, modified: new Date().toISOString() }));
+  }
+
+  /** Create a board (board-note mode) = create an empty Tasks/<Board>.md. False on a bad name. */
+  private async createBoardBoardNote(name: string): Promise<boolean> {
+    const clean = safeName(name);
+    if (!clean || clean === "Lists" || clean === "untitled") return false;
+    await this.removeIgnoredBoard(clean); // re-creating clears any tombstone.
+    if (!this.fileAt(this.boardNoteRel(clean))) await this.writeBoardNote(clean, []);
+    const reg = this.loadKnownBoards();
+    if (!reg.boards.includes(clean) || reg.pendingRemoval.includes(clean)) {
+      await this.writeKnownBoards({
+        boards: [...new Set([...reg.boards, clean])],
+        pendingRemoval: reg.pendingRemoval.filter((b) => b !== clean),
+      });
+    }
+    return true;
+  }
+
+  /** Rename a board (board-note mode): move its entries into Tasks/<New>.md, trash the old note. */
+  private async renameBoardBoardNote(oldName: string, newName: string): Promise<void> {
+    const entries = await this.readBoardEntries(oldName);
+    // Merge into any existing target note (never clobber), write FIRST, then trash the old.
+    const existing = await this.readBoardEntries(newName);
+    let merged = existing;
+    for (const e of entries) merged = upsertTaskEntry(merged, e);
+    await this.writeBoardNote(newName, merged);
+    const oldF = this.fileAt(this.boardNoteRel(oldName));
+    if (oldF && oldF.path !== this.full(this.boardNoteRel(newName))) await this.removeFile(oldF);
+    const reg = this.loadKnownBoards();
+    await this.writeKnownBoards({
+      boards: [...new Set(reg.boards.map((b) => (b === oldName ? newName : b)))],
+      pendingRemoval: reg.pendingRemoval.filter((b) => b !== oldName && b !== newName),
+    });
+  }
+
+  /** Delete a board (board-note mode): move its tasks into My Tasks, then trash the note. */
+  private async deleteBoardBoardNote(name: string): Promise<void> {
+    if (name === "My Tasks") return;
+    await this.addIgnoredBoard(name); // tombstone so discovery won't resurrect it from Google.
+    const reg = this.loadKnownBoards();
+    if (reg.boards.includes(name) || reg.pendingRemoval.includes(name)) {
+      await this.writeKnownBoards({
+        boards: reg.boards.filter((b) => b !== name),
+        pendingRemoval: reg.pendingRemoval.filter((b) => b !== name),
+      });
+    }
+    const entries = await this.readBoardEntries(name);
+    if (entries.length) {
+      let merged = await this.readBoardEntries("My Tasks");
+      for (const e of entries) merged = upsertTaskEntry(merged, e);
+      await this.writeBoardNote("My Tasks", merged);
+    }
+    const f = this.fileAt(this.boardNoteRel(name));
+    if (f) await this.removeFile(f);
+  }
+
+  /**
+   * Forward migration (folder-per-board → board notes), run once when the flag is turned on.
+   * Reads the folder model DIRECTLY (independent of the flag), writes each Tasks/<Board>.md with
+   * its `tasks` array — preserving task_id (stamping a stable one when a note only had a basename),
+   * google_id, google_list, status, priority, group, due, eisenhower, order, created — and only
+   * AFTER every board note is written, trashes the per-task notes, the empty board folders, the
+   * loose root task notes and the Lists/ mirrors. Write-then-trash, idempotent, reversible (trash).
+   * Returns the number of tasks consolidated.
+   */
+  async migrateToBoardNotes(): Promise<number> {
+    const byBoard = planBoardConsolidation(this.loadTasksFolderMode());
+    let migrated = 0;
+    for (const [board, boardTasks] of byBoard) {
+      let merged = await this.readBoardEntries(board);
+      for (const t of boardTasks) merged = upsertTaskEntry(merged, taskDomainToEntry({ ...t, id: t.id || cryptoId() }));
+      await this.writeBoardNote(board, merged); // write the board note FIRST
+      migrated += boardTasks.length;
+    }
+    // Only now trash the sources (reversible — Obsidian trash). Board notes (type task-board) stay.
+    const root = this.app.vault.getAbstractFileByPath(this.full("Tasks"));
+    if (root instanceof TFolder) {
+      for (const c of [...root.children]) {
+        if (c instanceof TFolder && c.name !== "_orphaned") {
+          // Board folders and the Lists/ mirror folder: trash their notes, then the empty folder.
+          for (const f of [...c.children]) if (f instanceof TFile) { try { await this.removeFile(f); } catch { /* retry next run */ } }
+          const still = this.app.vault.getAbstractFileByPath(c.path);
+          if (still instanceof TFolder && still.children.length === 0) await this.app.fileManager.trashFile(still).catch(() => {});
+        } else if (c instanceof TFile && c.extension === "md" && str(this.frontmatter(c).type) === "task") {
+          try { await this.removeFile(c); } catch { /* leftover loose root note → retry next run */ }
+        }
+      }
+    }
+    return migrated;
+  }
+
+  /**
+   * Rollback (board notes → folder-per-board), run when the flag is turned off. Reads the board
+   * notes DIRECTLY, recreates Tasks/<Board>/<title>.md per entry (preserving task_id/google_id/…),
+   * then trashes the board notes. Write-then-trash, idempotent, reversible. Returns tasks restored.
+   */
+  async migrateToPerTaskNotes(): Promise<number> {
+    const tasks = this.loadTasksBoardNote();
+    let restored = 0;
+    for (const t of tasks) {
+      const board = this.boardOrDefault(t.kanbanName);
+      const title = t.title || "Untitled";
+      const now = new Date().toISOString();
+      const meta: FM = {
+        task_id: t.id || cryptoId(),
+        title,
+        status: t.status || "backlog",
+        priority: t.priority || "medium",
+        created: t.created || now,
+        modified: t.modified || now,
+        type: "task",
+        kanban_name: board,
+        group: t.group || "",
+      };
+      if (t.due) meta.due = t.due;
+      if (t.eisenhower) meta.eisenhower = t.eisenhower;
+      if (t.order !== undefined && t.order !== null) meta.order = t.order;
+      if (t.googleId) meta.google_id = t.googleId;
+      if (t.googleList) meta.google_list = t.googleList;
+      const rel = this.uniquePath(this.taskBoardFolder(board), title);
+      await this.writeFile(rel, this.buildDoc(meta, `# ${title}\n`));
+      restored++;
+    }
+    // Trash the board notes only after every per-task note is written.
+    const root = this.app.vault.getAbstractFileByPath(this.full("Tasks"));
+    if (root instanceof TFolder) {
+      for (const c of [...root.children]) {
+        if (c instanceof TFile && c.extension === "md" && str(this.frontmatter(c).type) === "task-board") {
+          try { await this.removeFile(c); } catch { /* retry next run */ }
+        }
+      }
+    }
+    return restored;
+  }
+
   loadTasks(): Task[] {
+    return this.boardNoteMode() ? this.loadTasksBoardNote() : this.loadTasksFolderMode();
+  }
+
+  /** Folder-per-board task load (flag-independent; the migration reads this directly). */
+  private loadTasksFolderMode(): Task[] {
     const listsPrefix = this.full("Tasks/Lists") + "/";
     const orphanPrefix = this.full("Tasks/_orphaned") + "/";
     const tasksRoot = this.full("Tasks");
@@ -770,7 +1120,8 @@ export class PADataStore {
     // Tasks/<Board>/. `kanban_name` is only a hint, used as a fallback for notes still
     // sitting loose at the Tasks/ root (which upkeep files into General Tasks).
     return this.listMarkdown("Tasks")
-      .filter((f) => f.name !== "boards.md" && !f.path.startsWith(listsPrefix) && !f.path.startsWith(orphanPrefix))
+      .filter((f) => f.name !== "boards.md" && !f.path.startsWith(listsPrefix) && !f.path.startsWith(orphanPrefix)
+        && str(this.frontmatter(f).type) !== "task-board") // never read a board note as a task
       .map((f) => {
         const m = this.frontmatter(f);
         const parent = f.parent;
@@ -825,6 +1176,7 @@ export class PADataStore {
 
   /** Create a task note. Returns its vault path so callers can wait for the metadata cache. */
   async createTask(t: Partial<Task>): Promise<string> {
+    if (this.boardNoteMode()) return this.createTaskBoardNote(t);
     const title = t.title || "Untitled";
     const board = this.boardOrDefault(t.kanbanName);
     const meta: FM = {
@@ -862,6 +1214,7 @@ export class PADataStore {
 
   /** Persist the Google Tasks link (item id + list id) onto a task note's frontmatter. */
   async setTaskGoogleLink(task: Task, googleId: string, googleList: string): Promise<void> {
+    if (this.boardNoteMode()) return this.setTaskGoogleLinkBoardNote(task, googleId, googleList);
     const f = this.app.vault.getAbstractFileByPath(task.path);
     if (!(f instanceof TFile)) return;
     await this.patchFrontmatter(f, (fm) => {
@@ -882,6 +1235,7 @@ export class PADataStore {
   }
 
   async updateTask(task: Task, changes: Partial<Task>): Promise<void> {
+    if (this.boardNoteMode()) return this.updateTaskBoardNote(task, changes);
     const f = this.app.vault.getAbstractFileByPath(task.path);
     if (!(f instanceof TFile)) return;
     await this.patchFrontmatter(f, (fm) => {
@@ -996,6 +1350,7 @@ export class PADataStore {
 
   /** Archive a task note whose Google item is gone into Tasks/_orphaned/ (never deletes). */
   async orphanTaskNote(task: Task): Promise<void> {
+    if (this.boardNoteMode()) return this.orphanTaskEntry(task);
     const f = this.app.vault.getAbstractFileByPath(task.path);
     if (!(f instanceof TFile)) return;
     const folder = this.full("Tasks/_orphaned");
@@ -1027,6 +1382,7 @@ export class PADataStore {
   }
 
   async deleteTask(task: Task): Promise<void> {
+    if (this.boardNoteMode()) return this.deleteTaskBoardNote(task);
     // Record the tombstone BEFORE removing the file: once the note is gone there is no
     // other trace that this Google-linked task was deleted on purpose (see "Pending Google
     // deletions" above) — without it, the next sync would resurrect it from Google.
@@ -1099,6 +1455,12 @@ export class PADataStore {
     const monthItems = cfg.loadItems().filter((it) => monthKeyOf(it.date) === monthKey);
     const rel = `${cfg.hubFolder}/${monthHubTitle(cfg.module, monthKey)}.md`;
 
+    // The monthly-ledger model (loadLedger/writeMonthNote) now OWNS this note path when it holds a
+    // consolidated note (`type: <module>-month`). Never let the legacy hub writer clobber those
+    // entries — skip so the readable-notes migration can't wipe consolidated data.
+    const consolidated = this.fileAt(rel);
+    if (consolidated && str(this.frontmatter(consolidated).type) === `${cfg.module.toLowerCase()}-month`) return "unchanged";
+
     if (!monthItems.length) {
       const existing = this.fileAt(rel);
       if (existing) {
@@ -1121,6 +1483,148 @@ export class PADataStore {
     };
     const wrote = await this.writeHubIfBodyChanged(rel, meta, body);
     return wrote ? "written" : "unchanged";
+  }
+
+  // ============================================================
+  // MONTHLY LEDGER (one consolidated note per module per month)
+  // Replaces the per-item note model: each logged item is an `entries` object in the month note's
+  // frontmatter (source of truth); the body is a rendered table. The month note REUSES the hub
+  // path/name. Reads also fold in any not-yet-migrated per-item notes (`legacyFolder`), so nothing
+  // disappears during a partial migration. Shared across Finance / Nutrition / Fitness via cfg.
+  // ============================================================
+
+  /** Vault-relative path of the consolidated month note (same as the former hub). */
+  private monthNoteRel<T extends LedgerItem>(cfg: MonthLedgerConfig<T>, monthKey: string): string {
+    return `${cfg.hubFolder}/${monthHubTitle(cfg.module, monthKey)}.md`;
+  }
+
+  /**
+   * Read a month note's `entries` AUTHORITATIVELY from the file text (not the metadata cache),
+   * so a tight add/delete loop on the same note never loses entries to a stale cache. Our writer
+   * serialises `entries` as a single-line JSON array (buildDoc), so a line-parse is exact; falls
+   * back to the cache if that ever fails (e.g. a sync reformatted it).
+   */
+  private async readMonthEntries(rel: string): Promise<FM[]> {
+    const f = this.fileAt(rel);
+    if (!f) return [];
+    try {
+      const raw = await this.app.vault.read(f);
+      const { fmText } = this.splitFrontmatter(raw);
+      const m = /^entries:\s*(.*)$/m.exec(fmText);
+      if (m) { const parsed: unknown = JSON.parse(m[1]); if (Array.isArray(parsed)) return parsed as FM[]; }
+    } catch { /* fall back to the metadata cache */ }
+    return coerce<FM[]>(this.frontmatter(f).entries, []);
+  }
+
+  /** Write (or trash-when-empty) a month note from its entries. Deterministic + idempotent. */
+  private async writeMonthNote<T extends LedgerItem>(cfg: MonthLedgerConfig<T>, monthKey: string, entries: FM[]): Promise<void> {
+    const rel = this.monthNoteRel(cfg, monthKey);
+    if (!entries.length) {
+      const ex = this.fileAt(rel);
+      if (ex) await this.removeFile(ex); // month emptied → trash the note (Req 1.4/3.2)
+      return;
+    }
+    // Deterministic order so two devices serialise byte-identically (no spurious Drive conflict).
+    const sorted = sortEntriesByDateId(entries);
+    const items = sorted.map((e) => cfg.fromEntry(e, this.full(rel)));
+    const body = await cfg.renderBody(items, monthKey);
+    // No volatile `modified` field — the entries ARE the state (byte-stable across devices).
+    const meta: FM = { type: cfg.noteType, month: monthKey, entries: sorted };
+    await this.writeFile(rel, this.buildDoc(meta, body)); // idempotent (skips identical content)
+  }
+
+  /** Load all of a module's items: consolidated month notes + any leftover legacy per-item notes. */
+  private loadLedger<T extends LedgerItem>(cfg: MonthLedgerConfig<T>): T[] {
+    const out: T[] = [];
+    const seen = new Set<string>();
+    for (const f of this.listMarkdown(cfg.hubFolder)) {
+      if (str(this.frontmatter(f).type) !== cfg.noteType) continue;
+      for (const e of coerce<FM[]>(this.frontmatter(f).entries, [])) {
+        const item = cfg.fromEntry(e, f.path);
+        if (item.date) { out.push(item); seen.add(item.id); }
+      }
+    }
+    for (const f of this.listMarkdown(cfg.legacyFolder)) {
+      const item = cfg.legacyMapper(this.frontmatter(f), f.basename, f.path);
+      if (item.date && !seen.has(item.id)) out.push(item); // not-yet-migrated per-item note
+    }
+    return out;
+  }
+
+  /** Append a new entry to its month note (by the entry's date). */
+  private async addLedgerEntry<T extends LedgerItem>(cfg: MonthLedgerConfig<T>, entry: FM): Promise<void> {
+    const monthKey = monthKeyOf(str(entry.date));
+    const entries = await this.readMonthEntries(this.monthNoteRel(cfg, monthKey));
+    entries.push(entry);
+    await this.writeMonthNote(cfg, monthKey, entries);
+  }
+
+  /** Remove an item by id from its month note; also trash a leftover legacy per-item note. */
+  private async deleteLedgerEntry<T extends LedgerItem>(cfg: MonthLedgerConfig<T>, item: { id: string; date: string; path: string }): Promise<void> {
+    const monthKey = monthKeyOf(item.date);
+    const rel = this.monthNoteRel(cfg, monthKey);
+    const before = await this.readMonthEntries(rel);
+    const after = before.filter((e) => str(e.id) !== item.id);
+    if (after.length !== before.length) await this.writeMonthNote(cfg, monthKey, after);
+    // Leftover legacy per-item note (path points at it, not the month note) → trash it too.
+    const f = this.app.vault.getAbstractFileByPath(item.path);
+    if (f instanceof TFile && item.path !== this.full(rel)) await this.removeFile(f);
+  }
+
+  /** Patch one item's fields in place (month note entry, or a legacy per-item note). */
+  private async updateLedgerEntry<T extends LedgerItem>(cfg: MonthLedgerConfig<T>, item: { id: string; date: string; path: string }, patch: FM): Promise<void> {
+    const monthKey = monthKeyOf(item.date);
+    const rel = this.monthNoteRel(cfg, monthKey);
+    const entries = await this.readMonthEntries(rel);
+    const idx = entries.findIndex((e) => str(e.id) === item.id);
+    if (idx >= 0) {
+      entries[idx] = { ...entries[idx], ...patch };
+      await this.writeMonthNote(cfg, monthKey, entries);
+      return;
+    }
+    const f = this.app.vault.getAbstractFileByPath(item.path);
+    if (f instanceof TFile) await this.patchFrontmatter(f, (fm) => { Object.assign(fm, patch); fm.modified = new Date().toISOString(); });
+  }
+
+  /**
+   * Migrate one module's LEGACY per-item notes into consolidated month notes, then trash the
+   * per-item notes (reversible — they go to Obsidian's trash). Per month: merge the items into the
+   * month note's `entries` (dedup by id so re-running never duplicates), WRITE the note, and only
+   * then trash that month's per-item notes. Idempotent and non-destructive: a second run finds no
+   * legacy notes and no-ops; a write failure leaves the per-item notes untouched for a retry.
+   * Returns the number of items newly consolidated.
+   */
+  private async consolidateLedger<T extends LedgerItem>(cfg: MonthLedgerConfig<T>): Promise<number> {
+    const byMonth = new Map<string, { item: T; file: TFile }[]>();
+    for (const file of this.listMarkdown(cfg.legacyFolder)) {
+      const item = cfg.legacyMapper(this.frontmatter(file), file.basename, file.path);
+      if (!item.date) continue; // malformed/undated → leave it (never discard silently)
+      const mk = monthKeyOf(item.date);
+      const arr = byMonth.get(mk); if (arr) arr.push({ item, file }); else byMonth.set(mk, [{ item, file }]);
+    }
+    let migrated = 0;
+    for (const [monthKey, group] of byMonth) {
+      const rel = this.monthNoteRel(cfg, monthKey);
+      const existing = await this.readMonthEntries(rel);
+      const { merged, added } = mergeEntriesById(existing, group.map((g) => cfg.toEntry(g.item)));
+      migrated += added;
+      await this.writeMonthNote(cfg, monthKey, merged); // write the consolidated note FIRST
+      for (const { file } of group) { try { await this.removeFile(file); } catch { /* retry next run */ } }
+    }
+    return migrated;
+  }
+
+  /**
+   * Consolidate Finance + Nutrition + Fitness legacy per-item notes into month notes.
+   * Guarded by `monthlyLedgerSchema` (runs once) and exposed as a manual command. Returns the
+   * total number of items consolidated this run (0 on an already-migrated vault).
+   */
+  async consolidateMonthlyLedgers(): Promise<number> {
+    let n = 0;
+    n += await this.consolidateLedger(this.financeLedgerCfg());
+    n += await this.consolidateLedger(this.nutritionLedgerCfg());
+    n += await this.consolidateLedger(this.fitnessLedgerCfg());
+    return n;
   }
 
   /**
@@ -1264,6 +1768,7 @@ export class PADataStore {
    * toggle the same tasks. Deterministic + content-guarded so it converges without loops.
    */
   async syncTaskLists(): Promise<void> {
+    if (this.boardNoteMode()) return; // board notes are already human-readable; no Lists/ mirrors.
     const cfg = await this.loadConfig();
     const cols = cfg.taskColumns;
     const names = cfg.taskColumnNames;
@@ -1308,6 +1813,7 @@ export class PADataStore {
    * brand-new items added externally is the job of the dedicated inbox instead.
    */
   async reconcileTaskLists(): Promise<void> {
+    if (this.boardNoteMode()) return; // no Lists/ mirrors in board-note mode.
     const listsPrefix = this.full("Tasks/Lists") + "/";
     // Flat mirrors live directly under Tasks/Lists as "<board>.md" (no sub-folder).
     const files = this.app.vault.getMarkdownFiles()
@@ -1565,11 +2071,20 @@ export class PADataStore {
     });
   }
 
+  /** Monthly-ledger config for Fitness. */
+  private fitnessLedgerCfg(): MonthLedgerConfig<Workout> {
+    return {
+      module: "Fitness", hubFolder: "Fitness/Months", noteType: "fitness-month", legacyFolder: "Fitness/Workouts",
+      legacyMapper: mapWorkout, toEntry: workoutToEntry, fromEntry: entryToWorkout,
+      renderBody: async (items, mk) => {
+        const cfg = await this.loadConfig();
+        return renderFitnessTable(items, mk, (id) => this.resolveSplitName(id, cfg));
+      },
+    };
+  }
+
   loadWorkouts(): Workout[] {
-    // Data derived solely from frontmatter; filename is presentation only (Req 10.7).
-    return this.listMarkdown("Fitness/Workouts")
-      .map((f) => mapWorkout(this.frontmatter(f), f.basename, f.path))
-      .filter((w) => w.date);
+    return this.loadLedger(this.fitnessLedgerCfg());
   }
 
   /** Returns false if a rename would overwrite a different existing exercise. */
@@ -1716,52 +2231,28 @@ export class PADataStore {
   }
 
   async logWorkout(splitId: string, duration: number, exercises: WorkoutExercise[], date: string = todayLocal()): Promise<void> {
-    const cfg = await this.loadConfig();
-    const splitName = this.resolveSplitName(splitId, cfg);
-    const meta: FM = {
-      id: Date.now(),
-      type: "workout-log",
+    const entry: FM = {
+      id: cryptoId(),
       date,
       split: splitId,
       duration,
       exercises,
       kind: deriveWorkoutKind(exercises),
-      logged: new Date().toISOString(),
     };
-    const monthKey = monthKeyOf(date);
-    const hubLink = `[[${monthHubTitle("Fitness", monthKey)}]]`;
-    let baseBody = `# ${splitName} - ${date}\n\n`;
-    exercises.forEach((e) => {
-      baseBody += `- ${e.exercise}: ${e.weight}kg x ${e.sets}${e.feel ? ` (${e.feel})` : ""}\n`;
-    });
-    // mergeBody adds the hub wikilink at most once (Req 10.3), preserving user lines.
-    const body = mergeBody(baseBody, hubLink);
-    const title = workoutTitle({ splitName, minutes: duration, date });
-    const rel = this.uniquePath("Fitness/Workouts", title);
-    await this.writeFile(rel, this.buildDoc(meta, body));
-    await this.syncMonthHub(this.fitnessHubConfig(), monthKey);
+    await this.addLedgerEntry(this.fitnessLedgerCfg(), entry);
   }
 
   /** Update an already-logged workout's per-exercise data, and/or its overall session
    *  duration. `duration` is optional so callers that only touch exercises (existing
    *  behavior) don't need to pass it. */
   async updateWorkoutExercises(workout: Workout, exercises: WorkoutExercise[], duration?: number): Promise<void> {
-    const f = this.app.vault.getAbstractFileByPath(workout.path);
-    if (!(f instanceof TFile)) return;
-    await this.patchFrontmatter(f, (fm) => {
-      fm.exercises = exercises;
-      fm.kind = deriveWorkoutKind(exercises);
-      if (duration != null) fm.duration = duration;
-      fm.modified = new Date().toISOString();
-    });
+    const patch: FM = { exercises, kind: deriveWorkoutKind(exercises) };
+    if (duration != null) patch.duration = duration;
+    await this.updateLedgerEntry(this.fitnessLedgerCfg(), workout, patch);
   }
 
   async deleteWorkout(workout: Workout): Promise<void> {
-    const f = this.app.vault.getAbstractFileByPath(workout.path);
-    if (f instanceof TFile) await this.removeFile(f);
-    // Regenerate the affected month's Fitness hub; removes it when this was the
-    // last workout of the month (keeps the Graph View clean).
-    await this.syncMonthHub(this.fitnessHubConfig(), monthKeyOf(workout.date));
+    await this.deleteLedgerEntry(this.fitnessLedgerCfg(), workout);
   }
 
   // ============================================================
@@ -1883,11 +2374,23 @@ export class PADataStore {
     });
   }
 
+  /** Resolve a meal plan's display name by id (for the month table), falling back to the id. */
+  private mealNameById(id: string): string {
+    const m = this.loadMeals().find((x) => x.id === id);
+    return (m?.name || "").trim() || id;
+  }
+
+  /** Monthly-ledger config for Nutrition. */
+  private nutritionLedgerCfg(): MonthLedgerConfig<MealLog> {
+    return {
+      module: "Nutrition", hubFolder: "Nutrition/Months", noteType: "nutrition-month", legacyFolder: "Nutrition/Logs",
+      legacyMapper: mapMealLog, toEntry: mealLogToEntry, fromEntry: entryToMealLog,
+      renderBody: (items, mk) => renderNutritionTable(items, mk, (id) => this.mealNameById(id)),
+    };
+  }
+
   loadMealLogs(): MealLog[] {
-    // Data derived solely from frontmatter; filename is presentation only (Req 9.8).
-    return this.listMarkdown("Nutrition/Logs")
-      .map((f) => mapMealLog(this.frontmatter(f), f.basename, f.path))
-      .filter((l) => l.date);
+    return this.loadLedger(this.nutritionLedgerCfg());
   }
 
   async saveMeal(meal: Partial<Meal> & { name: string; items: MealItem[] }): Promise<void> {
@@ -1986,45 +2489,21 @@ export class PADataStore {
   }
 
   async logMeal(meal: Meal, items: MealItem[], date: string = todayLocal()): Promise<void> {
-    const totalCal = items.reduce((s, it) => s + (Number(it.cal) || 0), 0);
-    const totalProtein = items.reduce((s, it) => s + (Number(it.protein) || 0), 0);
-    const totalCarbs = items.reduce((s, it) => s + (Number(it.carbs) || 0), 0);
-    // Resolve the meal display name (Req 9.2 order: meal_name → meals lookup → body
-    // heading → meal id). At log time we hold the Meal object, so prefer its name and
-    // fall back to the id. Persisting it as `meal_name` (Req 9.3) keeps future naming
-    // stable even if the meal plan is renamed or deleted.
-    const mealName = (meal.name || "").trim() || meal.id;
-    const meta: FM = {
-      id: Date.now(),
-      type: "meal-log",
+    const entry: FM = {
+      id: cryptoId(),
       date,
       meal: meal.id,
-      meal_name: mealName,
-      calories: totalCal,
-      protein: totalProtein,
-      carbs: totalCarbs,
+      meal_name: (meal.name || "").trim() || meal.id,
+      calories: items.reduce((s, it) => s + (Number(it.cal) || 0), 0),
+      protein: items.reduce((s, it) => s + (Number(it.protein) || 0), 0),
+      carbs: items.reduce((s, it) => s + (Number(it.carbs) || 0), 0),
       items,
-      logged: new Date().toISOString(),
     };
-    const monthKey = monthKeyOf(date);
-    const hubLink = `[[${monthHubTitle("Nutrition", monthKey)}]]`;
-    let baseBody = `# ${mealName} - ${date}\n\n`;
-    items.forEach((it) => { baseBody += `- ${it.name}: ${it.qty}${it.unit} (${it.cal} cal)\n`; });
-    baseBody += `\nTotal: ${totalCal} cal\n`;
-    // mergeBody adds the hub wikilink at most once (Req 9.4), preserving user lines.
-    const body = mergeBody(baseBody, hubLink);
-    const title = mealLogTitle({ mealName, kcal: totalCal, date });
-    const rel = this.uniquePath("Nutrition/Logs", title);
-    await this.writeFile(rel, this.buildDoc(meta, body));
-    await this.syncMonthHub(this.nutritionHubConfig(), monthKey);
+    await this.addLedgerEntry(this.nutritionLedgerCfg(), entry);
   }
 
   async deleteMealLog(log: MealLog): Promise<void> {
-    const f = this.app.vault.getAbstractFileByPath(log.path);
-    if (f instanceof TFile) await this.removeFile(f);
-    // Regenerate the affected month's Nutrition hub; removes it when this was the
-    // last meal log of the month (keeps the Graph View clean).
-    await this.syncMonthHub(this.nutritionHubConfig(), monthKeyOf(log.date));
+    await this.deleteLedgerEntry(this.nutritionLedgerCfg(), log);
   }
 
   // ---- Water (stored in Nutrition/water.md as a {date: liters} map) ----
@@ -2223,13 +2702,17 @@ export class PADataStore {
   // ============================================================
   // FINANCE (Finance/Transactions/*.md)
   // ============================================================
+  /** Monthly-ledger config for Finance (consolidated note per month; reads fold in legacy notes). */
+  private financeLedgerCfg(): MonthLedgerConfig<Transaction> {
+    return {
+      module: "Finance", hubFolder: "Finance/Months", noteType: "finance-month", legacyFolder: "Finance/Transactions",
+      legacyMapper: mapTransaction, toEntry: txToEntry, fromEntry: entryToTransaction,
+      renderBody: async (items, mk) => renderFinanceTable(items, (await this.loadConfig()).currency || "$", mk),
+    };
+  }
+
   loadTransactions(): Transaction[] {
-    // Data derived solely from frontmatter; filename is presentation only (Req 6.1/6.2).
-    // The pure mapper (src/loaders.ts) is the single source of truth for field extraction
-    // and is what test/loadinvariance.test.ts exercises for Correctness Property 7.
-    return this.listMarkdown("Finance/Transactions")
-      .map((f) => mapTransaction(this.frontmatter(f), f.basename, f.path))
-      .filter((t) => t.date);
+    return this.loadLedger(this.financeLedgerCfg());
   }
 
   /**
@@ -2294,35 +2777,19 @@ export class PADataStore {
   }
 
   async addTransaction(t: { type: string; amount: number; category: string; note?: string }, date: string = todayLocal()): Promise<void> {
-    const tx_type = t.type === "income" ? "income" : "expense";
-    const category = t.category || "Other";
-    const meta: FM = {
-      id: Date.now(),
-      type: "transaction",
-      tx_type,
+    const entry: FM = {
+      id: cryptoId(),
+      tx_type: t.type === "income" ? "income" : "expense",
       date,
       amount: t.amount,
-      category,
+      category: t.category || "Other",
       note: t.note || "",
-      logged: new Date().toISOString(),
     };
-    const monthKey = monthKeyOf(date);
-    const sign = tx_type === "income" ? "+" : "-";
-    const hubLink = `[[${monthHubTitle("Finance", monthKey)}]]`;
-    const baseBody = `# ${category} ${sign}${formatAmount(t.amount)}\n\n${t.note || ""}\n`;
-    const body = mergeBody(baseBody, hubLink);
-    const title = financeTxTitle({ category, note: t.note, amount: t.amount, date });
-    const rel = this.uniquePath("Finance/Transactions", title);
-    await this.writeFile(rel, this.buildDoc(meta, body));
-    await this.syncMonthHub(this.financeHubConfig(), monthKey);
+    await this.addLedgerEntry(this.financeLedgerCfg(), entry);
   }
 
   async deleteTransaction(t: Transaction): Promise<void> {
-    const f = this.app.vault.getAbstractFileByPath(t.path);
-    if (f instanceof TFile) await this.removeFile(f);
-    // Regenerate the affected month's hub; removes it when this was the last
-    // transaction of the month (keeps the Graph View clean).
-    await this.syncMonthHub(this.financeHubConfig(), monthKeyOf(t.date));
+    await this.deleteLedgerEntry(this.financeLedgerCfg(), t);
   }
 
   loadRecurring(): RecurringItem[] {

@@ -127,6 +127,43 @@ nossas conversas. Vale para toda interação neste repositório.
 - **Recurrency de TASKS foi REMOVIDA — não reintroduzir.** (Gerava duplicação em loop.)
   Recurring de FINANÇAS (`Finance/recurring.md`) continua existindo, é outra coisa.
 
+## Board-note tasks (beta, flag OFF) — spec #2 (`.kiro/specs/board-note-tasks/`)
+Modelo alternativo de tasks atrás da flag de device **`boardNoteTasks`** (default **OFF** →
+modelo de pastas 100% intocado). Com ON, **um board = uma nota** `Tasks/<Board>.md` com as tasks
+num array `tasks` no frontmatter (fonte da verdade); o corpo é uma visão read-only por coluna,
+regenerada a cada escrita, em **checkbox `- [x]`/`- [ ]`** (compat. Kanban/Tasks plugins). `task_id`
+é a identidade; `google_id` por entrada é sagrado. Pastas `Tasks/<Board>/` e `Tasks/Lists/` se
+aposentam no modo ON; órfãs vão pra `Tasks/_orphaned.md` (type `task-orphaned`, nunca hard-delete).
+- **Branch pela flag** em todos os métodos de task do store (`data.ts`): OFF usa o caminho de
+  pastas (byte-idêntico), ON usa os métodos `*BoardNote`. `boardNoteMode()` lê `store.boardNoteTasks`
+  (espelhado de `settings.boardNoteTasks` no onload). `readBoardEntries` lê o array
+  **autoritativamente do texto cru** (igual `readMonthEntries`) pra loop de updates não perder dado
+  por cache stale. Transforms puros em `loaders.ts` (`taskDomainToEntry`/`taskEntryToDomain`/
+  `sortTaskEntries`/`upsert`/`patch`/`removeTaskEntry`/`renderBoardNoteBody`/`boardNoteGoogleIds`).
+- **gtSync muda o mínimo** (os métodos do store já ramificam). Dois pontos de dados que PRECISAM ser
+  mode-aware (senão apaga task no Google): `rawGoogleIds` lê os `google_id` de dentro do JSON da
+  board note (via `boardNoteGoogleIds`); `orphanTaskNote` move a entrada pra `_orphaned.md`.
+  `syncTaskLists`/`reconcileTaskLists`/`syncMirrors` viram **no-op** no modo ON.
+
+### Lições que custaram caro (não repetir)
+- **Migração concorrente corrompe:** `migrateToBoardNotes` roda com os listeners de adopt ativos se a
+  flag ainda estiver OFF → o `create`-listener "adota" a board note recém-escrita e a MOVE pra dentro
+  de uma pasta de board, duplicando tudo. **Regra:** `setBoardNoteTasks(true)` liga a flag (store +
+  settings) **ANTES** de migrar; o rollback mantém a flag ON até terminar de reescrever as notas.
+  Defesa em profundidade: `adoptTaskFile` e `loadTasksFolderMode` **nunca** tratam um `type:
+  task-board` como task (independe do timing da flag). Guards no main.ts (adoptOrphanTasks, inbox
+  create, maintainTaskFolders, fixOrphanTasks, migrações de pasta no onLayoutReady) pulam no modo ON.
+- **Identidade de card no board-note:** TODAS as tasks de um board compartilham o mesmo `path` (a
+  board note), então o drag/drop e a busca **DEVEM** usar `task_id` (`data-uid`), nunca `path`. Vale
+  pro Kanban e pra Matrix em `src/modules/tasks.ts`. (Studies fica fora — lá cada card é nota própria.)
+- **Recuperação de vault embaralhado:** dedup por `task_id` com `upsertTaskEntry` (mantém a entrada
+  mais rica), agrupa por board pelo nome do arquivo. Sempre fazer **backup fora do vault** (`cp -R`)
+  e um dump JSON antes; **Obsidian FECHADO** (o plugin remexe os arquivos em tempo real — os números
+  mudam sozinhos). Reconstrução via script `.mjs` espelhando os helpers do plugin (serialização
+  idêntica → o plugin não reescreve). Migração guardada por `boardNoteTasksSchema`/`BOARD_NOTE_TASKS_SCHEMA`.
+- **Paridade no MCP** (`mcp/src/store.mjs`): detecta o modo pela **presença** de board notes
+  (`type: task-board`), não pela flag de device (MCP não lê `data.json`).
+
 ## Comportamento dos cards
 - Engine unificada de cards: `src/cardrender.ts` (ações ✓/🗑/⋮) e `src/cardchips.ts`
   (chips de prioridade/data), usada por Kanban, Matrix e Studies.
@@ -313,6 +350,10 @@ nossas conversas. Vale para toda interação neste repositório.
 - Não fazer o Drive sincronizar `Tasks/` (sempre fora de escopo no `driveInScope`).
 - Não buildar sem perguntar.
 - Não commitar/publicar no git sem ordem explícita.
+- Não migrar pro board-note com a flag ainda OFF (os listeners de adopt corrompem a board note),
+  nem usar `path` como identidade de card no modo ON (use `task_id`/`data-uid`).
+- Não tornar o board-note o default/obrigatório enquanto beta — forçaria migração automática em
+  TODO usuário no upgrade (quebra o "upgrade transparente"). Flag OFF por default até validar.
 
 ## Release e publicação na comunidade
 - **Bump de versão toca 4 arquivos:** `manifest.json`, `versions.json`, `package.json` e

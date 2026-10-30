@@ -6,6 +6,30 @@ export interface ChangeEntry { version: string; sections: ChangeSection[]; }
 /** Release notes shown in the "What's new" dialog, newest first. */
 export const CHANGELOG: ChangeEntry[] = [
   {
+    version: "0.9.0",
+    sections: [
+      {
+        title: "Improved — One note per month for finances, nutrition and fitness",
+        items: [
+          "Your transactions, meal logs and workouts are now kept one note per month (e.g. \"Finance 2026-10 October\") instead of one note per entry. It's tidier, faster to sync, and reads nicely on its own. This happens automatically on first launch — nothing is required from you, and your old per-entry notes are moved to your system trash (recoverable) only after the month note is safely written. No data is lost.",
+        ],
+      },
+      {
+        title: "New — Imperial units (lb)",
+        items: [
+          "You can now show body weight and exercise weights in pounds. Switch units with the kg/lb selector in the Fitness body-weight panel. Your data is always stored in kilograms — switching only changes how weights are shown and typed, so you can flip back and forth freely with nothing to convert or lose.",
+        ],
+      },
+      {
+        title: "New — Board-note tasks (beta, opt-in)",
+        items: [
+          "There's a new way to store tasks: instead of a folder of one note per task, each board becomes a single note (Tasks/<Board>.md) that holds all its tasks, with a checkbox list by column in the body so other Kanban/Tasks plugins can read it. It's off by default — nothing changes unless you turn it on in Settings → Tasks → \"Board-note tasks (beta)\". Switching migrates your tasks and is fully reversible (the old notes move to trash); back up your vault first.",
+          "Everything keeps working while it's off: your current folders, Google tasks sync, and the file manager are untouched. This is early — try it on a backup vault first.",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.8.13",
     sections: [
       {

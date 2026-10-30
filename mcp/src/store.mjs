@@ -49,9 +49,134 @@ function todayLocal() {
   const d = new Date();
   return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
 }
+
+// ---- Monthly ledger: pure serializers + table renderers (MIRROR src/loaders.ts exactly) ----
+const MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+function monthLabel(mk) { const m = /^(\d{4})-(\d{2})$/.exec(mk || ""); if (!m) return mk || ""; return `${MONTH_NAMES[parseInt(m[2], 10) - 1] ?? m[2]} ${m[1]}`; }
+function cell(v) { return str(v).replace(/\r?\n/g, " ").replace(/\|/g, "\\|").trim(); }
+function money(n, cur) { return `${cur}${(Math.round(n * 100) / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`; }
+function sortEntriesByDateId(entries) { return [...entries].sort((a, b) => str(a.date).localeCompare(str(b.date)) || str(a.id).localeCompare(str(b.id))); }
+function mergeEntriesById(existing, incoming) { const seen = new Set(existing.map((e) => str(e.id))); const merged = [...existing]; let added = 0; for (const e of incoming) { const id = str(e.id); if (seen.has(id)) continue; seen.add(id); merged.push(e); added++; } return { merged, added }; }
+
+function txToEntry(t) { return { id: t.id, tx_type: t.type, date: t.date, amount: t.amount, category: t.category, note: t.note || "" }; }
+function entryToTransaction(e, p) { return { id: str(e.id), date: str(e.date).slice(0, 10), type: str(e.tx_type) || "expense", amount: num(e.amount), category: str(e.category) || "Other", note: str(e.note), path: p }; }
+function mealLogToEntry(l) { return { id: l.id, date: l.date, meal: l.mealId, meal_name: l.mealName, calories: l.totalCal, protein: l.totalProtein, carbs: l.totalCarbs, items: l.items }; }
+function entryToMealLog(e, p) { return { id: str(e.id), date: str(e.date).slice(0, 10), mealId: str(e.meal), mealName: str(e.meal_name), totalCal: num(e.calories), totalProtein: num(e.protein), totalCarbs: num(e.carbs), items: coerce(e.items, []), path: p }; }
+function workoutToEntry(w) { return { id: w.id, date: w.date, split: w.split, duration: w.duration, exercises: w.exercises, kind: w.kind }; }
+function entryToWorkout(e, p) { const ex = coerce(e.exercises, []); const sk = str(e.kind); const kind = ["strength", "cardio", "mixed", "empty"].includes(sk) ? sk : deriveWorkoutKind(ex); return { id: str(e.id), date: str(e.date).slice(0, 10), split: str(e.split) || "A", duration: num(e.duration), exercises: ex, path: p, kind }; }
+
+function renderFinanceTable(items, cur, mk) {
+  const sorted = sortEntriesByDateId(items);
+  const income = sorted.filter((t) => t.type === "income").reduce((s, t) => s + t.amount, 0);
+  const expense = sorted.filter((t) => t.type === "expense").reduce((s, t) => s + t.amount, 0);
+  let b = `# Finance — ${monthLabel(mk)}\n\n`;
+  b += `**Income:** ${money(income, cur)} · **Expenses:** ${money(expense, cur)} · **Balance:** ${money(income - expense, cur)}\n\n`;
+  b += `| Date | Type | Category | Amount | Note |\n|------|------|----------|-------:|------|\n`;
+  for (const t of sorted) { const sign = t.type === "income" ? "+" : "−"; b += `| ${cell(t.date)} | ${cell(t.type)} | ${cell(t.category)} | ${sign}${money(t.amount, cur)} | ${cell(t.note)} |\n`; }
+  return b;
+}
+function renderNutritionTable(items, mk, label) {
+  const sorted = sortEntriesByDateId(items);
+  const totalCal = sorted.reduce((s, l) => s + l.totalCal, 0);
+  const days = new Set(sorted.map((l) => l.date)).size;
+  let b = `# Nutrition — ${monthLabel(mk)}\n\n`;
+  b += `**Total:** ${totalCal} cal · **Logs:** ${sorted.length} · **Days:** ${days}\n\n`;
+  b += `| Date | Meal | Cal | Protein | Carbs |\n|------|------|----:|--------:|------:|\n`;
+  for (const l of sorted) b += `| ${cell(l.date)} | ${cell(label(l.mealId))} | ${l.totalCal} | ${l.totalProtein} | ${l.totalCarbs} |\n`;
+  return b;
+}
+function renderFitnessTable(items, mk, label) {
+  const sorted = sortEntriesByDateId(items);
+  const totalMin = sorted.reduce((s, w) => s + w.duration, 0);
+  const days = new Set(sorted.map((w) => w.date)).size;
+  let b = `# Fitness — ${monthLabel(mk)}\n\n`;
+  b += `**Sessions:** ${sorted.length} · **Minutes:** ${totalMin} · **Days:** ${days}\n\n`;
+  b += `| Date | Split | Min | Kind | Exercises |\n|------|-------|----:|------|-----------|\n`;
+  for (const w of sorted) { const exs = (w.exercises || []).map((e) => e.exercise).filter(Boolean).join(", "); b += `| ${cell(w.date)} | ${cell(label(w.split))} | ${w.duration} | ${cell(w.kind)} | ${cell(exs)} |\n`; }
+  return b;
+}
 function cryptoId() {
   try { if (crypto.randomUUID) return crypto.randomUUID(); } catch { /* noop */ }
   return "t" + Date.now() + "-" + Math.random().toString(36).slice(2, 8);
+}
+
+// --- Board-note model (hand-mirrored from src/loaders.ts — the MCP has no build step and can't
+// import from src/*.ts). Keep these in lockstep with the plugin so both serialise identically. ---
+function taskDomainToEntry(t) {
+  const e = { task_id: t.id, title: t.title, status: t.status, priority: t.priority };
+  if (t.cat) e.category = t.cat;
+  if (t.group) e.group = t.group;
+  if (t.due) e.due = t.due;
+  if (t.scheduled) e.scheduled = t.scheduled;
+  if (t.eisenhower) e.eisenhower = t.eisenhower;
+  if (t.order !== undefined && t.order !== null) e.order = t.order;
+  if (t.googleId) e.google_id = t.googleId;
+  if (t.googleList) e.google_list = t.googleList;
+  if (t.created) e.created = t.created;
+  if (t.modified) e.modified = t.modified;
+  if (t.kanbanId) e["kanban-id"] = t.kanbanId;
+  if (t.duration) e.duration = t.duration;
+  if (t.isAllDay) e.is_all_day = t.isAllDay;
+  return e;
+}
+function taskEntryToDomain(e, notePath, board) {
+  return {
+    id: str(e.task_id) || str(e.id),
+    title: str(e.title),
+    status: str(e.status) || "backlog",
+    priority: str(e.priority) || "medium",
+    cat: str(e.category) || "work",
+    group: str(e.group),
+    kanbanId: str(e["kanban-id"]),
+    kanbanName: board,
+    due: str(e.due),
+    scheduled: str(e.scheduled),
+    duration: num(e.duration),
+    isAllDay: !!e.is_all_day,
+    created: str(e.created),
+    modified: str(e.modified),
+    order: (e.order !== undefined && e.order !== null) ? Number(e.order) : undefined,
+    eisenhower: str(e.eisenhower),
+    googleId: str(e.google_id),
+    googleList: str(e.google_list),
+    path: notePath,
+  };
+}
+function sortTaskEntries(entries) {
+  const ord = (e) => (e.order !== undefined && e.order !== null ? Number(e.order) : Number.POSITIVE_INFINITY);
+  return entries.slice().sort((a, b) => (ord(a) - ord(b)) || str(a.task_id).localeCompare(str(b.task_id)));
+}
+function upsertTaskEntry(entries, entry) {
+  const id = str(entry.task_id);
+  const idx = entries.findIndex((e) => str(e.task_id) === id);
+  const next = entries.slice();
+  if (idx >= 0) next[idx] = { ...next[idx], ...entry }; else next.push(entry);
+  return next;
+}
+function patchTaskEntry(entries, taskId, patch) {
+  const idx = entries.findIndex((e) => str(e.task_id) === taskId);
+  if (idx < 0) return entries;
+  const next = entries.slice(); next[idx] = { ...next[idx], ...patch }; return next;
+}
+function removeTaskEntry(entries, taskId) { return entries.filter((e) => str(e.task_id) !== taskId); }
+function renderBoardNoteBody(board, tasks, cols, colNames) {
+  const doneCol = cols.includes("done") ? "done" : cols[cols.length - 1];
+  const byCol = new Map();
+  for (const t of tasks) { const k = t.status || cols[0] || "backlog"; const a = byCol.get(k); if (a) a.push(t); else byCol.set(k, [t]); }
+  const sortCol = (a, b) => (((a.order ?? 0) - (b.order ?? 0)) || a.title.localeCompare(b.title) || a.id.localeCompare(b.id));
+  let body = `# ${board}\n`;
+  const emitted = new Set();
+  const emit = (col) => {
+    const arr = (byCol.get(col) || []).slice().sort(sortCol);
+    if (!arr.length) return;
+    body += `\n## ${colNames[col] || col}\n`;
+    const box = col === doneCol ? "x" : " ";
+    for (const t of arr) body += `- [${box}] ${t.title}\n`;
+    emitted.add(col);
+  };
+  for (const c of cols) emit(c);
+  for (const c of byCol.keys()) if (!emitted.has(c)) emit(c);
+  return body;
 }
 
 export class MomentumStore {
@@ -154,7 +279,7 @@ export class MomentumStore {
   // ============================================================
   async loadConfig() {
     const cfg = {
-      calorieTarget: 2000, proteinTarget: 120, carbsTarget: 200, waterTarget: 2.5, weightTarget: 0,
+      calorieTarget: 2000, proteinTarget: 120, carbsTarget: 200, waterTarget: 2.5, weightTarget: 0, unitSystem: "metric",
       taskColumns: DEFAULT_TASK_COLUMNS.slice(), taskColumnNames: { ...DEFAULT_TASK_COLUMN_NAMES },
       studyColumns: DEFAULT_TASK_COLUMNS.slice(), studyColumnNames: { ...DEFAULT_TASK_COLUMN_NAMES },
       studyTopics: [], customSplits: [], splitNames: {}, currency: "$", monthlyBudget: 0, startingBalance: 0,
@@ -169,6 +294,7 @@ export class MomentumStore {
     if (m.carbs_target) cfg.carbsTarget = num(m.carbs_target);
     if (m.water_target) cfg.waterTarget = num(m.water_target);
     if (m.weight_target != null) cfg.weightTarget = num(m.weight_target);
+    if (m.unit_system) cfg.unitSystem = str(m.unit_system) === "imperial" ? "imperial" : "metric";
     if (m.task_columns) cfg.taskColumns = coerce(m.task_columns, cfg.taskColumns);
     if (m.task_column_names) cfg.taskColumnNames = coerce(m.task_column_names, cfg.taskColumnNames);
     if (m.study_columns) cfg.studyColumns = coerce(m.study_columns, cfg.studyColumns);
@@ -191,6 +317,7 @@ export class MomentumStore {
       type: "config",
       calorie_target: cfg.calorieTarget, protein_target: cfg.proteinTarget,
       carbs_target: cfg.carbsTarget, water_target: cfg.waterTarget, weight_target: cfg.weightTarget,
+      unit_system: cfg.unitSystem,
       task_columns: cfg.taskColumns, task_column_names: cfg.taskColumnNames,
       study_columns: cfg.studyColumns, study_column_names: cfg.studyColumnNames,
       study_topics: cfg.studyTopics, custom_splits: cfg.customSplits, split_names: cfg.splitNames,
@@ -210,7 +337,136 @@ export class MomentumStore {
    * Task boards are the folders under Tasks/ (mirrors the plugin: folder = source of truth,
    * no boards.md). "My Tasks" always exists and is pinned first. Studies still uses boards.md.
    */
+  // ---- Board-note mode (detected by PRESENCE of a Tasks/*.md tagged `task-board`, since the MCP
+  // can't read the plugin's device flag in data.json). All board-note helpers mirror src/data.ts. --
+  boardNoteRel(board) { return `Tasks/${safeName(this.boardOrDefault(board))}.md`; }
+  async _boardNoteMode() {
+    const base = this.full("Tasks");
+    let entries = [];
+    try { entries = await fs.readdir(base, { withFileTypes: true }); } catch { return false; }
+    for (const e of entries) {
+      if (e.isFile() && e.name.endsWith(".md")) {
+        const m = await this.fmOf(path.join(base, e.name));
+        if (str(m.type) === "task-board") return true;
+      }
+    }
+    return false;
+  }
+  async _readBoardEntries(board) {
+    const raw = await this.readRaw(this.boardNoteRel(board));
+    if (!raw) return [];
+    return coerce(this.parse(raw).fm.tasks, []);
+  }
+  async _writeBoardNote(board, entries) {
+    const rel = this.boardNoteRel(board);
+    const sorted = sortTaskEntries(entries);
+    const cfg = await this.loadConfig();
+    const tasks = sorted.map((e) => taskEntryToDomain(e, this.full(rel), board));
+    const body = renderBoardNoteBody(board, tasks, cfg.taskColumns, cfg.taskColumnNames);
+    await this.writeRel(rel, this.buildDoc({ type: "task-board", board, tasks: sorted }, body));
+  }
+  async _loadBoardsBoardNote() {
+    const base = this.full("Tasks");
+    const names = new Set(["My Tasks"]);
+    let entries = [];
+    try { entries = await fs.readdir(base, { withFileTypes: true }); } catch { /* no Tasks dir yet */ }
+    for (const e of entries) {
+      if (e.isFile() && e.name.endsWith(".md")) {
+        const m = await this.fmOf(path.join(base, e.name));
+        if (str(m.type) === "task-board") names.add(str(m.board) || e.name.replace(/\.md$/, ""));
+      }
+    }
+    const sorted = [...names].sort((a, b) => a === "My Tasks" ? -1 : b === "My Tasks" ? 1 : a.localeCompare(b));
+    return sorted.map((name) => ({ id: safeName(name), name, emoji: "" }));
+  }
+  async _loadTasksBoardNote() {
+    const base = this.full("Tasks");
+    const out = [];
+    let entries = [];
+    try { entries = await fs.readdir(base, { withFileTypes: true }); } catch { return out; }
+    for (const e of entries) {
+      if (!(e.isFile() && e.name.endsWith(".md"))) continue;
+      const abs = path.join(base, e.name);
+      const m = await this.fmOf(abs);
+      if (str(m.type) !== "task-board") continue;
+      const board = str(m.board) || e.name.replace(/\.md$/, "");
+      for (const en of coerce(m.tasks, [])) out.push(taskEntryToDomain(en, abs, board));
+    }
+    return out;
+  }
+  async _createTaskBoardNote(t) {
+    const cfg = await this.loadConfig();
+    const cols = cfg.taskColumns;
+    const status = resolveColumn(t.status, cols) ?? cols[0];
+    const board = this.boardOrDefault(t.board);
+    const title = (t.title || "Untitled").trim() || "Untitled";
+    const now = new Date().toISOString();
+    const entry = taskDomainToEntry({
+      id: cryptoId(), title, status, priority: t.priority || "medium",
+      group: t.group || "", due: t.due || "", eisenhower: t.eisenhower || "",
+      created: now, modified: now, kanbanName: board,
+    });
+    await this._writeBoardNote(board, upsertTaskEntry(await this._readBoardEntries(board), entry));
+    return { path: this.full(this.boardNoteRel(board)), title, board, status };
+  }
+  async _updateTaskBoardNote(idOrPath, changes) {
+    const target = await this._findTask(idOrPath);
+    if (!target) throw new Error(`Task not found: ${idOrPath}`);
+    const cfg = await this.loadConfig();
+    const fromBoard = this.boardOrDefault(target.kanbanName);
+    const toBoard = this.boardOrDefault(changes.board);
+    const movingBoard = changes.board !== undefined && toBoard !== fromBoard;
+    const patch = {};
+    if (changes.status !== undefined) patch.status = resolveColumn(changes.status, cfg.taskColumns) ?? cfg.taskColumns[0];
+    if (changes.priority !== undefined) patch.priority = changes.priority;
+    if (changes.title !== undefined) patch.title = changes.title;
+    if (changes.group !== undefined) patch.group = changes.group;
+    if (changes.due !== undefined) patch.due = changes.due;
+    if (changes.eisenhower !== undefined) patch.eisenhower = changes.eisenhower;
+    patch.modified = new Date().toISOString();
+    if (!movingBoard) {
+      await this._writeBoardNote(fromBoard, patchTaskEntry(await this._readBoardEntries(fromBoard), target.id, patch));
+      return { path: this.full(this.boardNoteRel(fromBoard)), ...changes };
+    }
+    const fromEntries = await this._readBoardEntries(fromBoard);
+    const moving = fromEntries.find((e) => str(e.task_id) === target.id);
+    await this._writeBoardNote(fromBoard, removeTaskEntry(fromEntries, target.id));
+    const base = moving ?? taskDomainToEntry({ ...target, kanbanName: toBoard });
+    await this._writeBoardNote(toBoard, upsertTaskEntry(await this._readBoardEntries(toBoard), { ...base, ...patch }));
+    return { path: this.full(this.boardNoteRel(toBoard)), ...changes };
+  }
+  async _deleteTaskBoardNote(idOrPath) {
+    const target = await this._findTask(idOrPath);
+    if (!target) throw new Error(`Task not found: ${idOrPath}`);
+    const board = this.boardOrDefault(target.kanbanName);
+    await this._writeBoardNote(board, removeTaskEntry(await this._readBoardEntries(board), target.id));
+    return { deleted: target.title };
+  }
+  async _createBoardBoardNote(name) {
+    const clean = safeName((name || "").trim());
+    if (!clean || clean === "Lists" || clean === "untitled") return false;
+    if (!(await this.exists(this.boardNoteRel(clean)))) await this._writeBoardNote(clean, []);
+    return true;
+  }
+  async _deleteBoardBoardNote(name) {
+    const clean = (name || "").trim();
+    if (!clean) return { ok: false, reason: "no board name" };
+    if (clean === "My Tasks") return { ok: false, reason: "cannot delete My Tasks" };
+    if (!(await this.exists(this.boardNoteRel(clean)))) return { ok: false, reason: "not found" };
+    await this._addIgnoredBoard(clean);
+    const entries = await this._readBoardEntries(clean);
+    let moved = 0;
+    if (entries.length) {
+      let merged = await this._readBoardEntries("My Tasks");
+      for (const e of entries) { merged = upsertTaskEntry(merged, e); moved++; }
+      await this._writeBoardNote("My Tasks", merged);
+    }
+    await this.removeAbs(this.full(this.boardNoteRel(clean)));
+    return { ok: true, board: clean, movedTasks: moved, tombstoned: true };
+  }
+
   async loadBoards() {
+    if (await this._boardNoteMode()) return this._loadBoardsBoardNote();
     const base = this.full("Tasks");
     const names = new Set(["My Tasks"]);
     let entries = [];
@@ -236,6 +492,7 @@ export class MomentumStore {
   async ensureBoardFolder(name) { await fs.mkdir(this.full(this.taskBoardFolder(name)), { recursive: true }); }
   /** Create a board = create its folder. Returns false for an invalid/reserved name. */
   async createBoard(name) {
+    if (await this._boardNoteMode()) return this._createBoardBoardNote(name);
     const clean = safeName((name || "").trim());
     if (!clean || clean === "Lists" || clean === "untitled") return false;
     await this.ensureBoardFolder(clean);
@@ -255,6 +512,7 @@ export class MomentumStore {
    * its next sync. Refuses "My Tasks"; no-op when the board doesn't exist.
    */
   async deleteBoard(name) {
+    if (await this._boardNoteMode()) return this._deleteBoardBoardNote(name);
     const clean = (name || "").trim();
     if (!clean) return { ok: false, reason: "no board name" };
     if (clean === "My Tasks") return { ok: false, reason: "cannot delete My Tasks" };
@@ -291,6 +549,7 @@ export class MomentumStore {
   // TASKS
   // ============================================================
   async loadTasks() {
+    if (await this._boardNoteMode()) return this._loadTasksBoardNote();
     const tasksRoot = this.full("Tasks");
     const listsPrefix = this.full("Tasks/Lists") + path.sep;
     const orphanPrefix = this.full("Tasks/_orphaned") + path.sep;
@@ -329,6 +588,7 @@ export class MomentumStore {
   }
 
   async createTask(t) {
+    if (await this._boardNoteMode()) return this._createTaskBoardNote(t);
     const cfg = await this.loadConfig();
     const cols = cfg.taskColumns;
     // Validate/resolve the requested column tolerantly, so "in-progress", "in_progress" or
@@ -352,6 +612,7 @@ export class MomentumStore {
   }
 
   async updateTask(idOrPath, changes) {
+    if (await this._boardNoteMode()) return this._updateTaskBoardNote(idOrPath, changes);
     const target = await this._findTask(idOrPath);
     if (!target) throw new Error(`Task not found: ${idOrPath}`);
     const cfg = await this.loadConfig();
@@ -393,6 +654,7 @@ export class MomentumStore {
   }
 
   async deleteTask(idOrPath) {
+    if (await this._boardNoteMode()) return this._deleteTaskBoardNote(idOrPath);
     const target = await this._findTask(idOrPath);
     if (!target) throw new Error(`Task not found: ${idOrPath}`);
     await this.removeAbs(target.path);
@@ -407,6 +669,7 @@ export class MomentumStore {
 
   /** Regenerate the flat Tasks/Lists/<board>.md mirrors (mirrors data.ts syncTaskLists). */
   async syncTaskLists() {
+    if (await this._boardNoteMode()) return; // board notes are self-rendering; no Lists/ mirrors.
     const cfg = await this.loadConfig();
     const cols = cfg.taskColumns;
     const names = cfg.taskColumnNames;
@@ -458,25 +721,91 @@ export class MomentumStore {
   }
 
   // ============================================================
+  // MONTHLY LEDGER (mirror of the plugin: one consolidated note per month per module)
+  // ============================================================
+  _monthNoteRel(cfg, mk) { return `${cfg.hubFolder}/${monthHubTitle(cfg.module, mk)}.md`; }
+  async _readMonthEntries(rel) { const raw = await this.readRaw(rel); if (!raw) return []; return coerce(this.parse(raw).fm.entries, []); }
+  async _writeMonthNote(cfg, mk, entries) {
+    const rel = this._monthNoteRel(cfg, mk);
+    if (!entries.length) { if (await this.exists(rel)) await this.removeAbs(this.full(rel)); return; }
+    const sorted = sortEntriesByDateId(entries);
+    const items = sorted.map((e) => cfg.fromEntry(e, this.full(rel)));
+    const body = await cfg.renderBody(items, mk);
+    await this.writeRel(rel, this.buildDoc({ type: cfg.noteType, month: mk, entries: sorted }, body));
+  }
+  async _loadLedger(cfg) {
+    const out = [];
+    const seen = new Set();
+    for (const abs of await this.listMarkdown(cfg.hubFolder)) {
+      const m = await this.fmOf(abs);
+      if (str(m.type) !== cfg.noteType) continue;
+      for (const e of coerce(m.entries, [])) { const it = cfg.fromEntry(e, abs); if (it.date) { out.push(it); seen.add(it.id); } }
+    }
+    for (const abs of await this.listMarkdown(cfg.legacyFolder)) {
+      const it = cfg.legacyMapper(await this.fmOf(abs), this.basename(abs), abs);
+      if (it.date && !seen.has(it.id)) out.push(it);
+    }
+    return out;
+  }
+  async _addLedgerEntry(cfg, entry) {
+    const mk = monthKeyOf(str(entry.date));
+    const entries = await this._readMonthEntries(this._monthNoteRel(cfg, mk));
+    entries.push(entry);
+    await this._writeMonthNote(cfg, mk, entries);
+    return mk;
+  }
+  async _deleteLedgerEntry(cfg, item) {
+    const mk = monthKeyOf(item.date);
+    const rel = this._monthNoteRel(cfg, mk);
+    const before = await this._readMonthEntries(rel);
+    const after = before.filter((e) => str(e.id) !== item.id);
+    if (after.length !== before.length) await this._writeMonthNote(cfg, mk, after);
+    if (item.path && item.path !== this.full(rel)) { try { await this.removeAbs(item.path); } catch { /* ignore */ } }
+  }
+
+  _financeLedgerCfg() {
+    return {
+      module: "Finance", hubFolder: "Finance/Months", noteType: "finance-month", legacyFolder: "Finance/Transactions",
+      legacyMapper: (m, bn, p) => entryToTransaction({ ...m, id: m.id ?? bn }, p),
+      toEntry: txToEntry, fromEntry: entryToTransaction,
+      renderBody: async (items, mk) => renderFinanceTable(items, (await this.loadConfig()).currency || "$", mk),
+    };
+  }
+  _nutritionLedgerCfg() {
+    return {
+      module: "Nutrition", hubFolder: "Nutrition/Months", noteType: "nutrition-month", legacyFolder: "Nutrition/Logs",
+      legacyMapper: (m, bn, p) => entryToMealLog({ ...m, id: m.id ?? bn }, p),
+      toEntry: mealLogToEntry, fromEntry: entryToMealLog,
+      renderBody: async (items, mk) => {
+        const byId = new Map((await this.loadMeals()).map((x) => [x.id, x.name]));
+        return renderNutritionTable(items, mk, (id) => (byId.get(id) || "").trim() || id);
+      },
+    };
+  }
+  _fitnessLedgerCfg() {
+    return {
+      module: "Fitness", hubFolder: "Fitness/Months", noteType: "fitness-month", legacyFolder: "Fitness/Workouts",
+      legacyMapper: (m, bn, p) => entryToWorkout({ ...m, id: m.id ?? bn }, p),
+      toEntry: workoutToEntry, fromEntry: entryToWorkout,
+      renderBody: async (items, mk) => {
+        const cfg = await this.loadConfig();
+        const splits = await this.loadSplits();
+        const label = (id) => {
+          const configured = (cfg.splitNames && cfg.splitNames[id] || "").trim(); if (configured) return configured;
+          const custom = (cfg.customSplits || []).find((s) => s.id === id); if (custom && (custom.name || "").trim()) return custom.name.trim();
+          const listed = splits.find((s) => s.id === id); if (listed && (listed.name || "").trim()) return listed.name.trim();
+          return id;
+        };
+        return renderFitnessTable(items, mk, label);
+      },
+    };
+  }
+
+  // ============================================================
   // FINANCE
   // ============================================================
   async loadTransactions() {
-    const files = await this.listMarkdown("Finance/Transactions");
-    const out = [];
-    for (const abs of files) {
-      const m = await this.fmOf(abs);
-      const t = {
-        id: str(m.id) || this.basename(abs),
-        date: str(m.date).slice(0, 10),
-        type: str(m.tx_type) || "expense",
-        amount: num(m.amount),
-        category: str(m.category) || "Other",
-        note: str(m.note),
-        path: abs,
-      };
-      if (t.date) out.push(t);
-    }
-    return out;
+    return this._loadLedger(this._financeLedgerCfg());
   }
 
   _financeCfg() {
@@ -499,29 +828,16 @@ export class MomentumStore {
   }
 
   async addTransaction({ type, amount, category, note, date }) {
-    const tx_type = type === "income" ? "income" : "expense";
-    const cat = category || "Other";
     const d = (date || todayLocal()).slice(0, 10);
-    const meta = {
-      id: Date.now(), type: "transaction", tx_type, date: d,
-      amount: num(amount), category: cat, note: note || "", logged: new Date().toISOString(),
-    };
-    const monthKey = monthKeyOf(d);
-    const sign = tx_type === "income" ? "+" : "-";
-    const baseBody = `# ${cat} ${sign}${formatAmount(num(amount))}\n\n${note || ""}\n`;
-    const body = mergeBody(baseBody, `[[${monthHubTitle("Finance", monthKey)}]]`);
-    const rel = await this.uniqueRel("Finance/Transactions", financeTxTitle({ category: cat, note, amount: num(amount), date: d }));
-    await this.writeRel(rel, this.buildDoc(meta, body));
-    await this.syncMonthHub(this._financeCfg(), monthKey);
-    return { path: this.full(rel), month: monthKey };
+    const entry = { id: crypto.randomUUID(), tx_type: type === "income" ? "income" : "expense", date: d, amount: num(amount), category: category || "Other", note: note || "" };
+    const month = await this._addLedgerEntry(this._financeLedgerCfg(), entry);
+    return { id: entry.id, month };
   }
 
   async deleteTransaction(idOrPath) {
-    const list = await this.loadTransactions();
-    const t = list.find((x) => x.id === idOrPath || x.path === idOrPath);
+    const t = (await this.loadTransactions()).find((x) => x.id === idOrPath || x.path === idOrPath);
     if (!t) throw new Error(`Transaction not found: ${idOrPath}`);
-    await this.removeAbs(t.path);
-    await this.syncMonthHub(this._financeCfg(), monthKeyOf(t.date));
+    await this._deleteLedgerEntry(this._financeLedgerCfg(), t);
     return { deleted: t.id };
   }
 
@@ -653,14 +969,7 @@ export class MomentumStore {
   }
 
   async loadMealLogs() {
-    const files = await this.listMarkdown("Nutrition/Logs");
-    const out = [];
-    for (const abs of files) {
-      const m = await this.fmOf(abs);
-      const l = { id: str(m.id) || this.basename(abs), date: str(m.date).slice(0, 10), mealId: str(m.meal), mealName: str(m.meal_name), totalCal: num(m.calories), totalProtein: num(m.protein), totalCarbs: num(m.carbs), items: coerce(m.items, []), path: abs };
-      if (l.date) out.push(l);
-    }
-    return out;
+    return this._loadLedger(this._nutritionLedgerCfg());
   }
 
   _nutritionCfg() {
@@ -687,28 +996,22 @@ export class MomentumStore {
 
   async logMeal({ mealName, items = [], date }) {
     const d = (date || todayLocal()).slice(0, 10);
-    const totalCal = items.reduce((s, it) => s + (Number(it.cal) || 0), 0);
-    const totalProtein = items.reduce((s, it) => s + (Number(it.protein) || 0), 0);
-    const totalCarbs = items.reduce((s, it) => s + (Number(it.carbs) || 0), 0);
     const name = (mealName || "Meal").trim() || "Meal";
-    const meta = { id: Date.now(), type: "meal-log", date: d, meal: name, meal_name: name, calories: totalCal, protein: totalProtein, carbs: totalCarbs, items, logged: new Date().toISOString() };
-    const monthKey = monthKeyOf(d);
-    let baseBody = `# ${name} - ${d}\n\n`;
-    items.forEach((it) => { baseBody += `- ${it.name}: ${it.qty ?? ""}${it.unit ?? ""} (${it.cal ?? 0} cal)\n`; });
-    baseBody += `\nTotal: ${totalCal} cal\n`;
-    const body = mergeBody(baseBody, `[[${monthHubTitle("Nutrition", monthKey)}]]`);
-    const rel = await this.uniqueRel("Nutrition/Logs", mealLogTitle({ mealName: name, kcal: totalCal, date: d }));
-    await this.writeRel(rel, this.buildDoc(meta, body));
-    await this.syncMonthHub(this._nutritionCfg(), monthKey);
-    return { path: this.full(rel), month: monthKey, totalCal };
+    const entry = {
+      id: crypto.randomUUID(), date: d, meal: name, meal_name: name,
+      calories: items.reduce((s, it) => s + (Number(it.cal) || 0), 0),
+      protein: items.reduce((s, it) => s + (Number(it.protein) || 0), 0),
+      carbs: items.reduce((s, it) => s + (Number(it.carbs) || 0), 0),
+      items,
+    };
+    const month = await this._addLedgerEntry(this._nutritionLedgerCfg(), entry);
+    return { id: entry.id, month, totalCal: entry.calories };
   }
 
   async deleteMealLog(idOrPath) {
-    const list = await this.loadMealLogs();
-    const l = list.find((x) => x.id === idOrPath || x.path === idOrPath);
+    const l = (await this.loadMealLogs()).find((x) => x.id === idOrPath || x.path === idOrPath);
     if (!l) throw new Error(`Meal log not found: ${idOrPath}`);
-    await this.removeAbs(l.path);
-    await this.syncMonthHub(this._nutritionCfg(), monthKeyOf(l.date));
+    await this._deleteLedgerEntry(this._nutritionLedgerCfg(), l);
     return { deleted: l.id };
   }
 
@@ -767,17 +1070,7 @@ export class MomentumStore {
     return out;
   }
   async loadWorkouts() {
-    const files = await this.listMarkdown("Fitness/Workouts");
-    const out = [];
-    for (const abs of files) {
-      const m = await this.fmOf(abs);
-      const exercises = coerce(m.exercises, []);
-      const storedKind = str(m.kind);
-      const kind = ["strength", "cardio", "mixed", "empty"].includes(storedKind) ? storedKind : deriveWorkoutKind(exercises);
-      const w = { id: str(m.id) || this.basename(abs), date: str(m.date).slice(0, 10), split: str(m.split) || "A", duration: num(m.duration), exercises, path: abs, kind };
-      if (w.date) out.push(w);
-    }
-    return out;
+    return this._loadLedger(this._fitnessLedgerCfg());
   }
   async resolveSplitName(splitId, cfg) {
     cfg = cfg || await this.loadConfig();
@@ -822,26 +1115,15 @@ export class MomentumStore {
     };
   }
   async logWorkout({ split, duration, date, exercises = [] }) {
-    const cfg = await this.loadConfig();
-    const splitId = split || "A";
-    const splitName = await this.resolveSplitName(splitId, cfg);
     const d = (date || todayLocal()).slice(0, 10);
-    const meta = { id: Date.now(), type: "workout-log", date: d, split: splitId, duration: num(duration), exercises, kind: deriveWorkoutKind(exercises), logged: new Date().toISOString() };
-    const monthKey = monthKeyOf(d);
-    let baseBody = `# ${splitName} - ${d}\n\n`;
-    exercises.forEach((e) => { baseBody += `- ${e.exercise}: ${e.weight ?? ""}kg x ${e.sets ?? ""}${e.feel ? ` (${e.feel})` : ""}\n`; });
-    const body = mergeBody(baseBody, `[[${monthHubTitle("Fitness", monthKey)}]]`);
-    const rel = await this.uniqueRel("Fitness/Workouts", workoutTitle({ splitName, minutes: num(duration), date: d }));
-    await this.writeRel(rel, this.buildDoc(meta, body));
-    await this.syncMonthHub(this._fitnessCfg(), monthKey);
-    return { path: this.full(rel), month: monthKey };
+    const entry = { id: crypto.randomUUID(), date: d, split: split || "A", duration: num(duration), exercises, kind: deriveWorkoutKind(exercises) };
+    const month = await this._addLedgerEntry(this._fitnessLedgerCfg(), entry);
+    return { id: entry.id, month };
   }
   async deleteWorkout(idOrPath) {
-    const list = await this.loadWorkouts();
-    const w = list.find((x) => x.id === idOrPath || x.path === idOrPath);
+    const w = (await this.loadWorkouts()).find((x) => x.id === idOrPath || x.path === idOrPath);
     if (!w) throw new Error(`Workout not found: ${idOrPath}`);
-    await this.removeAbs(w.path);
-    await this.syncMonthHub(this._fitnessCfg(), monthKeyOf(w.date));
+    await this._deleteLedgerEntry(this._fitnessLedgerCfg(), w);
     return { deleted: w.id };
   }
 

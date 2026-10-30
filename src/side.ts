@@ -4,6 +4,7 @@ import { PADataStore, DATA_ROOT } from "./data";
 import { todayLocal } from "./util";
 import { drawRing, drawDonut, drawBars } from "./charts";
 import { StudyCard, Task, Exercise } from "./types";
+import { weightUnit, kgToDisplay } from "./loaders";
 import { FormModal, FieldSpec, toast } from "./ui";
 
 /** Shared palette for the panel's donuts/bars. */
@@ -772,7 +773,8 @@ export class PASideView extends ItemView {
       const sec = this.section(root, `Exercises (${w.exercises.length})`);
       const list = sec.createEl("ul", { cls: "pa-ctx-items" });
       for (const ex of w.exercises) {
-        const parts = [ex.exercise, ex.sets, ex.weight ? `${ex.weight} kg` : ""].filter(Boolean);
+        const u = this.ctx.config.unitSystem;
+        const parts = [ex.exercise, ex.sets, ex.weight ? `${kgToDisplay(ex.weight, u)} ${weightUnit(u)}` : ""].filter(Boolean);
         list.createEl("li", { text: parts.join(" · ") });
       }
     }

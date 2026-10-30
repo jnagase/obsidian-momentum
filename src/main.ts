@@ -24,6 +24,12 @@ interface PASettings {
   readableNotesSchema?: number;
   taskListsSchema?: number;
   taskFoldersSchema?: number;
+  monthlyLedgerSchema?: number;
+  // Board-note task model (beta, off by default). Device flag: when on, a board is one
+  // Tasks/<Board>.md note with a `tasks[]` frontmatter array. The schema guard runs the
+  // per-task→board-note migration once when the flag is first turned on (see Phase 3).
+  boardNoteTasks?: boolean;
+  boardNoteTasksSchema?: number;
   googleTasksEnabled: boolean;
   googleTasksSyncOnStartup: boolean;
   googleSyncInterval: number; // 0=manual, or minutes: 5, 10, 15, 60, 120, 300, 720, 1440
@@ -64,6 +70,9 @@ const DEFAULT_SETTINGS: PASettings = {
   readableNotesSchema: 0,
   taskListsSchema: 0,
   taskFoldersSchema: 0,
+  monthlyLedgerSchema: 0,
+  boardNoteTasks: false,
+  boardNoteTasksSchema: 0,
   googleTasksEnabled: false,
   googleTasksSyncOnStartup: false,
   googleSyncInterval: 0,   // manual by default
@@ -109,6 +118,10 @@ const TASK_LISTS_SCHEMA = 1;
 /** Bump when the per-board folder layout changes so the guarded migration re-runs.
  *  6: re-run repairTaskFrontmatter to strip Obsidian Sync conflict markers that stuck cards. */
 const TASK_FOLDERS_SCHEMA = 6;
+/** Bump when the monthly-ledger consolidation changes so the guarded migration re-runs. */
+const MONTHLY_LEDGER_SCHEMA = 1;
+/** Bump when the per-task→board-note migration changes so it re-runs once on a flagged device. */
+const BOARD_NOTE_TASKS_SCHEMA = 1;
 
 export default class MomentumPlugin extends Plugin implements PAHost {
   settings: PASettings;
@@ -133,6 +146,9 @@ export default class MomentumPlugin extends Plugin implements PAHost {
     }
     setDataRoot(this.settings.dataRoot);
     this.store = new PADataStore(this.app);
+    // Mirror the board-note device flag into the store so every task read/write picks the right
+    // model. Default OFF → the store's folder-per-board path is used, unchanged from today.
+    this.store.boardNoteTasks = !!this.settings.boardNoteTasks;
 
     // One-time (transparent): the old default local Drive scope was a folder literally named
     // "Drive". On a fresh vault with no such folder that silently synced NOTHING. Flip that stale
@@ -188,6 +204,12 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       id: "migrate-readable-notes",
       name: "Momentum: migrate notes to readable names",
       callback: () => void this.runReadableNotesMigration(),
+    });
+
+    this.addCommand({
+      id: "consolidate-monthly-notes",
+      name: "Momentum: consolidate monthly notes",
+      callback: () => void this.runMonthlyConsolidation(),
     });
 
     this.addCommand({
@@ -308,7 +330,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
           // One-time migration of legacy mirror layout (Tasks/Lists/<board>/tasks.md)
           // to the flat, intuitive Tasks/Lists/<board>.md. Guarded by a schema version
           // so it runs once; on failure the guard stays unset so it retries next launch.
-          if ((this.settings.taskListsSchema ?? 0) < TASK_LISTS_SCHEMA) {
+          if (!this.boardNoteMode() && (this.settings.taskListsSchema ?? 0) < TASK_LISTS_SCHEMA) {
             try {
               const migrated = await this.store.migrateTaskListStructure();
               this.settings.taskListsSchema = TASK_LISTS_SCHEMA;
@@ -319,7 +341,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
           // One-time migration to the folder-per-board layout: loose task notes at the
           // Tasks/ root are filed into Tasks/<board>/ so boards are visible as folders and
           // anyone can create a task by hand. Backlink-safe; guarded to run once.
-          if ((this.settings.taskFoldersSchema ?? 0) < TASK_FOLDERS_SCHEMA) {
+          if (!this.boardNoteMode() && (this.settings.taskFoldersSchema ?? 0) < TASK_FOLDERS_SCHEMA) {
             try {
               // Rename the default board General Tasks → My Tasks (pairs with Google's list).
               await this.store.migrateDefaultBoardName();
@@ -335,6 +357,15 @@ export default class MomentumPlugin extends Plugin implements PAHost {
               await this.saveSettings();
               if (filed > 0) new Notice(`Momentum: filed ${filed} task${filed === 1 ? "" : "s"} into board folders.`);
             } catch { /* leave the guard unset so the migration retries next launch */ }
+          }
+          // Board-note mode is on but this device hasn't consolidated its folders yet (e.g. the
+          // flag was set and the migration logic later bumped). Run it once, guarded by schema.
+          if (this.boardNoteMode() && (this.settings.boardNoteTasksSchema ?? 0) < BOARD_NOTE_TASKS_SCHEMA) {
+            try {
+              await this.store.migrateToBoardNotes();
+              this.settings.boardNoteTasksSchema = BOARD_NOTE_TASKS_SCHEMA;
+              await this.saveSettings();
+            } catch { /* leave the guard unset so it retries next launch */ }
           }
           await this.store.reconcileTaskLists();
           await this.store.syncTaskLists();
@@ -385,6 +416,20 @@ export default class MomentumPlugin extends Plugin implements PAHost {
             this.settings.readableNotesSchema = READABLE_NOTES_SCHEMA;
             await this.saveSettings();
           } catch { /* leave the guard unset so "migrate notes to readable names" can retry */ }
+        })();
+      }
+
+      // Consolidate per-item Finance/Nutrition/Fitness notes into one note per month (reversible:
+      // old notes go to the trash). Guarded so it runs once; a failure leaves the guard unset to
+      // retry next launch or via the manual command.
+      if ((this.settings.monthlyLedgerSchema ?? 0) < MONTHLY_LEDGER_SCHEMA) {
+        void (async () => {
+          try {
+            const n = await this.store.consolidateMonthlyLedgers();
+            this.settings.monthlyLedgerSchema = MONTHLY_LEDGER_SCHEMA;
+            await this.saveSettings();
+            if (n > 0) new Notice(`Momentum: consolidated ${n} ${n === 1 ? "entry" : "entries"} into monthly notes.`);
+          } catch { /* leave the guard unset so the consolidate command can retry */ }
         })();
       }
     });
@@ -463,6 +508,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
    *  event per existing file — never reaches it. */
   private registerTaskInboxListener(): void {
     this.registerEvent(this.app.vault.on("create", (file) => {
+      if (this.boardNoteMode()) return; // board-note mode has no per-task inbox to adopt.
       if (!(file instanceof TFile)) return;
       if (!file.path.endsWith(".md")) return;
       const tasksPrefix = this.store.full("Tasks") + "/";
@@ -483,6 +529,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
    * board folders as boards. Silent maintenance runs the same on an interval.
    */
   private async fixOrphanTasks(): Promise<void> {
+    if (this.boardNoteMode()) { new Notice("Board-note mode: tasks live inside their board note, nothing to file."); return; }
     const moved = await this.store.migrateTaskFolders();
     await this.syncMirrors();
     new Notice(moved > 0 ? `Filed ${moved} loose task${moved === 1 ? "" : "s"} into board folders.` : "No loose tasks found.");
@@ -490,11 +537,15 @@ export default class MomentumPlugin extends Plugin implements PAHost {
 
   /** Silent periodic upkeep: file any loose root notes into their board folder. */
   private async maintainTaskFolders(): Promise<void> {
-    await this.store.migrateTaskFolders();
-    // Realign any task still carrying the "Untitled" placeholder while its file has a real
-    // name (covers renames that arrived from another device via Obsidian Sync).
-    await this.store.repairTaskTitles();
-    await this.syncMirrors();
+    // In board-note mode there are no per-task files to file or retitle; only the
+    // board-deletion sweep still applies (a board note removed by any route is tombstoned).
+    if (!this.boardNoteMode()) {
+      await this.store.migrateTaskFolders();
+      // Realign any task still carrying the "Untitled" placeholder while its file has a real
+      // name (covers renames that arrived from another device via Obsidian Sync).
+      await this.store.repairTaskTitles();
+      await this.syncMirrors();
+    }
     // After folders are settled (hand-made boards registered, loose notes filed), check for
     // boards that vanished by any route and tombstone them (with the sanity shield).
     await this.detectDeletedBoards();
@@ -584,6 +635,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
    * Runs on startup and covers files that arrived via sync before Obsidian was open.
    */
   private async adoptOrphanTasks(): Promise<void> {
+    if (this.boardNoteMode()) return; // board notes aren't per-task files; nothing to adopt.
     const tasksPrefix = this.store.full("Tasks") + "/";
     const listsPrefix = this.store.full("Tasks/Lists") + "/";
     const orphanPrefix = this.store.full("Tasks/_orphaned") + "/";
@@ -610,6 +662,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
    * Preserves whatever body text was written by the external author.
    */
   private async adoptTaskFile(file: TFile): Promise<void> {
+    if (this.boardNoteMode()) return; // never rewrite a board note as a per-task note.
     try {
       // Repair malformed YAML first (e.g. an unquoted "[gbm] ..." title) so the cache can
       // parse it and processFrontMatter below can write to it.
@@ -619,6 +672,10 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       const cache = this.app.metadataCache.getFileCache(file);
       const fmType: unknown = cache?.frontmatter?.["type"];
       const fmId: unknown = cache?.frontmatter?.["task_id"];
+      // Never adopt a board note (board-note model) as a per-task note — doing so would inject
+      // task frontmatter and move it into a board folder, corrupting the board. This guard holds
+      // even if the device flag hasn't flipped yet (e.g. mid-migration).
+      if (fmType === "task-board") return;
       // Already a Momentum task — nothing to do.
       if (fmType === "task" && fmId) return;
       // The board comes from the parent folder (folder = source of truth). A note dropped
@@ -1556,7 +1613,49 @@ export default class MomentumPlugin extends Plugin implements PAHost {
    * "modify" events our own writes produce are ignored by the listener (no re-entrancy,
    * no runaway loop). The guard is cleared shortly after to cover async modify echoes.
    */
+  /** True when the board-note task model is active (device flag). Mirrors store.boardNoteTasks. */
+  private boardNoteMode(): boolean { return !!this.settings.boardNoteTasks; }
+
+  /**
+   * Flip the board-note task model (device flag) and run the matching one-time migration:
+   * enabling consolidates each board's per-task notes into a single board note; disabling restores
+   * individual notes. Both are reversible (sources go to Obsidian trash). The store flag is only
+   * flipped AFTER a successful migration, so a failure leaves tasks exactly as they were.
+   */
+  async setBoardNoteTasks(enabled: boolean): Promise<void> {
+    if (enabled === !!this.settings.boardNoteTasks) return;
+    const prev = !!this.settings.boardNoteTasks;
+    try {
+      if (enabled) {
+        // Flip the flag FIRST so every task listener/upkeep (adopt, inbox, mirrors, folder
+        // maintenance) is already in board-note mode while the migration writes the board notes —
+        // otherwise those listeners "adopt" the fresh board notes and move them into folders.
+        this.store.boardNoteTasks = true;
+        this.settings.boardNoteTasks = true;
+        const n = await this.store.migrateToBoardNotes();
+        this.settings.boardNoteTasksSchema = BOARD_NOTE_TASKS_SCHEMA;
+        await this.saveSettings();
+        new Notice(`Momentum: board-note tasks on — consolidated ${n} task${n === 1 ? "" : "s"} into board notes.`);
+      } else {
+        // Keep the flag ON during rollback so the inbox listener doesn't re-adopt each per-task
+        // note we write; flip OFF only once every note is back in its folder.
+        const n = await this.store.migrateToPerTaskNotes();
+        this.store.boardNoteTasks = false;
+        this.settings.boardNoteTasks = false;
+        await this.saveSettings();
+        new Notice(`Momentum: board-note tasks off — restored ${n} task${n === 1 ? "" : "s"} to individual notes.`);
+      }
+      this.app.workspace.getLeavesOfType(VIEW_TYPE_PA).forEach((l) => { if (l.view instanceof PAView) l.view.rerender(); });
+    } catch (e) {
+      // Revert to the previous state so a failed switch never leaves the app in a mode with no notes.
+      this.settings.boardNoteTasks = prev;
+      this.store.boardNoteTasks = prev;
+      new Notice(`Momentum: board-note switch failed — ${String(e)}. Your tasks are unchanged; restore from a backup if needed.`);
+    }
+  }
+
   private async syncMirrors(): Promise<void> {
+    if (this.boardNoteMode()) return; // board notes are self-rendering; no Lists/ mirrors to sync.
     this.mirrorSyncing = true;
     try {
       await this.store.syncTaskLists();
@@ -1602,6 +1701,24 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       new Notice(`Readable notes migration: ${parts.join(", ")}.`);
     } catch (e) {
       new Notice(`Readable notes migration failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  /**
+   * Consolidate per-item Finance/Nutrition/Fitness notes into one note per month, persist the
+   * schema guard and report a summary. Invoked by the command and reused as the retry path when
+   * the guarded auto-run failed. Reversible: the old per-item notes go to Obsidian's trash.
+   */
+  private async runMonthlyConsolidation(): Promise<void> {
+    try {
+      const n = await this.store.consolidateMonthlyLedgers();
+      this.settings.monthlyLedgerSchema = MONTHLY_LEDGER_SCHEMA;
+      await this.saveSettings();
+      new Notice(n > 0
+        ? `Consolidated ${n} ${n === 1 ? "entry" : "entries"} into monthly notes (old notes moved to trash).`
+        : "Monthly notes already consolidated — nothing to do.");
+    } catch (e) {
+      new Notice(`Monthly consolidation failed: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
@@ -1873,6 +1990,28 @@ class PASettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         })
       );
+
+    new Setting(containerEl)
+      .setName("Board-note tasks (beta)")
+      .setDesc("Store each board's tasks inside a single board note instead of a folder of notes. Switching migrates your tasks and is reversible (old notes move to trash); back up your vault first.")
+      .addToggle((t) => {
+        const cur = !!this.plugin.settings.boardNoteTasks;
+        t.setValue(cur).onChange((v) => {
+          if (v === cur) return;
+          const msg = v
+            ? "Turn on board-note tasks? Each board's task notes are consolidated into one board note and the old notes move to trash (reversible). Back up your vault first."
+            : "Turn off board-note tasks? Individual task notes are restored and the board notes move to trash (reversible).";
+          let done = false;
+          const modal = new ConfirmModal(this.plugin.app, msg, async () => {
+            done = true;
+            await this.plugin.setBoardNoteTasks(v);
+            this.renderSettings();
+          });
+          // Cancel (or dismiss) → re-render so the toggle snaps back to the real, unchanged state.
+          modal.onClose = () => { modal.contentEl.empty(); if (!done) this.renderSettings(); };
+          modal.open();
+        });
+      });
 
     new Setting(containerEl).setName("Finances").setHeading();
 

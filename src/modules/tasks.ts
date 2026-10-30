@@ -42,8 +42,9 @@ export class TasksModule {
   private colLimits: Record<string, number> = {};
   /** Root of the last render, so search can scroll to and flash a card after re-rendering. */
   private rootEl: HTMLElement | null = null;
-  /** Path of a task to reveal (scroll + flash) on the next render, set by search. */
-  private revealPath: string | null = null;
+  /** task_id of a task to reveal (scroll + flash) on the next render, set by search. Uses the
+   *  task id (not path) so it's unique even in board-note mode where every card shares a path. */
+  private revealUid: string | null = null;
 
   constructor(ctx: PAContext) { this.ctx = ctx; }
 
@@ -135,7 +136,7 @@ export class TasksModule {
       const siblings = this.ctx.store.loadTasks()
         .filter((x) => (x.kanbanName || "My Tasks") === board && (colSet.has(x.status) ? x.status : cols[0]) === col);
       this.colLimits[board + "|" + col] = Math.max(siblings.length, PAGE_SIZE);
-      this.revealPath = t.path;
+      this.revealUid = t.id;
       this.ctx.refresh();
     }).open();
   }
@@ -159,12 +160,12 @@ export class TasksModule {
 
   /** Scroll the pending card into view and flash it, then clear the pending reveal. */
   private revealPendingCard(): void {
-    const path = this.revealPath;
+    const uid = this.revealUid;
     const root = this.rootEl;
-    this.revealPath = null;
-    if (!path || !root) return;
+    this.revealUid = null;
+    if (!uid || !root) return;
     window.setTimeout(() => {
-      const card = root.querySelector<HTMLElement>(`.pa-task[data-path="${CSS.escape(path)}"]`);
+      const card = root.querySelector<HTMLElement>(`.pa-task[data-uid="${CSS.escape(uid)}"]`);
       if (!card) return;
       card.scrollIntoView({ behavior: "smooth", block: "center" });
       card.addClass("pa-flash");
@@ -427,20 +428,20 @@ export class TasksModule {
       const persistDrop = async (e: DragEvent) => {
         e.preventDefault();
         list.removeClass("pa-drop");
-        const path = e.dataTransfer?.getData("text/plain");
-        if (!path) return;
-        const dragged = filtered.find((t) => t.path === path);
+        const uid = e.dataTransfer?.getData("text/plain");
+        if (!uid) return;
+        const dragged = filtered.find((t) => t.id === uid);
         if (!dragged) return;
-        const ordered = colTasks.filter((t) => t.path !== path);
+        const ordered = colTasks.filter((t) => t.id !== uid);
         const afterEl = this.getDragAfterElement(list, e.clientY);
-        const afterPath = afterEl?.dataset.path ?? null;
-        let idx = afterPath ? ordered.findIndex((t) => t.path === afterPath) : ordered.length;
+        const afterUid = afterEl?.dataset.uid ?? null;
+        let idx = afterUid ? ordered.findIndex((t) => t.id === afterUid) : ordered.length;
         if (idx < 0) idx = ordered.length;
         ordered.splice(idx, 0, dragged);
         for (let k = 0; k < ordered.length; k++) {
           const t = ordered[k];
           const changes: Partial<Task> = {};
-          if (t.path === path && eff(t) !== col) changes.status = col;
+          if (t.id === uid && eff(t) !== col) changes.status = col;
           if (t.order !== k) changes.order = k;
           if (Object.keys(changes).length) await this.ctx.store.updateTask(t, changes);
         }
@@ -489,9 +490,9 @@ export class TasksModule {
     const doneId = this.doneCol();
 
     const card = list.createDiv({ cls: "pa-card pa-task prio-" + (t.priority || "medium") + (isDoneCol ? " done" : "") });
-    card.dataset.path = t.path;
+    card.dataset.uid = t.id;  // drag/search identity: task_id (unique even in board-note mode)
     card.setAttr("draggable", "true");
-    card.addEventListener("dragstart", (e) => { e.dataTransfer?.setData("text/plain", t.path); card.addClass("pa-dragging"); });
+    card.addEventListener("dragstart", (e) => { e.dataTransfer?.setData("text/plain", t.id); card.addClass("pa-dragging"); });
     card.addEventListener("dragend", () => card.removeClass("pa-dragging"));
     card.onclick = () => this.ctx.app.workspace.openLinkText(t.path, "", true);
 
@@ -617,9 +618,9 @@ export class TasksModule {
       body.addEventListener("drop", (e) => {
         e.preventDefault();
         body.removeClass("pa-drop");
-        const path = e.dataTransfer?.getData("text/plain");
-        if (!path) return;
-        const t = open.find((x) => x.path === path);
+        const uid = e.dataTransfer?.getData("text/plain");
+        if (!uid) return;
+        const t = open.find((x) => x.id === uid);
         if (!t || this.quadrantOf(t) === q.id) return;
         void (async () => { await this.ctx.store.updateTask(t, { eisenhower: q.id }); this.ctx.refresh(); })();
       });
@@ -635,9 +636,9 @@ export class TasksModule {
     const doneId = this.doneCol();
 
     const card = body.createDiv({ cls: "pa-card pa-task pa-matrix-card prio-" + (t.priority || "medium") });
-    card.dataset.path = t.path;
+    card.dataset.uid = t.id;  // drag identity: task_id (unique even in board-note mode)
     card.setAttr("draggable", "true");
-    card.addEventListener("dragstart", (e) => { e.dataTransfer?.setData("text/plain", t.path); card.addClass("pa-dragging"); });
+    card.addEventListener("dragstart", (e) => { e.dataTransfer?.setData("text/plain", t.id); card.addClass("pa-dragging"); });
     card.addEventListener("dragend", () => card.removeClass("pa-dragging"));
     card.onclick = () => this.ctx.app.workspace.openLinkText(t.path, "", true);
 

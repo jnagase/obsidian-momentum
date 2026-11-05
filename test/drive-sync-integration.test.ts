@@ -632,6 +632,30 @@ describe("deletions made while a sync is running", () => {
 describe("incremental sync applies simple remote changes without a full walk", () => {
   const incremental = (fs: VaultFS, store: DriveBaselineStore) => run(fs, store, { incremental: true });
 
+  it("ignores the echo of a file WE trashed last cycle (no longer tracked)", async () => {
+    const id = D.seed("a.md", "a");
+    const v = makeVault({ "a.md": "a" });
+    const b = makeBaselines({ "a.md": baseFor(id, "a") });
+    b.store.setCursor("c0");
+    const gid = D.seed("old.md", "x");
+    D.files.get(gid)!.trashed = true;
+    D.changes.push({ fileId: gid, removed: false, file: metaOf(gid) });
+    const r = await incremental(v.fs, b.store);
+    expect(r.notes.some((n) => n.startsWith("Incremental: no remote changes"))).toBe(true);
+  });
+
+  it("still does a full walk when a FOLDER was trashed on Drive", async () => {
+    const sub = D.seedFolder("notes");
+    const id = D.seed("a.md", "a");
+    const v = makeVault({ "a.md": "a" });
+    const b = makeBaselines({ "a.md": baseFor(id, "a") });
+    b.store.setCursor("c0");
+    D.files.get(sub)!.trashed = true;
+    D.changes.push({ fileId: sub, removed: false, file: metaOf(sub) });
+    const r = await incremental(v.fs, b.store);
+    expect(r.notes.some((n) => n.startsWith("Incremental check found"))).toBe(true);
+  });
+
   it("ignores churn on our own lock file", async () => {
     const id = D.seed("a.md", "a");
     const v = makeVault({ "a.md": "a" });

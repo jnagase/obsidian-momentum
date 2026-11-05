@@ -512,6 +512,11 @@ export async function runDriveSync(args: {
           if (c.file?.name === DRIVE_LOCK_NAME) continue;
           const path = trackedPath.get(c.fileId);
           const gone = c.removed || !!c.file?.trashed;
+          // A FILE in the trash that we don't track has nothing local to delete — typically the
+          // echo of our own trash from the previous cycle (its baseline was already removed).
+          // Ignore it. A trashed FOLDER still counts: its children emit no events of their own,
+          // so only the full walk can notice they are gone.
+          if (!path && c.file?.trashed && !isFolder(c.file)) continue;
           if (gone && path) removedFileIds.add(c.fileId);
           const relevant = !!path || !!c.file?.parents?.some((p) => knownFolders.has(p));
           if (!relevant) continue;

@@ -61,8 +61,10 @@ const D = vi.hoisted(() => {
   const live = (): F[] => [...files.values()].filter((f) => !f.trashed);
   const byName = (name: string): F | undefined => live().find((f) => f.name === name);
   const flags = { failSetAppProps: false, bumpMetaMd5: false };
-  const reset2 = (): void => { reset(); flags.failSetAppProps = false; flags.bumpMetaMd5 = false; };
-  return { files, FOLDER, hash, hashBuf, nextId, reset: reset2, seed, seedFolder, seedBinary, live, byName, flags };
+  // Change records the next listChanges() call returns (then cleared), for incremental tests.
+  const changes: { fileId: string; removed: boolean; file?: Record<string, unknown> }[] = [];
+  const reset2 = (): void => { reset(); flags.failSetAppProps = false; flags.bumpMetaMd5 = false; changes.length = 0; };
+  return { files, FOLDER, hash, hashBuf, nextId, reset: reset2, seed, seedFolder, seedBinary, live, byName, flags, changes };
 });
 
 vi.mock("../src/googledrive", () => {
@@ -137,7 +139,7 @@ vi.mock("../src/googledrive", () => {
     findChildFolder: async (_t: string, name: string, parent: string) =>
       D.live().find((f) => f.mimeType === D.FOLDER && f.name === name && f.parents.includes(parent))?.id,
     getStartPageToken: async () => "cursor-1",
-    listChanges: async () => ({ changes: [], newStartPageToken: "cursor-1" }),
+    listChanges: async () => ({ changes: D.changes.splice(0), newStartPageToken: "cursor-1" }),
     isFolder: (f: F) => f.mimeType === D.FOLDER,
     isGoogleNative: (f: F) => typeof f.mimeType === "string" && f.mimeType.startsWith(PREFIX),
   };
@@ -564,5 +566,156 @@ describe("strategy typing sanity", () => {
   it("accepts every documented strategy value", () => {
     const all: DriveConflictStrategy[] = ["keep-both", "local-wins", "remote-wins", "newer-wins", "ask"];
     expect(all).toHaveLength(5);
+  });
+});
+
+// =====================================================================================
+// Mid-sync deletions + incremental change overlay (fix: deleted files coming back).
+// =====================================================================================
+
+const metaOf = (id: string): Record<string, unknown> => {
+  const f = D.files.get(id)!;
+  return { id: f.id, name: f.name, mimeType: f.mimeType, modifiedTime: f.modifiedTime, md5Checksum: f.md5Checksum, size: f.size, parents: f.parents, trashed: f.trashed, appProperties: f.appProperties };
+};
+const baseFor = (id: string, content: string): DriveBaseline => {
+  const f = D.files.get(id)!;
+  return { fileId: id, md5: f.md5Checksum, modifiedTime: f.modifiedTime, base: content };
+};
+
+describe("deletions made while a sync is running", () => {
+  it("does NOT re-pull a file the user deletes after the plan was made", async () => {
+    const id = D.seed("gone.md", "x");
+    const v = makeVault(); // already absent locally; no evidence when the plan is made
+    const b = makeBaselines({ "gone.md": baseFor(id, "x") });
+    const r = await run(v.fs, b.store, {
+      onProgress: (p) => { if (p.phase === "planning" && p.path === "gone.md") b.ld.set("gone.md", Date.now()); },
+    });
+    expect(v.map.has("gone.md")).toBe(false);
+    expect(D.files.get(id)?.trashed).toBe(true);
+    expect(r.deletedRemote).toBe(1);
+    expect(b.ld.has("gone.md")).toBe(false); // evidence consumed
+  });
+
+  it("still pulls when the remote CHANGED since the baseline (an edit beats a delete)", async () => {
+    const id = D.seed("edited.md", "new remote");
+    const v = makeVault();
+    const b = makeBaselines({ "edited.md": { fileId: id, md5: "old-md5", modifiedTime: "", base: "old" } });
+    await run(v.fs, b.store, {
+      onProgress: (p) => { if (p.phase === "planning" && p.path === "edited.md") b.ld.set("edited.md", Date.now()); },
+    });
+    expect(v.map.get("edited.md")).toBe("new remote");
+    expect(D.files.get(id)?.trashed).toBeFalsy();
+  });
+
+  it("keeps delete evidence recorded during the run; clears stale evidence for files that exist", async () => {
+    const id = D.seed("keep.md", "k");
+    const v = makeVault({ "keep.md": "k", "old.md": "o" });
+    const b = makeBaselines({ "keep.md": baseFor(id, "k") }, { "old.md": 1 });
+    await run(v.fs, b.store, {
+      onProgress: (p) => { if (p.phase === "applying") b.ld.set("keep.md", Date.now()); },
+    });
+    expect(b.ld.has("keep.md")).toBe(true);  // recorded mid-run → survives for the next cycle
+    expect(b.ld.has("old.md")).toBe(false);  // older than the run and the file exists → undo
+  });
+
+  it("never pushes an EMPTY file when the local file vanished mid-sync", async () => {
+    const v = makeVault({ "tmp.md": "draft" });
+    const b = makeBaselines();
+    const r = await run(v.fs, b.store, {
+      onProgress: (p) => { if (p.phase === "planning" && p.path === "tmp.md") v.map.delete("tmp.md"); },
+    });
+    expect(D.byName("tmp.md")).toBeUndefined();
+    expect(r.pushed).toBe(0);
+  });
+});
+
+describe("incremental sync applies simple remote changes without a full walk", () => {
+  const incremental = (fs: VaultFS, store: DriveBaselineStore) => run(fs, store, { incremental: true });
+
+  it("ignores churn on our own lock file", async () => {
+    const id = D.seed("a.md", "a");
+    const v = makeVault({ "a.md": "a" });
+    const b = makeBaselines({ "a.md": baseFor(id, "a") });
+    b.store.setCursor("c0");
+    D.changes.push({ fileId: "lock1", removed: false, file: { id: "lock1", name: ".momentum-drive-sync.lock", mimeType: "text/plain", parents: ["root"] } });
+    const r = await incremental(v.fs, b.store);
+    expect(r.notes.some((n) => n.startsWith("Incremental: no remote changes"))).toBe(true);
+  });
+
+  it("pulls a content edit on a tracked root file in place", async () => {
+    const id = D.seed("a.md", "v1");
+    const v = makeVault({ "a.md": "v1" });
+    const b = makeBaselines({ "a.md": baseFor(id, "v1") });
+    b.store.setCursor("c0");
+    const f = D.files.get(id)!;
+    f.content = "v2"; f.md5Checksum = D.hash("v2");
+    D.changes.push({ fileId: id, removed: false, file: metaOf(id) });
+    const r = await incremental(v.fs, b.store);
+    expect(r.notes.some((n) => n.startsWith("Incremental: applied 1"))).toBe(true);
+    expect(v.map.get("a.md")).toBe("v2");
+  });
+
+  it("treats our own push echo as a no-op", async () => {
+    const id = D.seed("a.md", "same");
+    const v = makeVault({ "a.md": "same" });
+    const b = makeBaselines({ "a.md": baseFor(id, "same") });
+    b.store.setCursor("c0");
+    D.changes.push({ fileId: id, removed: false, file: metaOf(id) });
+    const r = await incremental(v.fs, b.store);
+    expect(r.notes.some((n) => n.startsWith("Incremental: applied 1"))).toBe(true);
+    expect(r.pulled + r.pushed).toBe(0);
+  });
+
+  it("applies an edit in a subfolder when the folder map knows its parent", async () => {
+    const sub = D.seedFolder("notes");
+    const id = D.seed("n.md", "v1", { parent: sub });
+    const v = makeVault({ "notes/n.md": "v1" });
+    const b = makeBaselines({ "notes/n.md": baseFor(id, "v1") });
+    b.store.setCursor("c0");
+    let folderMap: Record<string, string> = { "": "root", notes: sub };
+    b.store.getFolderMap = () => folderMap;
+    b.store.setFolderMap = (m) => { folderMap = m; };
+    const f = D.files.get(id)!;
+    f.content = "v2"; f.md5Checksum = D.hash("v2");
+    D.changes.push({ fileId: id, removed: false, file: metaOf(id) });
+    const r = await incremental(v.fs, b.store);
+    expect(r.notes.some((n) => n.startsWith("Incremental: applied 1"))).toBe(true);
+    expect(v.map.get("notes/n.md")).toBe("v2");
+  });
+
+  it("falls back to a full walk when a tracked file MOVED to another folder", async () => {
+    const other = D.seedFolder("other");
+    const id = D.seed("a.md", "a");
+    const v = makeVault({ "a.md": "a" });
+    const b = makeBaselines({ "a.md": baseFor(id, "a") });
+    b.store.setCursor("c0");
+    D.files.get(id)!.parents = [other];
+    D.changes.push({ fileId: id, removed: false, file: metaOf(id) });
+    const r = await incremental(v.fs, b.store);
+    expect(r.notes.some((n) => n.startsWith("Incremental check found"))).toBe(true);
+  });
+
+  it("falls back to a full walk for a brand-new file on Drive", async () => {
+    const id = D.seed("a.md", "a");
+    const v = makeVault({ "a.md": "a" });
+    const b = makeBaselines({ "a.md": baseFor(id, "a") });
+    b.store.setCursor("c0");
+    const nid = D.seed("new.md", "fresh");
+    D.changes.push({ fileId: nid, removed: false, file: metaOf(nid) });
+    const r = await incremental(v.fs, b.store);
+    expect(r.notes.some((n) => n.startsWith("Incremental check found"))).toBe(true);
+    expect(v.map.get("new.md")).toBe("fresh");
+  });
+
+  it("deletes locally when a tracked file was removed on Drive", async () => {
+    const id = D.seed("a.md", "a");
+    const v = makeVault({ "a.md": "a" });
+    const b = makeBaselines({ "a.md": baseFor(id, "a") });
+    b.store.setCursor("c0");
+    D.files.get(id)!.trashed = true;
+    D.changes.push({ fileId: id, removed: true });
+    const r = await incremental(v.fs, b.store);
+    expect(r.deletedLocal).toBe(1);
+    expect(v.map.has("a.md")).toBe(false);
   });
 });

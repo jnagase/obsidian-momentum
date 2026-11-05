@@ -62,6 +62,7 @@ interface PASettings {
   proLicenseSeeded?: boolean; // true once the key has been mirrored into the vault (Config/pro.md)
   driveCursor?: string;            // Changes API page token (last clean cycle)
   driveFolderIds?: string[];       // Drive folder ids of our tree (for scoping the account-wide change feed)
+  driveFolderMap?: Record<string, string>; // relDir → Drive folder id from the last full walk (incremental edit check)
 }
 const DEFAULT_SETTINGS: PASettings = {
   dataRoot: "Momentum Life",
@@ -885,6 +886,8 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       setCursor: (t) => { this.settings.driveCursor = t; },
       getFolderIds: () => this.settings.driveFolderIds ?? [],
       setFolderIds: (ids) => { this.settings.driveFolderIds = ids; },
+      getFolderMap: () => this.settings.driveFolderMap ?? {},
+      setFolderMap: (m) => { this.settings.driveFolderMap = m; },
       save: async () => { await this.saveSettings(); },
       getLocalDeletes: () => (this.settings.driveLocalDeletes ??= {}),
       clearLocalDelete: (n) => { delete (this.settings.driveLocalDeletes ??= {})[n]; },
@@ -963,6 +966,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       for (const seg of parts) {
         cur = cur ? `${cur}/${seg}` : seg;
         if (!(this.app.vault.getAbstractFileByPath(cur) instanceof TFolder)) {
+          this.markDriveOwn(this.driveOwnWrites, cur);
           await this.app.vault.createFolder(cur).catch(() => {});
         }
       }
@@ -995,6 +999,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
         if (isCfg(rel)) { await ensureAdapterDir(rel); await adapter.write(rel, content); return; }
         const full = toFull(rel);
         await ensureFolders(full);
+        this.markDriveOwn(this.driveOwnWrites, full);
         const f = this.app.vault.getAbstractFileByPath(full);
         if (f instanceof TFile) await this.app.vault.modify(f, content);
         else await this.app.vault.create(full, content);
@@ -1004,13 +1009,17 @@ export default class MomentumPlugin extends Plugin implements PAHost {
         if (isCfg(rel)) { if (await adapter.exists(rel)) await adapter.remove(rel).catch(() => {}); return; }
         const full = toFull(rel);
         const f = this.app.vault.getAbstractFileByPath(full);
-        if (f instanceof TFile) await this.app.fileManager.trashFile(f); // reversible, respects user preference
+        if (f instanceof TFile) {
+          this.markDriveOwn(this.driveOwnDeletes, full);
+          await this.app.fileManager.trashFile(f); // reversible, respects user preference
+        }
         // Prune parent folders left empty by the deletion — up to (but not including) the mirror
         // root — so deleting all of a folder's files on Drive doesn't leave an empty shell locally.
         let dir = full.lastIndexOf("/") >= 0 ? full.slice(0, full.lastIndexOf("/")) : "";
         while (dir && dir !== base) {
           const folder = this.app.vault.getAbstractFileByPath(dir);
           if (folder instanceof TFolder && folder.children.length === 0) {
+            this.markDriveOwn(this.driveOwnDeletes, dir);
             await this.app.fileManager.trashFile(folder);
             dir = dir.lastIndexOf("/") >= 0 ? dir.slice(0, dir.lastIndexOf("/")) : "";
           } else break;
@@ -1030,6 +1039,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
         if (isCfg(rel)) { await ensureAdapterDir(rel); await adapter.writeBinary(rel, data); return; }
         const full = toFull(rel);
         await ensureFolders(full);
+        this.markDriveOwn(this.driveOwnWrites, full);
         const f = this.app.vault.getAbstractFileByPath(full);
         if (f instanceof TFile) await this.app.vault.modifyBinary(f, data);
         else await this.app.vault.createBinary(full, data);
@@ -1081,12 +1091,21 @@ export default class MomentumPlugin extends Plugin implements PAHost {
     const useIncremental = incremental ?? true; // auto runs are always incremental (core); the Full-sync button passes false
     this.updateDriveStatus("Drive: syncing…");
     this.emitDriveProgress({ phase: "scanning", done: 0, total: 0, incremental: useIncremental }); // flip cards to "syncing" with the right mode
+    // An automatic sync (startup / on change / interval) used to be visible only in the status
+    // bar, so a long one ran unnoticed. If it takes more than a few seconds, surface its progress
+    // in a persistent notice (closed when it ends). Runs with their own progress UI skip this.
+    let lastLabel = "Drive: syncing…";
+    let bgNotice: Notice | null = null;
+    const bgText = (label: string): string => `${label}\nBackground sync. You can keep working.`;
+    const bgTimer = onProgress ? null : window.setTimeout(() => { bgNotice = new Notice(bgText(lastLabel), 0); }, 10_000);
     const progress = (p: DriveProgress): void => {
       const label =
         p.phase === "scanning" ? (p.incremental ? "Drive: checking changes…" : "Drive: scanning…")
         : p.phase === "planning" ? (p.total ? `Drive: comparing ${p.done}/${p.total}` : "Drive: comparing…")
         : (p.total ? `Drive: syncing ${p.done}/${p.total}` : "Drive: syncing…");
       this.updateDriveStatus(label);
+      lastLabel = label;
+      bgNotice?.setMessage(bgText(label));
       onProgress?.(p);
       this.emitDriveProgress(p);
     };
@@ -1171,13 +1190,19 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       this.updateDriveStatus("Drive: error");
       new Notice(`Drive sync failed: ${msg}`);
     } finally {
+      if (bgTimer !== null) window.clearTimeout(bgTimer);
+      (bgNotice as Notice | null)?.hide();
       if (locked) await releaseDriveLock(token, rootId, deviceId).catch(() => {});
       this.driveSyncActive = false;      // logically done NOW (UI can finalize immediately)
       this.driveStopRequested = false;
       this.emitDriveProgress(null);      // signal "done" so listening cards finalize/re-render
       // Keep the watcher guard up briefly after the run so the sync's own trailing write events
-      // don't immediately re-trigger the event-driven watcher.
-      window.setTimeout(() => { this.driveSyncing = false; }, 1500);
+      // don't immediately re-trigger the event-driven watcher. Then, if the user changed something
+      // while we were running, sync once more so that change (e.g. a mid-sync delete) lands now.
+      window.setTimeout(() => {
+        this.driveSyncing = false;
+        if (this.driveRerunPending) { this.driveRerunPending = false; this.queueDriveSync(); }
+      }, 1500);
     }
   }
 
@@ -1239,6 +1264,18 @@ export default class MomentumPlugin extends Plugin implements PAHost {
   /** Set by a Stop request; the engine checks it between files and stops gracefully. */
   private driveStopRequested = false;
   private driveChangeTimer: number | null = null;
+  /** Vault paths the sync ITSELF just wrote / trashed. The change watcher ignores events on these
+   *  (they are our own writes), while every other event during a run is treated as the user's —
+   *  so a file the user deletes mid-sync is recorded instead of silently re-pulled. */
+  private driveOwnWrites = new Set<string>();
+  private driveOwnDeletes = new Set<string>();
+  /** The user changed something while a sync was running → run one more sync right after it. */
+  private driveRerunPending = false;
+  /** Mark `path` as the sync's own write/delete for a few seconds (vault events arrive async). */
+  private markDriveOwn(set: Set<string>, path: string): void {
+    set.add(path);
+    window.setTimeout(() => set.delete(path), 5000);
+  }
 
   /** Instant Drive status for the File Manager panel: last-sync summary + compliance counts
    *  (baselines that are still in-scope local files vs total in-scope files). No network. */
@@ -1287,27 +1324,21 @@ export default class MomentumPlugin extends Plugin implements PAHost {
   private registerDriveChangeWatcher(): void {
     const schedule = (path: string): void => {
       if (!this.settings.googleDriveEnabled || !this.settings.driveToken) return;
-      if (this.driveSyncing) return; // our own writes during a sync must not re-trigger it
       if (!this.pathInDriveScope(path)) return;
-      if (this.driveChangeTimer !== null) window.clearTimeout(this.driveChangeTimer);
-      this.driveChangeTimer = window.setTimeout(() => {
-        this.driveChangeTimer = null;
-        // Event-driven runs are ALWAYS incremental: react to a LOCAL change by checking the Drive
-        // change feed and, when nothing changed remotely, pushing just the delta off the baselines
-        // (no full tree walk). If the feed reports any remote change (e.g. a folder trashed on
-        // Drive) it still escalates to a full walk, so correctness is preserved — just fast in the
-        // common case. This is independent of the "Incremental sync" toggle (which governs manual/
-        // interval runs); an event reaction should never pay for a full scan of the whole Drive.
-        void this.syncGoogleDrive(false, undefined, true);
-      }, 3000); // debounce: wait for a short lull in edits, then push promptly
+      if (this.driveOwnWrites.has(path) || this.driveOwnDeletes.has(path)) return; // our own write
+      // A change by the USER while a sync is running: don't start a second sync now, but make
+      // sure one runs right after (previously the change was simply dropped until the next edit).
+      if (this.driveSyncing) { this.driveRerunPending = true; return; }
+      this.queueDriveSync();
     };
     this.registerEvent(this.app.vault.on("modify", (f) => schedule(f.path)));
     this.registerEvent(this.app.vault.on("create", (f) => schedule(f.path)));
     this.registerEvent(this.app.vault.on("delete", (f) => {
       // Record a REAL user deletion as evidence so the sync can honour it (delete_remote) instead
-      // of re-pulling the file. Skip the sync's OWN trash writes (driveSyncing guards those),
-      // otherwise a pulled/trashed file would look like the user deleting it.
-      if (!this.driveSyncing && this.settings.googleDriveEnabled) {
+      // of re-pulling the file. Only the sync's OWN trash writes are skipped (driveOwnDeletes) —
+      // a delete the user makes WHILE a sync runs is recorded too (it used to be dropped, and the
+      // running sync then pulled the file straight back).
+      if (this.settings.googleDriveEnabled && !this.driveOwnDeletes.has(f.path)) {
         const rel = this.driveRelKey(f.path);
         if (rel) { (this.settings.driveLocalDeletes ??= {})[rel] = Date.now(); void this.saveSettings(); }
       }
@@ -1317,12 +1348,26 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       // A rename fires no `delete` event, but the OLD path genuinely ceased to exist (it became
       // the new path). Record it as an explicit local deletion so the sync moves the file on Drive
       // instead of re-pulling the old name back (which would duplicate). Skip the sync's own writes.
-      if (!this.driveSyncing && this.settings.googleDriveEnabled) {
+      if (this.settings.googleDriveEnabled && !this.driveOwnDeletes.has(oldPath)) {
         const relOld = this.driveRelKey(oldPath);
         if (relOld) { (this.settings.driveLocalDeletes ??= {})[relOld] = Date.now(); void this.saveSettings(); }
       }
       schedule(f.path);
     }));
+  }
+
+  /** Debounced event-driven Drive sync: wait for a short lull in edits, then sync. */
+  private queueDriveSync(): void {
+    if (this.driveChangeTimer !== null) window.clearTimeout(this.driveChangeTimer);
+    this.driveChangeTimer = window.setTimeout(() => {
+      this.driveChangeTimer = null;
+      // Event-driven runs are ALWAYS incremental: react to a LOCAL change by checking the Drive
+      // change feed and pushing just the delta off the baselines (no full tree walk). Structural
+      // remote changes (folder trashed, file moved/added on Drive) still escalate to a full walk,
+      // so correctness is preserved. This is independent of the "Incremental sync" toggle (which
+      // governs manual/interval runs); an event reaction should never pay for a full scan.
+      void this.syncGoogleDrive(false, undefined, true);
+    }, 3000);
   }
 
   private driveSyncTimer: number | null = null;

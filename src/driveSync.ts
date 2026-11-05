@@ -188,6 +188,14 @@ export interface DriveBaselineStore {
   getFolderIds?: () => string[];
   setFolderIds?: (ids: string[]) => void;
   /**
+   * relDir → Drive folder id of our synced tree ("" = root), captured on the last COMPLETE walk.
+   * Lets the incremental path verify that a changed file is still in the folder its baseline
+   * path implies (i.e. it was edited, not moved), so a content edit on another device is applied
+   * without a full walk. Optional: without it only root-level edits can skip the walk.
+   */
+  getFolderMap?: () => Record<string, string>;
+  setFolderMap?: (map: Record<string, string>) => void;
+  /**
    * Paths the user explicitly deleted locally since the last sync (path → timestamp ms). This is
    * the evidence that turns a local absence into a real `delete_remote` (Req 1.2). Optional so the
    * in-memory test store can omit it (deletions then only propagate from explicit remote events).
@@ -432,6 +440,10 @@ export async function runDriveSync(args: {
   const strategy = args.conflictStrategy ?? DEFAULT_CONFLICT_STRATEGY;
   const result = emptyResult();
   const rootId = driveFolderId || "root";
+  // When this cycle started. Local-delete evidence recorded at/after this moment arrived DURING
+  // the run (the user deleted while we were syncing): it is re-checked before a pull recreates the
+  // file, and it survives the commit cleanup so the next cycle can still act on it.
+  const syncStartMs = Date.now();
 
   // ---- OBSERVATION (recursive: walk the Drive tree, keyed by relative path) --------------
   let remoteByPath: Map<string, DriveFile> = new Map();
@@ -456,6 +468,12 @@ export async function runDriveSync(args: {
   let chainedCursor: string | undefined;
   let cursorWasValid = false;
   let changeCount = 0;
+  // Relevant changes the incremental path can apply WITHOUT a full walk: a content edit (or our
+  // own push echoing back) on a file we already track, still at the same name and in the same
+  // folder its baseline path implies. Anything else — a folder change, a new/untracked file, a
+  // rename or move — clears `overlayable` and forces the authoritative full walk.
+  const overlay = new Map<string, DriveFile>();
+  let overlayable = true;
   {
     const cursor = baselines.getCursor();
     if (cursor) {
@@ -472,13 +490,35 @@ export async function runDriveSync(args: {
         // parent is a KNOWN folder (a new subfolder's own creation event has a known parent), so a
         // brand-new deep file can't slip past. Removals carry no file object → counted only when
         // they hit a tracked id.
-        const trackedIds = new Set<string>();
-        for (const n of baselines.names()) { const id = baselines.get(n)?.fileId; if (id) trackedIds.add(id); }
+        const trackedPath = new Map<string, string>();
+        for (const n of baselines.names()) { const id = baselines.get(n)?.fileId; if (id) trackedPath.set(id, n); }
         const knownFolders = new Set<string>([rootId, ...(baselines.getFolderIds?.() ?? [])]);
+        const folderMap = baselines.getFolderMap?.() ?? {};
+        // Is this changed file still exactly where its baseline says (same name, same folder,
+        // same identity tag)? Then the change is a pure content edit we can apply in place.
+        const fitsBaseline = (path: string, f: DriveFile): boolean => {
+          if (isFolder(f) || isGoogleNative(f)) return false;
+          if (f.name !== baseOf(path)) return false;
+          const mp = f.appProperties?.[MOMENTUM_PATH_KEY];
+          if (mp && mp !== path) return false;
+          const dir = dirOf(path);
+          const parentId = dir === "" ? rootId : folderMap[dir];
+          return !!parentId && !!f.parents?.includes(parentId);
+        };
         for (const c of changes) {
-          if ((c.removed || c.file?.trashed) && trackedIds.has(c.fileId)) removedFileIds.add(c.fileId);
-          const relevant = trackedIds.has(c.fileId) || !!c.file?.parents?.some((p) => knownFolders.has(p));
-          if (relevant) changeCount++;
+          // Our own multi-device lock file is written at the start of EVERY sync and trashed at the
+          // end. It is never synced, so its churn must not count as a remote change — counting it
+          // made every single incremental check escalate to a full walk.
+          if (c.file?.name === DRIVE_LOCK_NAME) continue;
+          const path = trackedPath.get(c.fileId);
+          const gone = c.removed || !!c.file?.trashed;
+          if (gone && path) removedFileIds.add(c.fileId);
+          const relevant = !!path || !!c.file?.parents?.some((p) => knownFolders.has(p));
+          if (!relevant) continue;
+          changeCount++;
+          if (gone && path) continue; // explicit removal of a tracked file: applied below
+          if (path && c.file && fitsBaseline(path, c.file)) overlay.set(path, c.file);
+          else overlayable = false;
         }
       } catch (e) {
         if (e instanceof InvalidDriveCursorError) {
@@ -492,21 +532,28 @@ export async function runDriveSync(args: {
     }
   }
 
-  // INCREMENTAL fast-path (Req 8): if the caller asked for it, the cursor is valid and there were
-  // ZERO remote changes since it, reconstruct the remote view from the baselines and skip the full
-  // walk. Any change, an invalid cursor, or no cursor yet → the authoritative full walk (and we
-  // tell the UI why, so an "Incremental" click that shows "full" isn't confusing).
+  // INCREMENTAL fast-path (Req 8): if the caller asked for it and the cursor is valid, reconstruct
+  // the remote view from the baselines and skip the full walk when EITHER nothing changed remotely
+  // OR every relevant change is one we can apply in place (a content edit / our own push echo on a
+  // tracked file that did not move, or an explicit removal of a tracked file). Any structural
+  // change (folder, new file, rename, move), an invalid cursor, or no cursor yet → the
+  // authoritative full walk (and we tell the UI why). The reconstructed view is never
+  // authoritative, so absence from it still never counts as a deletion.
   if (args.incremental) {
-    if (cursorWasValid && changeCount === 0 && baselines.names().length > 0) {
+    if (cursorWasValid && (changeCount === 0 || overlayable) && baselines.names().length > 0) {
       remoteByPath = new Map();
       for (const name of baselines.names()) {
         const b = baselines.get(name);
         if (!b) continue;
+        if (b.fileId && removedFileIds.has(b.fileId)) continue; // explicitly removed on Drive
         remoteByPath.set(name, { id: b.fileId, name: baseOf(name), mimeType: "text/plain", md5Checksum: b.md5, modifiedTime: b.modifiedTime });
       }
+      for (const [name, f] of overlay) remoteByPath.set(name, f); // fresh md5 → pull when it really changed
       folderCache = new Map<string, string>([["", rootId]]);
       usedIncremental = true;
-      result.notes.push("Incremental: no remote changes since last sync (skipped full scan).");
+      result.notes.push(changeCount === 0
+        ? "Incremental: no remote changes since last sync (skipped full scan)."
+        : `Incremental: applied ${changeCount} remote change(s) in place (skipped full scan).`);
       args.onProgress?.({ phase: "scanning", done: 0, total: 0, incremental: true });
     } else if (cursorWasValid && changeCount > 0) {
       result.notes.push(`Incremental check found ${changeCount} remote change(s) → full scan.`);
@@ -530,7 +577,10 @@ export async function runDriveSync(args: {
     remoteAuthoritative = !tree.truncated; // a complete walk → absence means a real remote deletion
     // Record our folder ids so the next incremental run can tell an in-folder change from unrelated
     // account-wide Drive activity (see the Changes block above). Only on a complete walk.
-    if (remoteAuthoritative) baselines.setFolderIds?.([...tree.folders.values()]);
+    if (remoteAuthoritative) {
+      baselines.setFolderIds?.([...tree.folders.values()]);
+      baselines.setFolderMap?.(Object.fromEntries(tree.folders));
+    }
   }
 
   // ---- SCOPE SYMMETRY (remote walk must honour the SAME scope as the local listing) ------
@@ -911,6 +961,18 @@ export async function runDriveSync(args: {
   let done = 0;
   for (const p of plans) {
     if (args.shouldStop?.()) { stopped = true; break; }
+    // MID-SYNC DELETION: this pull would RECREATE a file that is absent locally. If the user
+    // deleted it after we planned (evidence recorded during the run), honour the deletion instead
+    // of bringing it back — unless the remote changed since the baseline (an edit beats a delete,
+    // same rule as decideAction).
+    if (p.action === "pull" && p.create && baselines.getLocalDeletes?.()[p.path] !== undefined) {
+      const b = baselines.get(p.path);
+      if (b && p.remote && p.remote.md5Checksum === b.md5) {
+        p.action = "delete_remote";
+        p.create = false;
+        result.notes.push(`Deleted locally during the sync, not re-pulled: ${p.path}.`);
+      }
+    }
     let okThis = true;
     try {
       if (p.binary) {
@@ -975,8 +1037,11 @@ export async function runDriveSync(args: {
     }
     // Local-delete evidence is single-use: drop entries whose file exists again (the user undid
     // the delete). Entries that produced a delete_remote are cleared by the delete helper itself.
+    // Evidence recorded DURING this run is kept: the file may exist only because this run pulled
+    // it before the user's delete landed, and the next cycle must still see the deletion.
     if (baselines.getLocalDeletes && baselines.clearLocalDelete) {
-      for (const p of Object.keys(baselines.getLocalDeletes())) {
+      for (const [p, ts] of Object.entries(baselines.getLocalDeletes())) {
+        if (ts >= syncStartMs) continue;
         if (await fs.exists(p)) baselines.clearLocalDelete(p);
       }
       await baselines.save();
@@ -1155,6 +1220,12 @@ async function this_push(
   token: string, path: string, rootId: string, folderCache: Map<string, string>,
   fs: VaultFS, baselines: DriveBaselineStore, result: DriveSyncResult, deviceId?: string,
 ): Promise<void> {
+  // Deleted locally after we listed it (mid-sync): VaultFS.read would return "" and we'd push an
+  // EMPTY file over the real one on Drive. Skip; the next cycle sees the deletion evidence.
+  if (!(await fs.exists(path))) {
+    result.notes.push(`Push of "${path}" skipped: deleted locally during the sync (handled next run).`);
+    return;
+  }
   const content = await fs.read(path);
   const existing = baselines.get(path);
   const props = momentumProps(path, deviceId);
@@ -1319,6 +1390,10 @@ async function this_pushBinary(
   token: string, path: string, rootId: string, folderCache: Map<string, string>,
   fs: VaultFS, baselines: DriveBaselineStore, result: DriveSyncResult, deviceId?: string,
 ): Promise<void> {
+  if (!(await fs.exists(path))) { // deleted locally mid-sync (see this_push)
+    result.notes.push(`Binary push of "${path}" skipped: deleted locally during the sync (handled next run).`);
+    return;
+  }
   const buf = await fs.readBinary!(path);
   const existing = baselines.get(path);
   const props = momentumProps(path, deviceId);

@@ -6,6 +6,25 @@ export interface ChangeEntry { version: string; sections: ChangeSection[]; }
 /** Release notes shown in the "What's new" dialog, newest first. */
 export const CHANGELOG: ChangeEntry[] = [
   {
+    version: "0.9.1",
+    sections: [
+      {
+        title: "Fixed — Google Drive: deleted files no longer come back",
+        items: [
+          "A file you deleted while a Drive sync was running (for example the automatic one that starts when you open Obsidian) was missed, and the sync downloaded it again. Deletions are now always recorded and also removed from Drive.",
+          "If a file disappears mid-sync, an empty copy is never sent to Drive.",
+        ],
+      },
+      {
+        title: "Improved — Faster Drive sync",
+        items: [
+          "Automatic syncs no longer read your whole Drive after every change: simple edits are applied file by file. A full scan only runs when a folder or file was added, moved or removed on Drive.",
+          "Changes you make while a sync is running are synced right after it ends, and a long automatic sync now shows its progress on screen.",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.9.0",
     sections: [
       {

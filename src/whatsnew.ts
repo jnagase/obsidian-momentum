@@ -6,6 +6,35 @@ export interface ChangeEntry { version: string; sections: ChangeSection[]; }
 /** Release notes shown in the "What's new" dialog, newest first. */
 export const CHANGELOG: ChangeEntry[] = [
   {
+    version: "0.9.2",
+    sections: [
+      {
+        title: "Improved — One note per board for tasks",
+        items: [
+          "Each board now keeps its tasks inside a single board note. This happens automatically on first launch: your task notes are consolidated, and only the notes that made it into a board note move to the trash (recoverable). Google tasks sync waits until it's done. You can switch back under Settings → Tasks.",
+        ],
+      },
+      {
+        title: "Improved — Clearer settings",
+        items: [
+          "Settings are grouped in one card per area: General, Tasks, Finances, Google tasks, Google Drive and Momentum pro.",
+          "Google tasks is out of beta. Google Drive stays in beta.",
+          "Google Drive always syncs your whole vault; you only choose the Drive folder it goes into. Existing single-folder setups keep working as before.",
+          "The pro options (every file type, appearance & plugins) now live in the Momentum pro card.",
+          "The unused \"Task notifications\" option was removed.",
+        ],
+      },
+      {
+        title: "Fixed — Google Drive (beta)",
+        items: [
+          "Your community plugins are never deleted by a sync anymore. If a plugin's files disappear from Drive, the copy on this device is kept and uploaded again, and the list of enabled plugins is merged instead of replaced.",
+          "Sync state now lives in its own file, so your settings stay small and safe. If the settings file is ever lost, the chosen Drive folder is restored automatically.",
+          "A first sync never starts without a chosen Drive folder, so your vault can't land in the root of My Drive by accident. Changing the folder starts a fresh merge that never deletes anything.",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.9.1",
     sections: [
       {

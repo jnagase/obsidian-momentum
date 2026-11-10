@@ -41,8 +41,14 @@ nossas conversas. Vale para toda interação neste repositório.
   (a CI builda). Releases saem via `.github/workflows/release.yml`, disparado por **push de
   tag** (qualquer tag) → builda e cria o GitHub Release com `main.js`/`manifest.json`/`styles.css`.
 - Passos: bump de versão em **`manifest.json` + `package.json` + `versions.json`** (mesma
-  SemVer; tag SEM `v`, ex.: `0.5.0`) → commit → `git push origin main` → `git tag X.Y.Z` →
-  `git push origin X.Y.Z`.
+  SemVer; tag SEM `v`, ex.: `0.5.0`) → commit → **branch `release/X.Y.Z` + PR** (`gh pr create`)
+  → o usuário dá **merge normal** no site → `git fetch` + fast-forward do `main` local →
+  `git tag X.Y.Z <commit do merge>` → `git push origin X.Y.Z` → confirmar que a release ficou
+  **Latest**. **Sempre criar e enviar a tag** logo depois do merge: é ela que dispara a Action;
+  sem tag a release continua na versão antiga.
+- **O agente NÃO pode dar push no `main`** (trava fixa do Kiro Crew,
+  `git-publish-push-protected-branch-name`). Por isso o fluxo é por PR. Push de branch e de tag
+  funcionam.
 - Staging do commit: adicionar explicitamente (`manifest.json package.json versions.json
   styles.css eslint.config.mjs src mcp .kiro/steering`). **Não commitar** `.kiro/settings/`
   nem `.vscode/` (config de máquina). `node_modules`, `main.js`, `*.log` já são ignorados.
@@ -59,6 +65,18 @@ nossas conversas. Vale para toda interação neste repositório.
   `ls -d /Users/jnagase/Documents/*/ | grep -i obsidian` (ou checar `.obsidian/plugins/`).
 - O **workspace (código) está no OneDrive**; o **vault NÃO está**. Operações no vault
   usam caminho absoluto e rodam normalmente.
+- **Este Mac não tem Node instalado.** Usar o Node e o npm que vêm no Amazon Quick:
+  node = `/Applications/Amazon Quick.app/Contents/Resources/agent/_internal/playwright/driver/node`,
+  npm = `node "/Applications/Amazon Quick.app/Contents/Resources/bin/npm/bin/npm-cli.js"`.
+  Rodar as ferramentas direto do `node_modules` (`node node_modules/vitest/vitest.mjs run`,
+  `node node_modules/eslint/bin/eslint.js src`, `node node_modules/typescript/bin/tsc -noEmit
+  -skipLibCheck`, `node esbuild.config.mjs production`), com o dir do node no `PATH`.
+- **GitHub CLI:** `~/.local/gh/gh_2.103.3_macOS_arm64/bin/gh` (logado como `jnagase`, guarda o
+  login no Chaveiro; `gh auth setup-git` já configurado). O git **não tem `user.name`/`user.email`**:
+  commitar com `git -c user.name="$(git log -1 --format=%an)" -c user.email="$(git log -1 --format=%ae)"`,
+  sem mudar a config.
+- A regra `curl .* | sh` do Kiro Crew pega **qualquer** pipe de `curl` para algo que comece com
+  `sh` (até `| shasum`). Baixar com `curl -o arquivo` e processar em comando separado.
 - **O shell (execute_bash) é instável**: saída às vezes vem truncada/"not a tty" e o
   exit code costuma ser `-1` mesmo em sucesso. Padrão confiável:
   redirecionar a saída para um arquivo de log no workspace (`cmd > mm.log 2>&1`), depois
@@ -318,6 +336,27 @@ aposentam no modo ON; órfãs vão pra `Tasks/_orphaned.md` (type `task-orphaned
   se um arquivo puxa todo ciclo sem o md5 convergir, ou o remoto não tem md5 (fica `""` e
   `undefined !== "" → true` pra sempre), ou é duplicata alternando id, ou — o caso real — está
   fora de escopo local e nunca entra no `list()`. Checar essas três antes de suspeitar do engine.
+- **Escritas próprias do sync se marcam POR CAMINHO, nunca por "sync rodando".** O watcher
+  (`registerDriveChangeWatcher`, main.ts) ignora só eventos em `driveOwnWrites`/`driveOwnDeletes`
+  (preenchidos pelo `driveVaultFS` antes de cada write/trash, expiram em 5 s). Antes ele ignorava
+  TODO evento enquanto `driveSyncing` era true → o que o usuário apagava durante um sync automático
+  (que podia durar 9 min) não era anotado em `driveLocalDeletes` e o sync **baixava o arquivo de
+  volta**. Mudança feita durante um sync marca `driveRerunPending` → roda outro sync no fim.
+- **Delete no meio do sync (engine):** antes de um `pull` recriar arquivo ausente, reconfere
+  `getLocalDeletes()`; se o usuário apagou e o remoto não mudou (md5 = baseline) → vira
+  `delete_remote` (edit continua ganhando de delete). A limpeza do commit **não** apaga evidência
+  com timestamp ≥ início do sync (`syncStartMs`). `this_push` pula arquivo que sumiu (senão
+  `fs.read` devolve `""` e sobe **arquivo vazio** pro Drive).
+- **Incremental de verdade:** o caminho rápido nunca disparava (105/105 syncs faziam full walk).
+  Duas causas de ruído no feed de Changes, ambas ignoradas agora: (1) o próprio
+  `.momentum-drive-sync.lock` (criado e trashado em TODO sync); (2) o eco de arquivo que NÓS
+  trashamos no ciclo anterior (baseline já removido → parecia arquivo novo). Pasta trashada
+  continua forçando full walk (filhos não emitem evento). Edição de conteúdo em arquivo rastreado
+  que **não mudou de nome/pasta** é aplicada in place (`overlay`), verificando o pai via
+  `driveFolderMap` (relDir → folder id, gravado só em walk completo). Arquivo novo, rename, move,
+  pasta → full walk.
+- **Sync automático longo é visível:** Notice persistente depois de 10 s (só quando não há
+  `onProgress`, ou seja, não-manual).
 - **Diagnóstico seguro do Drive:** dá pra bater direto na Drive API com o `refresh_token` do
   `data.json` (campo `driveToken`) → `POST ${DRIVE_WORKER_BASE}/refresh` → `access_token`;
   `DRIVE_WORKER_BASE` vem de `drive-domain.json` (`momentumlife-drive.jnagase.com`), folder id em

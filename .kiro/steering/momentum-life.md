@@ -41,8 +41,14 @@ nossas conversas. Vale para toda interação neste repositório.
   (a CI builda). Releases saem via `.github/workflows/release.yml`, disparado por **push de
   tag** (qualquer tag) → builda e cria o GitHub Release com `main.js`/`manifest.json`/`styles.css`.
 - Passos: bump de versão em **`manifest.json` + `package.json` + `versions.json`** (mesma
-  SemVer; tag SEM `v`, ex.: `0.5.0`) → commit → `git push origin main` → `git tag X.Y.Z` →
-  `git push origin X.Y.Z`.
+  SemVer; tag SEM `v`, ex.: `0.5.0`) → commit → **branch `release/X.Y.Z` + PR** (`gh pr create`)
+  → o usuário dá **merge normal** no site → `git fetch` + fast-forward do `main` local →
+  `git tag X.Y.Z <commit do merge>` → `git push origin X.Y.Z` → confirmar que a release ficou
+  **Latest**. **Sempre criar e enviar a tag** logo depois do merge: é ela que dispara a Action;
+  sem tag a release continua na versão antiga.
+- **O agente NÃO pode dar push no `main`** (trava fixa do Kiro Crew,
+  `git-publish-push-protected-branch-name`). Por isso o fluxo é por PR. Push de branch e de tag
+  funcionam.
 - Staging do commit: adicionar explicitamente (`manifest.json package.json versions.json
   styles.css eslint.config.mjs src mcp .kiro/steering`). **Não commitar** `.kiro/settings/`
   nem `.vscode/` (config de máquina). `node_modules`, `main.js`, `*.log` já são ignorados.
@@ -59,6 +65,18 @@ nossas conversas. Vale para toda interação neste repositório.
   `ls -d /Users/jnagase/Documents/*/ | grep -i obsidian` (ou checar `.obsidian/plugins/`).
 - O **workspace (código) está no OneDrive**; o **vault NÃO está**. Operações no vault
   usam caminho absoluto e rodam normalmente.
+- **Este Mac não tem Node instalado.** Usar o Node e o npm que vêm no Amazon Quick:
+  node = `/Applications/Amazon Quick.app/Contents/Resources/agent/_internal/playwright/driver/node`,
+  npm = `node "/Applications/Amazon Quick.app/Contents/Resources/bin/npm/bin/npm-cli.js"`.
+  Rodar as ferramentas direto do `node_modules` (`node node_modules/vitest/vitest.mjs run`,
+  `node node_modules/eslint/bin/eslint.js src`, `node node_modules/typescript/bin/tsc -noEmit
+  -skipLibCheck`, `node esbuild.config.mjs production`), com o dir do node no `PATH`.
+- **GitHub CLI:** `~/.local/gh/gh_2.103.3_macOS_arm64/bin/gh` (logado como `jnagase`, guarda o
+  login no Chaveiro; `gh auth setup-git` já configurado). O git **não tem `user.name`/`user.email`**:
+  commitar com `git -c user.name="$(git log -1 --format=%an)" -c user.email="$(git log -1 --format=%ae)"`,
+  sem mudar a config.
+- A regra `curl .* | sh` do Kiro Crew pega **qualquer** pipe de `curl` para algo que comece com
+  `sh` (até `| shasum`). Baixar com `curl -o arquivo` e processar em comando separado.
 - **O shell (execute_bash) é instável**: saída às vezes vem truncada/"not a tty" e o
   exit code costuma ser `-1` mesmo em sucesso. Padrão confiável:
   redirecionar a saída para um arquivo de log no workspace (`cmd > mm.log 2>&1`), depois
@@ -127,9 +145,16 @@ nossas conversas. Vale para toda interação neste repositório.
 - **Recurrency de TASKS foi REMOVIDA — não reintroduzir.** (Gerava duplicação em loop.)
   Recurring de FINANÇAS (`Finance/recurring.md`) continua existindo, é outra coisa.
 
-## Board-note tasks (beta, flag OFF) — spec #2 (`.kiro/specs/board-note-tasks/`)
-Modelo alternativo de tasks atrás da flag de device **`boardNoteTasks`** (default **OFF** →
-modelo de pastas 100% intocado). Com ON, **um board = uma nota** `Tasks/<Board>.md` com as tasks
+## Board-note tasks — DEFAULT desde 0.9.2 — spec #2 (`.kiro/specs/board-note-tasks/`)
+**Decisão do usuário (0.9.2): é o modelo padrão pra TODOS**, não é mais beta. Flag de device
+**`boardNoteTasks`** (default **ON**; toggle "One note per board" no card Tasks, dá pra voltar pro
+modelo de pastas). No upgrade, `boardNoteDefaultApplied` liga a flag **uma vez**, no `onload`
+**antes** de qualquer listener/upkeep; a consolidação roda no layout-ready (guardada por
+`boardNoteTasksSchema`). **Google Tasks espera** a migração (`taskMigrationRunning`): sync no meio
+veria tasks "sumidas" e apagaria no Google. `migrateToBoardNotes` **só manda pra lixeira as notas
+que entraram numa board note** (set `consolidated`); arquivo que não carregou (png, cópia de
+conflito) fica onde está. Teste com vault falso em `test/board-note-migration.test.ts`.
+Com ON, **um board = uma nota** `Tasks/<Board>.md` com as tasks
 num array `tasks` no frontmatter (fonte da verdade); o corpo é uma visão read-only por coluna,
 regenerada a cada escrita, em **checkbox `- [x]`/`- [ ]`** (compat. Kanban/Tasks plugins). `task_id`
 é a identidade; `google_id` por entrada é sagrado. Pastas `Tasks/<Board>/` e `Tasks/Lists/` se
@@ -161,8 +186,11 @@ aposentam no modo ON; órfãs vão pra `Tasks/_orphaned.md` (type `task-orphaned
   e um dump JSON antes; **Obsidian FECHADO** (o plugin remexe os arquivos em tempo real — os números
   mudam sozinhos). Reconstrução via script `.mjs` espelhando os helpers do plugin (serialização
   idêntica → o plugin não reescreve). Migração guardada por `boardNoteTasksSchema`/`BOARD_NOTE_TASKS_SCHEMA`.
-- **Paridade no MCP** (`mcp/src/store.mjs`): detecta o modo pela **presença** de board notes
-  (`type: task-board`), não pela flag de device (MCP não lê `data.json`).
+- **Paridade no MCP** (`mcp/src/store.mjs`): detecta o modo pelo **conteúdo do vault**, não pela
+  flag de device (MCP não lê `data.json`): tem board note (`type: task-board`) → board-note; senão
+  tem nota de task no modelo de pastas → pastas (o plugin consolida depois); **vault vazio →
+  board-note** (o default; nota em pasta num vault novo nunca apareceria, a consolidação já rodou).
+  Teste em `test/mcp-board-mode.test.ts`.
 
 ## Comportamento dos cards
 - Engine unificada de cards: `src/cardrender.ts` (ações ✓/🗑/⋮) e `src/cardchips.ts`
@@ -191,9 +219,13 @@ aposentam no modo ON; órfãs vão pra `Tasks/_orphaned.md` (type `task-orphaned
 - Operações **destrutivas** (propagação de deleção, de-dupe) são **manuais**, nunca
   automáticas num upgrade.
 
-## Google Tasks sync (`src/gtSync.ts`, `src/googletasks.ts`) — BETA
-- Marcado **(beta)** na UI (header das settings, tag vermelha `.pa-beta-tag`), no
-  `whatsnew.ts` e no README. Off por padrão.
+## Google Tasks sync (`src/gtSync.ts`, `src/googletasks.ts`) — PRODUÇÃO
+- **Fora do beta desde 0.9.2** (card sem `.pa-beta-tag`): app verificado, escopo só `tasks`
+  (não-sensível) → sem aviso de "app não verificado", sem teto de contas. Off por padrão.
+- **Google Drive continua BETA**: escopo `drive` (completo) é **restrito** → aviso "unsafe" e teto
+  de 100 contas até a verificação restrita (auditoria anual paga, US$ 500–4.500). Configuração no
+  Google Cloud não tira isso. Alternativa grátis: `drive.file`, mas o plugin só enxergaria arquivos
+  que ele mesmo criou (precisa de spec).
 - **Auth via Cloudflare Worker** (`worker/`): o Worker `momentum-google` (subdomínio
   `jaime-nagase` → `https://momentum-google.jaime-nagase.workers.dev`) guarda os secrets
   `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` **server-side**. O plugin **não embarca
@@ -285,6 +317,31 @@ aposentam no modo ON; órfãs vão pra `Tasks/_orphaned.md` (type `task-orphaned
   endurecimento de verdade (lock de sync entre devices, ou reconciliar duplicatas por
   título+lista mesmo com ids distintos) é mudança estruturante → tratar via **spec**.
 
+## Google Drive sync — estado, pasta e segurança (0.9.2)
+- **Baselines FORA do `data.json`:** ficam em `.obsidian/plugins/momentum-life/drive-state.json`
+  (`loadDriveState`/`saveDriveState`). Antes o `data.json` tinha 7,5 MB (cópia de cada nota) e era
+  regravado centenas de vezes por sync → no celular ficava cortado, o Obsidian lia "nada" e o plugin
+  **perdia tudo** (login, pasta, baselines). Escrita atômica: grava `.tmp` e troca. O arquivo também
+  guarda `folderId`/`folderName`/`mirrorDir`: se o `data.json` sumir, a pasta é **restaurada**.
+  Baselines só valem se pasta do Drive **e** escopo local batem. Migração das baselines antigas é
+  automática (uma vez).
+- Gravação em rajada (delete events) usa `saveSettingsSoon()` (debounce 1 s), não `saveSettings()`.
+- **Sem pasta escolhida, não há primeiro sync** (`driveFolderChosen()`): antes, reconectar com o
+  `data.json` vazio jogava o vault inteiro na raiz do My Drive. Quem já sincroniza na raiz (tem
+  baselines) segue normal.
+- **Trocar a pasta do Drive** (`setDriveFolder`) zera baselines/cursor/evidência de delete → o próximo
+  sync é adoção (só junta, nunca apaga). Bloqueado durante um sync.
+- **Escopo local:** UI não oferece mais escolher pasta local — **vault inteiro** é o padrão pra quem
+  instala. Quem já tinha uma pasta configurada **mantém** no upgrade (`driveMirrorDir` intocado).
+  A tela só mostra "Where it syncs" (pasta do Drive).
+- **`.obsidian` (Pro "appearance & plugins"):** arquivo de config que some do Drive **nunca** é
+  apagado localmente (`trash` de `isCfg` é no-op; antes era `adapter.remove`, sem lixeira, e apagou
+  todos os community plugins do usuário quando o `.obsidian` mudou de lugar no Drive). O arquivo
+  volta pro Drive no sync seguinte. `community-plugins.json` vindo do Drive é **unido** à lista
+  local (nunca desliga plugin).
+- Pasta `SecondBrain/SecondBrain` no Drive (aninhada por engano) gera "Drive move mirrored" em todo
+  sync — pendente de limpeza manual.
+
 ## Google Drive sync — escopo e convergência (`src/driveSync.ts`, `src/main.ts`)
 - **Tasks NUNCA sincam pelo Google Drive.** O único canal de sync de tasks é o Google Tasks.
   `driveInScope` (main.ts) sempre exclui `Tasks/` (antes só excluía quando `googleTasksEnabled`;
@@ -318,6 +375,27 @@ aposentam no modo ON; órfãs vão pra `Tasks/_orphaned.md` (type `task-orphaned
   se um arquivo puxa todo ciclo sem o md5 convergir, ou o remoto não tem md5 (fica `""` e
   `undefined !== "" → true` pra sempre), ou é duplicata alternando id, ou — o caso real — está
   fora de escopo local e nunca entra no `list()`. Checar essas três antes de suspeitar do engine.
+- **Escritas próprias do sync se marcam POR CAMINHO, nunca por "sync rodando".** O watcher
+  (`registerDriveChangeWatcher`, main.ts) ignora só eventos em `driveOwnWrites`/`driveOwnDeletes`
+  (preenchidos pelo `driveVaultFS` antes de cada write/trash, expiram em 5 s). Antes ele ignorava
+  TODO evento enquanto `driveSyncing` era true → o que o usuário apagava durante um sync automático
+  (que podia durar 9 min) não era anotado em `driveLocalDeletes` e o sync **baixava o arquivo de
+  volta**. Mudança feita durante um sync marca `driveRerunPending` → roda outro sync no fim.
+- **Delete no meio do sync (engine):** antes de um `pull` recriar arquivo ausente, reconfere
+  `getLocalDeletes()`; se o usuário apagou e o remoto não mudou (md5 = baseline) → vira
+  `delete_remote` (edit continua ganhando de delete). A limpeza do commit **não** apaga evidência
+  com timestamp ≥ início do sync (`syncStartMs`). `this_push` pula arquivo que sumiu (senão
+  `fs.read` devolve `""` e sobe **arquivo vazio** pro Drive).
+- **Incremental de verdade:** o caminho rápido nunca disparava (105/105 syncs faziam full walk).
+  Duas causas de ruído no feed de Changes, ambas ignoradas agora: (1) o próprio
+  `.momentum-drive-sync.lock` (criado e trashado em TODO sync); (2) o eco de arquivo que NÓS
+  trashamos no ciclo anterior (baseline já removido → parecia arquivo novo). Pasta trashada
+  continua forçando full walk (filhos não emitem evento). Edição de conteúdo em arquivo rastreado
+  que **não mudou de nome/pasta** é aplicada in place (`overlay`), verificando o pai via
+  `driveFolderMap` (relDir → folder id, gravado só em walk completo). Arquivo novo, rename, move,
+  pasta → full walk.
+- **Sync automático longo é visível:** Notice persistente depois de 10 s (só quando não há
+  `onProgress`, ou seja, não-manual).
 - **Diagnóstico seguro do Drive:** dá pra bater direto na Drive API com o `refresh_token` do
   `data.json` (campo `driveToken`) → `POST ${DRIVE_WORKER_BASE}/refresh` → `access_token`;
   `DRIVE_WORKER_BASE` vem de `drive-domain.json` (`momentumlife-drive.jnagase.com`), folder id em
@@ -352,8 +430,10 @@ aposentam no modo ON; órfãs vão pra `Tasks/_orphaned.md` (type `task-orphaned
 - Não commitar/publicar no git sem ordem explícita.
 - Não migrar pro board-note com a flag ainda OFF (os listeners de adopt corrompem a board note),
   nem usar `path` como identidade de card no modo ON (use `task_id`/`data-uid`).
-- Não tornar o board-note o default/obrigatório enquanto beta — forçaria migração automática em
-  TODO usuário no upgrade (quebra o "upgrade transparente"). Flag OFF por default até validar.
+- Não trocar o `driveMirrorDir` de quem já sincroniza uma pasta só (re-chaveia todas as baselines →
+  duplica tudo no Drive). Escopo local é "vault inteiro" só pra instalação nova.
+- Não apagar arquivo de `.obsidian/` porque sumiu do Drive (já apagou todos os plugins do usuário).
+- Não guardar baselines/estado grande no `data.json`.
 
 ## Release e publicação na comunidade
 - **Bump de versão toca 4 arquivos:** `manifest.json`, `versions.json`, `package.json` e
@@ -396,6 +476,14 @@ aposentam no modo ON; órfãs vão pra `Tasks/_orphaned.md` (type `task-orphaned
 - `src/whatsnew.ts` tem um `CHANGELOG` versionado + rastreio de `lastSeenVersion` nas
   settings. Ao lançar uma versão com **mudança visível ao usuário**, adicionar uma entrada
   no topo do CHANGELOG (New / Improved / Fixed). O modal abre uma vez por upgrade.
+
+## Tela de configurações (0.9.2)
+- **Um card por seção** (`card()` em `renderSettings`, classe `.pa-settings-card`): General, Tasks,
+  Finances, Google tasks, Google Drive `beta`, Momentum pro. Subgrupos dentro do card com `sub()`
+  (`.pa-settings-subhead`), não com `setHeading()` solto. Linhas sem caixa própria, só divisória.
+- Opções **Pro** do Drive (todos os tipos de arquivo, appearance & plugins) ficam no card
+  **Momentum pro** ("Google Drive pro features"), desabilitadas se o Drive estiver off.
+- "Task notifications" foi **removido** (não fazia nada). Não reintroduzir sem implementar.
 
 ## Spec-driven vs vibe coding
 - **Mudança estrutural, migração, ou que mexe em dados/arquivos do usuário** → fazer via

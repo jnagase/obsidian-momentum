@@ -19,7 +19,6 @@ import { DriveFolderPicker } from "./driveFolderPicker";
 import { isProActive, proNeedsRecheck, validateLicense, PRO_BETA_FREE, PRO_PRICE, PRO_CHECKOUT_URL, PRO_BETA_OFFER, ProState } from "./pro";
 interface PASettings {
   dataRoot: string;
-  notifyTasks: boolean;
   lastSeenVersion: string;
   readableNotesSchema?: number;
   taskListsSchema?: number;
@@ -30,6 +29,8 @@ interface PASettings {
   // per-task→board-note migration once when the flag is first turned on (see Phase 3).
   boardNoteTasks?: boolean;
   boardNoteTasksSchema?: number;
+  /** Set once the board-note model was made the default on this device (0.9.2+). */
+  boardNoteDefaultApplied?: boolean;
   googleTasksEnabled: boolean;
   googleTasksSyncOnStartup: boolean;
   googleSyncInterval: number; // 0=manual, or minutes: 5, 10, 15, 60, 120, 300, 720, 1440
@@ -44,7 +45,10 @@ interface PASettings {
   driveFolderName?: string;        // human display name of the chosen Drive folder
   driveMirrorDir?: string;         // the local vault folder mirrored against Drive
   driveSyncInterval?: number;      // 0=manual, or minutes
-  driveBaselines?: Record<string, { fileId: string; md5: string; modifiedTime: string; base?: string }>;
+  /** LEGACY (≤0.9.1): baselines used to live here. They hold a full copy of every synced note
+   *  (megabytes), which made data.json huge and fragile. Now kept in drive-state.json; this field
+   *  is only read once to migrate, then dropped. */
+  driveBaselines?: Record<string, DriveBaselineEntry>;
   driveLocalDeletes?: Record<string, number>;     // paths the user deleted locally (evidence for delete_remote)
   driveDeclinedDeletions?: Record<string, string>; // path → situation signature the user declined to delete
   driveConflictStrategy?: DriveConflictStrategy; // how two-sided conflicts resolve (default keep-both)
@@ -66,14 +70,14 @@ interface PASettings {
 }
 const DEFAULT_SETTINGS: PASettings = {
   dataRoot: "Momentum Life",
-  notifyTasks: false,
   lastSeenVersion: "",
   readableNotesSchema: 0,
   taskListsSchema: 0,
   taskFoldersSchema: 0,
   monthlyLedgerSchema: 0,
-  boardNoteTasks: false,
+  boardNoteTasks: true, // the default task model since 0.9.2 (one note per board)
   boardNoteTasksSchema: 0,
+  boardNoteDefaultApplied: false,
   googleTasksEnabled: false,
   googleTasksSyncOnStartup: false,
   googleSyncInterval: 0,   // manual by default
@@ -86,7 +90,6 @@ const DEFAULT_SETTINGS: PASettings = {
   driveFolderName: "",
   driveMirrorDir: "", // "" = whole vault (the safe, obvious default; a fresh vault has no "Drive/" folder)
   driveSyncInterval: 0,
-  driveBaselines: {},
   driveLocalDeletes: {},
   driveDeclinedDeletions: {},
   driveCursor: "",
@@ -112,6 +115,21 @@ const DRIVE_DATA_EXCLUDE = new Set<string>([
   "Config/known-boards.md",
   "Config/deleted-boards.md",
 ]);
+/** One synced file's last-sync snapshot (`base` = full text, the 3-way merge base). */
+type DriveBaselineEntry = { fileId: string; md5: string; modifiedTime: string; base?: string };
+/** drive-state.json: Drive baselines kept OUT of data.json, tagged with the Drive folder they
+ *  belong to (so baselines from one folder are never used against another), plus a backup of the
+ *  folder choice (so losing data.json never silently redirects the sync to My Drive root). */
+interface DriveStateFile {
+  version: 1;
+  folderId: string;
+  folderName: string;
+  /** Local folder mirrored ("" = whole vault). Backed up so a lost data.json can't silently
+   *  switch an older single-folder setup to whole vault (baseline keys would no longer match). */
+  mirrorDir?: string;
+  baselines: Record<string, DriveBaselineEntry>;
+}
+
 /** Bump when the readable-notes migration changes so the guarded auto-run re-triggers. */
 const READABLE_NOTES_SCHEMA = 1;
 /** Bump when the task-list mirror layout changes so the guarded migration re-runs. */
@@ -146,6 +164,20 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       if (!hasNew && hasLegacy) this.settings.dataRoot = LEGACY_DATA_ROOT;
     }
     setDataRoot(this.settings.dataRoot);
+    // Board-note tasks are the default for everyone since 0.9.2. Existing users have an explicit
+    // `boardNoteTasks: false` saved, so flip it ONCE here — BEFORE any task listener or upkeep
+    // runs (a migration with the flag still off gets corrupted by the adopt listeners). The
+    // consolidation itself runs on layout-ready (guarded by boardNoteTasksSchema), with Google
+    // tasks sync held off until it finishes. Users can still switch back in settings afterwards.
+    if (!this.settings.boardNoteDefaultApplied) {
+      this.settings.boardNoteTasks = true;
+      this.settings.boardNoteDefaultApplied = true;
+      await this.saveData(this.settings);
+    }
+    // Hold Google tasks sync from the very start when a consolidation is still pending.
+    if (this.settings.boardNoteTasks && (this.settings.boardNoteTasksSchema ?? 0) < BOARD_NOTE_TASKS_SCHEMA) {
+      this.taskMigrationRunning = true;
+    }
     this.store = new PADataStore(this.app);
     // Mirror the board-note device flag into the store so every task read/write picks the right
     // model. Default OFF → the store's folder-per-board path is used, unchanged from today.
@@ -163,6 +195,9 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       this.settings.driveScopeDefaultMigrated = true;
       await this.saveSettings();
     }
+    // Drive baselines live in their own file (drive-state.json). Migrates them out of data.json
+    // once (transparent), and restores the Drive folder choice if data.json lost it.
+    await this.loadDriveState();
 
     this.registerView(VIEW_TYPE_PA, (leaf) => new PAView(leaf, this.store, this, this.manifest.name));
     this.registerView(VIEW_TYPE_PA_NAV, (leaf) => new PANavView(leaf, this, this.manifest.name));
@@ -362,15 +397,19 @@ export default class MomentumPlugin extends Plugin implements PAHost {
           // Board-note mode is on but this device hasn't consolidated its folders yet (e.g. the
           // flag was set and the migration logic later bumped). Run it once, guarded by schema.
           if (this.boardNoteMode() && (this.settings.boardNoteTasksSchema ?? 0) < BOARD_NOTE_TASKS_SCHEMA) {
+            this.taskMigrationRunning = true; // Google tasks sync waits (it would see half-moved tasks)
             try {
-              await this.store.migrateToBoardNotes();
+              const n = await this.store.migrateToBoardNotes();
               this.settings.boardNoteTasksSchema = BOARD_NOTE_TASKS_SCHEMA;
               await this.saveSettings();
+              if (n > 0) new Notice(`Momentum: tasks now live in one note per board — consolidated ${n} task${n === 1 ? "" : "s"}. Old notes are in the trash.`);
             } catch { /* leave the guard unset so it retries next launch */ }
+            finally { this.taskMigrationRunning = false; }
           }
           await this.store.reconcileTaskLists();
           await this.store.syncTaskLists();
         } finally {
+          this.taskMigrationRunning = false; // never leave Google tasks sync held
           window.setTimeout(() => { this.mirrorSyncing = false; }, 1000);
         }
       })(), 1500);
@@ -874,9 +913,117 @@ export default class MomentumPlugin extends Plugin implements PAHost {
     };
   }
 
-  /** DriveBaselineStore backed by settings.driveBaselines (persisted in data.json). */
+  /** Drive baselines (in memory; persisted to drive-state.json, NOT data.json). */
+  private driveBaselines: Record<string, DriveBaselineEntry> = {};
+  /** Serialises drive-state.json writes so two saves never interleave. */
+  private driveStateWrite: Promise<void> = Promise.resolve();
+
+  private driveStatePath(): string {
+    const dir = this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`;
+    return normalizePath(`${dir}/drive-state.json`);
+  }
+
+  /**
+   * Load drive-state.json. Order of trust: the `.tmp` copy (written last; only used when it
+   * parses, so a half-written one is skipped), then the main file. Then:
+   *  - data.json lost the folder choice but the state file has it → restore it (an update or a
+   *    crash that wiped data.json must never redirect the sync to My Drive root);
+   *  - baselines are used only when they belong to the folder now configured;
+   *  - no state file yet but legacy baselines in data.json → migrate them out (once).
+   */
+  private async loadDriveState(): Promise<void> {
+    const adapter = this.app.vault.adapter;
+    const p = this.driveStatePath();
+    let st: DriveStateFile | null = null;
+    for (const f of [`${p}.tmp`, p]) {
+      try {
+        if (!(await adapter.exists(f))) continue;
+        const j = JSON.parse(await adapter.read(f)) as Partial<DriveStateFile>;
+        if (j && typeof j.baselines === "object" && j.baselines) { st = j as DriveStateFile; break; }
+      } catch { /* unreadable/truncated → try the other copy */ }
+    }
+    const s = this.settings;
+    const legacy = s.driveBaselines;
+    let dirty = false;
+    if (st) {
+      if (!s.driveFolderId && !s.driveFolderName && (st.folderId || st.folderName)) {
+        s.driveFolderId = st.folderId;
+        s.driveFolderName = st.folderName;
+        // data.json was lost: restore the local scope too (an older single-folder setup).
+        if (!s.driveMirrorDir && st.mirrorDir) s.driveMirrorDir = st.mirrorDir;
+        dirty = true;
+      }
+      // Baselines are only valid for the same Drive folder AND the same local scope.
+      const sameFolder = (s.driveFolderId ?? "") === (st.folderId ?? "");
+      const sameScope = (s.driveMirrorDir ?? "") === (st.mirrorDir ?? "");
+      this.driveBaselines = sameFolder && sameScope ? st.baselines : {};
+    } else if (legacy && Object.keys(legacy).length) {
+      this.driveBaselines = legacy;
+      await this.saveDriveState(); // write the new file BEFORE dropping the old copy
+    }
+    if (legacy !== undefined) { delete s.driveBaselines; dirty = true; }
+    if (dirty) await this.saveSettings();
+  }
+
+  /** Atomic-ish write of drive-state.json: write `.tmp`, then swap it in. A crash mid-write
+   *  leaves either the old file or a complete `.tmp` — never a truncated state file. */
+  private saveDriveState(): Promise<void> {
+    const run = async (): Promise<void> => {
+      const adapter = this.app.vault.adapter;
+      const p = this.driveStatePath();
+      const tmp = `${p}.tmp`;
+      const body: DriveStateFile = {
+        version: 1,
+        folderId: this.settings.driveFolderId ?? "",
+        folderName: this.settings.driveFolderName ?? "",
+        mirrorDir: this.settings.driveMirrorDir ?? "",
+        baselines: this.driveBaselines,
+      };
+      await adapter.write(tmp, JSON.stringify(body));
+      if (await adapter.exists(p)) await adapter.remove(p);
+      await adapter.rename(tmp, p);
+    };
+    this.driveStateWrite = this.driveStateWrite.then(run, run);
+    return this.driveStateWrite;
+  }
+
+  /** Point the Drive sync at another folder. Baselines, cursor and delete evidence belong to the
+   *  OLD folder, so they are reset: the next sync is a first-contact adoption (merges, never
+   *  deletes). Without this, files missing from the new folder looked "deleted on Drive". */
+  async setDriveFolder(id: string, name: string): Promise<void> {
+    const s = this.settings;
+    if ((s.driveFolderId ?? "") !== id) {
+      this.driveBaselines = {};
+      s.driveCursor = "";
+      s.driveFolderIds = [];
+      s.driveFolderMap = {};
+      s.driveLocalDeletes = {};
+      s.driveDeclinedDeletions = {};
+    }
+    s.driveFolderId = id;
+    s.driveFolderName = name;
+    await this.saveSettings();
+    await this.saveDriveState();
+  }
+
+  /** How many files the Drive sync currently tracks (baselines). */
+  driveTrackedCount(): number { return Object.keys(this.driveBaselines).length; }
+
+  /** True once the user picked a Drive folder (My Drive root counts: the picker names it). */
+  driveFolderChosen(): boolean {
+    return !!(this.settings.driveFolderId || this.settings.driveFolderName);
+  }
+
+  /** Debounced saveSettings for bursty callers (e.g. hundreds of delete events). */
+  private saveSoonTimer: number | null = null;
+  private saveSettingsSoon(): void {
+    if (this.saveSoonTimer !== null) window.clearTimeout(this.saveSoonTimer);
+    this.saveSoonTimer = window.setTimeout(() => { this.saveSoonTimer = null; void this.saveSettings(); }, 1000);
+  }
+
+  /** DriveBaselineStore backed by this.driveBaselines (persisted in drive-state.json). */
   private driveBaselineStore(): DriveBaselineStore {
-    const map = (this.settings.driveBaselines ??= {});
+    const map = this.driveBaselines;
     return {
       get: (n) => map[n],
       set: (n, b) => { map[n] = b; },
@@ -888,7 +1035,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       setFolderIds: (ids) => { this.settings.driveFolderIds = ids; },
       getFolderMap: () => this.settings.driveFolderMap ?? {},
       setFolderMap: (m) => { this.settings.driveFolderMap = m; },
-      save: async () => { await this.saveSettings(); },
+      save: async () => { await this.saveDriveState(); await this.saveSettings(); },
       getLocalDeletes: () => (this.settings.driveLocalDeletes ??= {}),
       clearLocalDelete: (n) => { delete (this.settings.driveLocalDeletes ??= {})[n]; },
       getDeclined: () => (this.settings.driveDeclinedDeletions ??= {}),
@@ -996,7 +1143,24 @@ export default class MomentumPlugin extends Plugin implements PAHost {
         return f instanceof TFile ? this.app.vault.read(f) : "";
       },
       write: async (rel, content) => {
-        if (isCfg(rel)) { await ensureAdapterDir(rel); await adapter.write(rel, content); return; }
+        if (isCfg(rel)) {
+          await ensureAdapterDir(rel);
+          // The enabled-plugins list is MERGED, never replaced: a device with fewer plugins (a
+          // fresh phone, say) must not switch off every plugin on this one. Union, local order first.
+          if (rel === `${cfgDir}/community-plugins.json` && await adapter.exists(rel)) {
+            try {
+              const mine = JSON.parse(await adapter.read(rel)) as unknown;
+              const theirs = JSON.parse(content) as unknown;
+              if (Array.isArray(mine) && Array.isArray(theirs)) {
+                const ids = (a: unknown[]): string[] => a.filter((x): x is string => typeof x === "string");
+                const merged = [...new Set([...ids(mine as unknown[]), ...ids(theirs as unknown[])])];
+                content = JSON.stringify(merged, null, 2);
+              }
+            } catch { /* unparseable → fall through and write the remote copy as is */ }
+          }
+          await adapter.write(rel, content);
+          return;
+        }
         const full = toFull(rel);
         await ensureFolders(full);
         this.markDriveOwn(this.driveOwnWrites, full);
@@ -1006,7 +1170,11 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       },
       exists: async (rel) => isCfg(rel) ? adapter.exists(rel) : this.app.vault.getAbstractFileByPath(toFull(rel)) instanceof TFile,
       trash: async (rel) => {
-        if (isCfg(rel)) { if (await adapter.exists(rel)) await adapter.remove(rel).catch(() => {}); return; }
+        // NEVER delete Obsidian config/plugin files because they vanished from Drive. That used to
+        // hard-delete (adapter.remove, no trash) every community plugin's code when the Drive copy
+        // of .obsidian was moved or trashed. Keeping the local file is self-healing: its baseline
+        // is dropped, so the next sync sees "local only" and uploads it back to Drive.
+        if (isCfg(rel)) return;
         const full = toFull(rel);
         const f = this.app.vault.getAbstractFileByPath(full);
         if (f instanceof TFile) {
@@ -1083,6 +1251,14 @@ export default class MomentumPlugin extends Plugin implements PAHost {
     // lever: binaries round-trip as bytes just when Pro is active AND the toggle is on. Without
     // Pro (or with it off) the engine's block-and-warn keeps binaries safe, and text still syncs.
     const proBinaries = this.isProEnabled() && !!this.settings.driveSyncBinaries;
+    // Never start a FIRST sync without a folder chosen: that used to dump the whole vault into
+    // My Drive root (e.g. after data.json was lost and the user reconnected). Existing setups that
+    // already sync into root keep working (they have baselines).
+    if (!this.driveFolderChosen() && Object.keys(this.driveBaselines).length === 0) {
+      this.updateDriveStatus("Drive: choose a folder");
+      if (confirmed) new Notice("Google Drive: choose a folder in settings before the first sync.");
+      return;
+    }
     const token = await this.driveAccessToken();
     if (!token) { new Notice("Google Drive: not connected."); return; }
     this.driveSyncing = true;
@@ -1287,7 +1463,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       if (!this.driveInScope(f.path)) continue;
       inScope.push({ rel: base ? f.path.slice(base.length + 1) : f.path, mtime: f.stat.mtime });
     }
-    const baselines = this.settings.driveBaselines ?? {};
+    const baselines = this.driveBaselines;
     let tracked = 0;
     const files = inScope.map(({ rel, mtime }) => {
       const b = baselines[rel];
@@ -1340,7 +1516,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       // running sync then pulled the file straight back).
       if (this.settings.googleDriveEnabled && !this.driveOwnDeletes.has(f.path)) {
         const rel = this.driveRelKey(f.path);
-        if (rel) { (this.settings.driveLocalDeletes ??= {})[rel] = Date.now(); void this.saveSettings(); }
+        if (rel) { (this.settings.driveLocalDeletes ??= {})[rel] = Date.now(); this.saveSettingsSoon(); }
       }
       schedule(f.path);
     }));
@@ -1350,7 +1526,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       // instead of re-pulling the old name back (which would duplicate). Skip the sync's own writes.
       if (this.settings.googleDriveEnabled && !this.driveOwnDeletes.has(oldPath)) {
         const relOld = this.driveRelKey(oldPath);
-        if (relOld) { (this.settings.driveLocalDeletes ??= {})[relOld] = Date.now(); void this.saveSettings(); }
+        if (relOld) { (this.settings.driveLocalDeletes ??= {})[relOld] = Date.now(); this.saveSettingsSoon(); }
       }
       schedule(f.path);
     }));
@@ -1392,6 +1568,7 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       this.resetDriveSyncInterval();
       this.updateDriveStatus("Drive: idle");
       new Notice("✓ connected to Google Drive (beta).");
+      if (!this.driveFolderChosen()) new Notice("Next: choose the Google Drive folder to sync. Nothing syncs until you do.", 10000);
       new Notice("⚠ Drive is beta: back up your vault before the first sync. Binary files are skipped for now.", 10000);
       const settingTab = (this.app as unknown as { setting?: { open: () => void; openTabById: (id: string) => void } }).setting;
       if (settingTab) { settingTab.open(); settingTab.openTabById(this.manifest.id); }
@@ -1667,9 +1844,13 @@ export default class MomentumPlugin extends Plugin implements PAHost {
    * individual notes. Both are reversible (sources go to Obsidian trash). The store flag is only
    * flipped AFTER a successful migration, so a failure leaves tasks exactly as they were.
    */
+  /** True while tasks are being moved between models; Google tasks sync waits for it. */
+  private taskMigrationRunning = false;
+
   async setBoardNoteTasks(enabled: boolean): Promise<void> {
     if (enabled === !!this.settings.boardNoteTasks) return;
     const prev = !!this.settings.boardNoteTasks;
+    this.taskMigrationRunning = true;
     try {
       if (enabled) {
         // Flip the flag FIRST so every task listener/upkeep (adopt, inbox, mirrors, folder
@@ -1696,6 +1877,8 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       this.settings.boardNoteTasks = prev;
       this.store.boardNoteTasks = prev;
       new Notice(`Momentum: board-note switch failed — ${String(e)}. Your tasks are unchanged; restore from a backup if needed.`);
+    } finally {
+      this.taskMigrationRunning = false;
     }
   }
 
@@ -1919,6 +2102,12 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       if (!silent) new Notice("Google tasks sync is not enabled or not connected.");
       return;
     }
+    // Tasks are being moved into board notes: a sync now would see them half-moved and could
+    // treat the missing ones as deleted. Wait, then sync.
+    if (this.taskMigrationRunning) {
+      window.setTimeout(() => void this.syncGoogleTasks(silent), 3000);
+      return;
+    }
     // Persistent progress banner (duration 0 = stays until we hide it) so the user sees
     // the sync is running and its progress, and knows not to edit tasks until it finishes.
     const progress = new Notice("⏳ Google tasks: preparing sync… (please don't edit tasks yet)", 0);
@@ -1993,7 +2182,13 @@ export default class MomentumPlugin extends Plugin implements PAHost {
     }
   }
 
-  onunload(): void {}
+  onunload(): void {
+    // Flush a pending debounced save (e.g. a delete recorded just before closing).
+    if (this.saveSoonTimer !== null) { window.clearTimeout(this.saveSoonTimer); this.saveSoonTimer = null; void this.saveSettings(); }
+  }
+
+  /** True while a Drive sync is running (settings tab blocks folder changes meanwhile). */
+  isDriveSyncing(): boolean { return this.driveSyncing; }
 
   async saveSettings(): Promise<void> {
     setDataRoot(this.settings.dataRoot);
@@ -2012,8 +2207,22 @@ class PASettingTab extends PluginSettingTab {
   }
 
   private renderSettings(): void {
-    const { containerEl } = this;
-    containerEl.empty();
+    const root = this.containerEl;
+    root.empty();
+    root.addClass("pa-settings");
+    // Each section is ONE card: a heading plus all of its settings (and sub-groups) inside, so
+    // related options read as a unit instead of a stream of loose boxes. `containerEl` always
+    // points at the current card; every `new Setting(containerEl)` below lands in it.
+    let containerEl: HTMLElement = root;
+    const card = (title: string, beta = false): HTMLElement => {
+      const c = root.createDiv({ cls: "pa-settings-card" });
+      const h = new Setting(c).setName(title).setHeading();
+      if (beta) h.nameEl.createSpan({ cls: "pa-beta-tag", text: "beta" });
+      return c;
+    };
+    const sub = (title: string): void => { containerEl.createDiv({ cls: "pa-settings-subhead", text: title }); };
+
+    containerEl = card("General");
     new Setting(containerEl)
       .setName("Data root folder")
       .setDesc("Vault folder that stores all plugin data.")
@@ -2024,21 +2233,20 @@ class PASettingTab extends PluginSettingTab {
         })
       );
 
-    new Setting(containerEl).setName("Tasks").setHeading();
-
     new Setting(containerEl)
-      .setName("Task notifications")
-      .setDesc("Show desktop notifications for tasks due today. Desktop only, and only while the app is open.")
-      .addToggle((t) =>
-        t.setValue(this.plugin.settings.notifyTasks).onChange(async (v) => {
-          this.plugin.settings.notifyTasks = v;
-          await this.plugin.saveSettings();
+      .setName("Support")
+      .setDesc("If you find this plugin useful, you can support its development.")
+      .addButton((b) =>
+        b.setButtonText("Buy me a coffee").setCta().onClick(() => {
+          window.open("https://buymeacoffee.com/jnagase", "_blank");
         })
       );
 
+    containerEl = card("Tasks");
+
     new Setting(containerEl)
-      .setName("Board-note tasks (beta)")
-      .setDesc("Store each board's tasks inside a single board note instead of a folder of notes. Switching migrates your tasks and is reversible (old notes move to trash); back up your vault first.")
+      .setName("One note per board")
+      .setDesc("The default: each board keeps its tasks inside a single board note. Turn off to go back to one note per task in a board folder. Switching migrates your tasks and is reversible (old notes move to trash); back up your vault first.")
       .addToggle((t) => {
         const cur = !!this.plugin.settings.boardNoteTasks;
         t.setValue(cur).onChange((v) => {
@@ -2058,7 +2266,7 @@ class PASettingTab extends PluginSettingTab {
         });
       });
 
-    new Setting(containerEl).setName("Finances").setHeading();
+    containerEl = card("Finances");
 
     new Setting(containerEl)
       .setName("Currency")
@@ -2080,22 +2288,13 @@ class PASettingTab extends PluginSettingTab {
         });
       });
 
-    new Setting(containerEl)
-      .setName("Support")
-      .setDesc("If you find this plugin useful, you can support its development.")
-      .addButton((b) =>
-        b.setButtonText("Buy me a coffee").setCta().onClick(() => {
-          window.open("https://buymeacoffee.com/jnagase", "_blank");
-        })
-      );
-
     // ── Google Tasks ──────────────────────────────────────────────────────
-    new Setting(containerEl).setName("Google tasks").setHeading();
+    containerEl = card("Google tasks"); // in production (verified OAuth client) — no beta tag
 
     const token = this.plugin.settings.googleToken;
     const connected = !!token?.access_token;
 
-    const rerender = () => { containerEl.empty(); this.renderSettings(); };
+    const rerender = () => { root.empty(); this.renderSettings(); };
 
     new Setting(containerEl)
       .setName("Enable Google tasks sync")
@@ -2163,7 +2362,7 @@ class PASettingTab extends PluginSettingTab {
 
     // ── Google Drive (beta) — separate sign-in, never touches Tasks ───────────────────────
     const driveConnected = !!this.plugin.settings.driveToken;
-    new Setting(containerEl).setName("Google Drive (beta)").setHeading();
+    containerEl = card("Google Drive", true);
 
     // A calm, informational callout (not an alarming red box): Drive is authoritative and its
     // changes — including deletions — flow to every device, so a backup before the first sync is
@@ -2175,10 +2374,8 @@ class PASettingTab extends PluginSettingTab {
         + "deletions. It's a good idea to back up your vault before the first sync.",
     });
 
-    const driveProOn = this.plugin.isProEnabled();
-
     new Setting(containerEl)
-      .setName("Enable Google Drive (beta)")
+      .setName("Enable Google Drive sync")
       .setDesc(
         "Two-way sync between Google Drive and your vault, on a SEPARATE Google sign-in from Tasks. " +
         "Text notes always sync; images, PDFs and other file types are a Google Drive Pro feature " +
@@ -2213,39 +2410,25 @@ class PASettingTab extends PluginSettingTab {
       // cluttered with controls that can't work yet.
       if (driveConnected) {
         // ── What syncs ────────────────────────────────────────────────────
-        new Setting(containerEl).setName("What syncs").setHeading();
-
-        new Setting(containerEl)
-          .setName("Vault folder to sync")
-          .setDesc("The local folder mirrored to drive. \"whole vault\" syncs everything (the plugin's own data folder is excluded to stay safe).")
-          .addDropdown((d) => {
-            d.addOption("", "🗂️ whole vault");
-            const cur = this.plugin.settings.driveMirrorDir ?? "";
-            const folders = this.app.vault.getRoot().children
-              .filter((c): c is TFolder => c instanceof TFolder)
-              .map((f) => f.name)
-              .sort((a, b) => a.localeCompare(b));
-            if (cur && !folders.includes(cur)) folders.push(cur); // keep a custom/nested value visible
-            for (const name of folders) d.addOption(name, name);
-            d.setValue(cur);
-            d.onChange(async (v) => {
-              this.plugin.settings.driveMirrorDir = v; // "" = whole vault
-              await this.plugin.saveSettings();
-            });
-          });
+        // The whole vault always syncs (no local-folder picker any more). The only choice is WHERE
+        // on Google Drive it goes. Older setups that mirrored a single local folder keep it
+        // (driveMirrorDir is left as is — switching it would re-key every baseline and duplicate
+        // files on Drive), it's just no longer offered in the UI.
+        sub("Where it syncs");
 
         new Setting(containerEl)
           .setName("Google Drive folder")
-          .setDesc(`Currently: ${this.plugin.settings.driveFolderName || "My Drive (root)"}. Files sync into this folder on Drive.`)
+          .setDesc(this.plugin.driveFolderChosen() || this.plugin.driveTrackedCount() > 0
+            ? `Your whole vault syncs into: ${this.plugin.settings.driveFolderName || "My Drive (root)"}. Changing it starts a fresh merge with the new folder (nothing is deleted).`
+            : "Your whole vault syncs into one Google Drive folder. Choose it before the first sync.")
           .addButton((b) =>
             b.setButtonText("Choose folder…").onClick(() => {
               void (async () => {
                 const token = await this.plugin.getDriveToken();
                 if (!token) { new Notice("Connect Google Drive first."); return; }
                 new DriveFolderPicker(this.app, token, async (choice) => {
-                  this.plugin.settings.driveFolderId = choice.id;
-                  this.plugin.settings.driveFolderName = choice.name;
-                  await this.plugin.saveSettings();
+                  if (this.plugin.isDriveSyncing()) { new Notice("Drive: wait for the sync to finish, then change the folder."); return; }
+                  await this.plugin.setDriveFolder(choice.id, choice.name);
                   rerender();
                 }).open();
               })();
@@ -2253,7 +2436,7 @@ class PASettingTab extends PluginSettingTab {
           );
 
         // ── Automatic sync ────────────────────────────────────────────────
-        new Setting(containerEl).setName("Automatic sync").setHeading();
+        sub("Automatic sync");
 
         // Auto-sync is CORE now: Momentum always syncs on startup and as you edit (debounced,
         // incremental). There's no on/off toggle — it's just how sync works. The only knob left
@@ -2277,35 +2460,8 @@ class PASettingTab extends PluginSettingTab {
           });
 
         // ── Advanced ──────────────────────────────────────────────────────
-        new Setting(containerEl).setName("Advanced").setHeading();
-
-        new Setting(containerEl)
-          .setName("Sync Google Drive pro")
-          .setDesc(driveProOn
-            ? "Pro is active: images, PDFs and every other file type sync as real uploads/downloads. Turn off to sync text and Markdown only."
-            : "Free syncs your text and Markdown notes. Pro adds images, PDFs and every other file type (real binary upload/download). Unlock pro in the section below.")
-          .addToggle((t) =>
-            t.setValue(driveProOn && !!this.plugin.settings.driveSyncBinaries)
-              .setDisabled(!driveProOn)
-              .onChange(async (v) => {
-                this.plugin.settings.driveSyncBinaries = v;
-                await this.plugin.saveSettings();
-              })
-          );
-
-        new Setting(containerEl)
-          .setName("Sync Obsidian appearance & plugins")
-          .setDesc(driveProOn
-            ? "Replicate your look and enabled plugins across devices: theme, snippets, hotkeys, and which plugins are on. Your tokens and window layout are never synced (only safe config files travel)."
-            : "🔒 unlock pro below to replicate your theme, plugins and hotkeys across devices. Your tokens and window layout are never synced.")
-          .addToggle((t) =>
-            t.setValue(driveProOn && !!this.plugin.settings.driveSyncObsidianConfig)
-              .setDisabled(!driveProOn)
-              .onChange(async (v) => {
-                this.plugin.settings.driveSyncObsidianConfig = v;
-                await this.plugin.saveSettings();
-              })
-          );
+        sub("Advanced");
+        // (The pro toggles — all file types, appearance & plugins — live in the Momentum pro card.)
 
         new Setting(containerEl)
           .setName("Conflict resolution")
@@ -2324,7 +2480,7 @@ class PASettingTab extends PluginSettingTab {
           });
 
         // ── Actions ───────────────────────────────────────────────────────
-        new Setting(containerEl).setName("Actions").setHeading();
+        sub("Actions");
 
         new Setting(containerEl)
           .setName("Open drive browser")
@@ -2351,7 +2507,7 @@ class PASettingTab extends PluginSettingTab {
     }
 
     // ── Momentum Pro ──────────────────────────────────────────────────────
-    new Setting(containerEl).setName("Momentum pro").setHeading();
+    containerEl = card("Momentum pro");
     const proOn = this.plugin.isProEnabled();
 
     // What Pro unlocks — shown always, so people know exactly what they're getting.
@@ -2379,6 +2535,41 @@ class PASettingTab extends PluginSettingTab {
           : proOn
             ? "Active — thank you!"
             : `A one-time unlock (${PRO_PRICE}) for the features above.`,
+      );
+
+    // Pro features of the Google Drive sync. They only do something with Drive on and connected,
+    // so outside that they're shown disabled with a pointer to the Google Drive card.
+    const driveReady = !!this.plugin.settings.googleDriveEnabled && !!this.plugin.settings.driveToken;
+    sub("Google Drive pro features");
+    new Setting(containerEl)
+      .setName("Sync every file type")
+      .setDesc(!proOn
+        ? "Free syncs your text and Markdown notes. Pro adds images, PDFs and every other file type."
+        : driveReady
+          ? "Images, PDFs and every other file type sync as real uploads/downloads. Turn off to sync text and Markdown only."
+          : "Turn on Google Drive sync above to use this.")
+      .addToggle((t) =>
+        t.setValue(proOn && !!this.plugin.settings.driveSyncBinaries)
+          .setDisabled(!proOn || !driveReady)
+          .onChange(async (v) => {
+            this.plugin.settings.driveSyncBinaries = v;
+            await this.plugin.saveSettings();
+          })
+      );
+    new Setting(containerEl)
+      .setName("Sync Obsidian appearance & plugins")
+      .setDesc(!proOn
+        ? "🔒 replicate your theme, plugins and hotkeys across devices. Your tokens and window layout are never synced."
+        : driveReady
+          ? "Replicate your look and enabled plugins across devices: theme, snippets, hotkeys, and which plugins are on. Your tokens and window layout are never synced (only safe config files travel)."
+          : "Turn on Google Drive sync above to use this.")
+      .addToggle((t) =>
+        t.setValue(proOn && !!this.plugin.settings.driveSyncObsidianConfig)
+          .setDisabled(!proOn || !driveReady)
+          .onChange(async (v) => {
+            this.plugin.settings.driveSyncObsidianConfig = v;
+            await this.plugin.saveSettings();
+          })
       );
 
     if (!PRO_BETA_FREE && !proOn) {

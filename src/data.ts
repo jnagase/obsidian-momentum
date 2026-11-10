@@ -1039,10 +1039,14 @@ export class PADataStore {
   async migrateToBoardNotes(): Promise<number> {
     const byBoard = planBoardConsolidation(this.loadTasksFolderMode());
     let migrated = 0;
+    // Paths whose task actually landed in a board note. Only these are trashed: a note that
+    // wasn't loaded (unparseable YAML, still downloading via sync) stays where it is, untouched.
+    const consolidated = new Set<string>();
     for (const [board, boardTasks] of byBoard) {
       let merged = await this.readBoardEntries(board);
       for (const t of boardTasks) merged = upsertTaskEntry(merged, taskDomainToEntry({ ...t, id: t.id || cryptoId() }));
       await this.writeBoardNote(board, merged); // write the board note FIRST
+      for (const t of boardTasks) if (t.path) consolidated.add(t.path);
       migrated += boardTasks.length;
     }
     // Only now trash the sources (reversible — Obsidian trash). Board notes (type task-board) stay.
@@ -1050,11 +1054,17 @@ export class PADataStore {
     if (root instanceof TFolder) {
       for (const c of [...root.children]) {
         if (c instanceof TFolder && c.name !== "_orphaned") {
-          // Board folders and the Lists/ mirror folder: trash their notes, then the empty folder.
-          for (const f of [...c.children]) if (f instanceof TFile) { try { await this.removeFile(f); } catch { /* retry next run */ } }
+          // Lists/ holds only generated mirrors (safe to trash). Board folders: trash only the
+          // notes that were consolidated, then the folder if it ended up empty.
+          const isMirrors = c.name === "Lists";
+          for (const f of [...c.children]) {
+            if (!(f instanceof TFile)) continue;
+            if (!isMirrors && !consolidated.has(f.path)) continue;
+            try { await this.removeFile(f); } catch { /* retry next run */ }
+          }
           const still = this.app.vault.getAbstractFileByPath(c.path);
           if (still instanceof TFolder && still.children.length === 0) await this.app.fileManager.trashFile(still).catch(() => {});
-        } else if (c instanceof TFile && c.extension === "md" && str(this.frontmatter(c).type) === "task") {
+        } else if (c instanceof TFile && c.extension === "md" && consolidated.has(c.path)) {
           try { await this.removeFile(c); } catch { /* leftover loose root note → retry next run */ }
         }
       }

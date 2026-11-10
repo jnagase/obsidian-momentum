@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { MomentumStore } from "../mcp/src/store.mjs";
-import { mkdtemp, rm, readFile } from "node:fs/promises";
+import { mkdtemp, rm, readFile, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -15,6 +15,10 @@ let store: InstanceType<typeof MomentumStore>;
 
 beforeEach(async () => {
   vault = await mkdtemp(join(process.env.KIROCREW_SCRATCH || tmpdir(), "momentum-mcp-"));
+  // Pin the FOLDER model (one note per task), which these checks read directly. Since 0.9.2 an
+  // empty vault defaults to board notes; that path is covered at the end of this file.
+  await mkdir(join(vault, "Momentum Life", "Tasks", "My Tasks"), { recursive: true });
+  await writeFile(join(vault, "Momentum Life", "Tasks", "My Tasks", "Seed.md"), '---\ntype: "task"\ntitle: "Seed"\n---\n');
   store = new MomentumStore(vault, "Momentum Life");
 });
 afterEach(async () => { await rm(vault, { recursive: true, force: true }); });
@@ -55,5 +59,20 @@ describe("MCP createTask honours the requested column", () => {
     const created = await store.createTask({ title: "Move me", status: "backlog" });
     await store.updateTask(created.path, { status: "in-progress" });
     expect(await statusOf(created.path)).toBe("in progress");
+  });
+});
+
+describe("MCP createTask in board-note mode (empty vault, the 0.9.2 default)", () => {
+  it("resolves a hyphenated column there too", async () => {
+    const fresh = await mkdtemp(join(process.env.KIROCREW_SCRATCH || tmpdir(), "momentum-mcp-bn-"));
+    try {
+      const s = new MomentumStore(fresh, "Momentum Life");
+      const r = await s.createTask({ title: "Buy milk", status: "in-progress", board: "Shopping" });
+      expect(r.status).toBe("in progress");
+      const all = (await s.loadTasks()) as { title: string; status: string }[];
+      expect(all.find((t) => t.title === "Buy milk")?.status).toBe("in progress");
+    } finally {
+      await rm(fresh, { recursive: true, force: true });
+    }
   });
 });

@@ -340,17 +340,29 @@ export class MomentumStore {
   // ---- Board-note mode (detected by PRESENCE of a Tasks/*.md tagged `task-board`, since the MCP
   // can't read the plugin's device flag in data.json). All board-note helpers mirror src/data.ts. --
   boardNoteRel(board) { return `Tasks/${safeName(this.boardOrDefault(board))}.md`; }
+  // Since 0.9.2 board notes are the plugin's DEFAULT. Mode is decided from the vault itself:
+  //  1. any board note (`type: task-board`) → board-note mode;
+  //  2. else any per-task note still in the folder model → folder mode (an older plugin, or a
+  //     vault the plugin hasn't consolidated yet — it will pick these notes up when it does);
+  //  3. else (empty / brand-new vault) → board-note mode, matching the plugin default. Writing a
+  //     folder-model note here would never be seen: the plugin's one-time consolidation already ran.
   async _boardNoteMode() {
     const base = this.full("Tasks");
     let entries = [];
-    try { entries = await fs.readdir(base, { withFileTypes: true }); } catch { return false; }
+    try { entries = await fs.readdir(base, { withFileTypes: true }); } catch { return true; }
+    let legacy = false;
     for (const e of entries) {
       if (e.isFile() && e.name.endsWith(".md")) {
         const m = await this.fmOf(path.join(base, e.name));
         if (str(m.type) === "task-board") return true;
+        if (str(m.type) === "task") legacy = true;
+      } else if (!legacy && e.isDirectory() && e.name !== "Lists" && e.name !== "_orphaned") {
+        let kids = [];
+        try { kids = await fs.readdir(path.join(base, e.name), { withFileTypes: true }); } catch { /* skip */ }
+        if (kids.some((k) => k.isFile() && k.name.endsWith(".md"))) legacy = true;
       }
     }
-    return false;
+    return !legacy;
   }
   async _readBoardEntries(board) {
     const raw = await this.readRaw(this.boardNoteRel(board));

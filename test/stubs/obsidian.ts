@@ -75,7 +75,24 @@ export class Modal {
   }
 }
 
-/** Marker types the plugin imports as values in a few places. */
+/** Marker types the plugin imports as values in a few places. Fields are filled by test vaults. */
 export class Plugin {}
-export class TFile {}
-export class TFolder {}
+export class TFile {
+  path = "";
+  name = "";
+  basename = "";
+  extension = "";
+  parent: TFolder | null = null;
+  stat = { mtime: 0, ctime: 0, size: 0 };
+}
+export class TFolder {
+  path = "";
+  name = "";
+  parent: TFolder | null = null;
+  children: (TFile | TFolder)[] = [];
+}
+
+/** Same contract as Obsidian's: forward slashes, no duplicate/leading/trailing slashes. */
+export function normalizePath(p: string): string {
+  return p.replace(/\\/g, "/").replace(/\/+/g, "/").replace(/^\/|\/$/g, "");
+}

@@ -452,6 +452,13 @@ aposentam no modo ON; órfãs vão pra `Tasks/_orphaned.md` (type `task-orphaned
   (esperar exit 0). Confirmar também que o `main.js` publicado não contém `child_process`
   (ver seção review).
 - **Mensagens de commit sem `!`** (o history expansion do bash quebra) — usar aspas simples.
+- **`git push` sempre num comando SOZINHO**, com o branch/tag escrito por extenso
+  (`git push -u origin release/0.9.2`, `git push origin 0.9.2`). O Kiro Crew bloqueia o push quando
+  ele vem num bloco `{ ...; }` com outros comandos ou com variável/substituição (`$(...)`) por perto
+  (regra `git-publish-target-unverifiable`) — e aí **nenhum** comando do bloco roda.
+- **Não rodar dois shells em paralelo que dependem um do outro** (ex.: criar arquivo de notas e
+  `gh release edit` ao mesmo tempo, ou um `rm` de limpeza junto): a ordem não é garantida e o
+  arquivo some antes de ser lido. Sequencial.
 - Atualizar as notas da release depois que a Action criar: `gh release edit X --notes-file <arquivo>`.
 
 ## Armadilhas da review da comunidade
@@ -459,8 +466,8 @@ aposentam no modo ON; órfãs vão pra `Tasks/_orphaned.md` (type `task-orphaned
   - **Nada de `child_process` / execução de shell** no código publicado — vira flag de
     "Risk"/"Shell Execution" e derruba o score. Se precisar de ponte local pessoal, manter
     fora do build da comunidade.
-  - Regra `obsidianmd/prefer-create-el`: usar `createDiv()` / `createEl()`, **nunca**
-    `document.createElement`. (`activeDocument.createElementNS` para SVG é OK e necessário.)
+  - Regra `obsidianmd/prefer-create-el`: usar `createDiv()` / `createSpan()` / `createEl()`,
+    **nunca** `document.createElement` (e `createEl("span")` também é sinalizado — ver abaixo). (`activeDocument.createElementNS` para SVG é OK e necessário.)
   - **Não usar `eslint-disable` de `@typescript-eslint/no-deprecated`** — a review proíbe
     (e comentário de disable sem descrição também vira erro). Corrigir a causa raiz.
     Ex.: `PluginSettingTab.display()` é deprecado desde 1.13.0 → extraímos o corpo para
@@ -468,9 +475,36 @@ aposentam no modo ON; órfãs vão pra `Tasks/_orphaned.md` (type `task-orphaned
   - O warning **`getSettingDefinitions()`** (API declarativa de settings do 1.13) é só
     **recomendação** — decidimos NÃO migrar por ora (a aba tem partes dinâmicas e subiria o
     `minAppVersion`). Não derruba o score ("Excellent").
-- **"No release matches your manifest version"** no portal costuma ser cache/atraso — se a
-  release com a tag certa existe, o rótulo atualiza sozinho; clicar em **"Review branch"**
-  força o re-scan.
+- **"No release matches your manifest version"** = o `manifest.json` do `main` aponta pra uma versão
+  **sem release**. Primeiro conferir se a tag foi enviada (`git ls-remote --tags origin X`); se não
+  foi, **é isso** — criar e enviar a tag. Só se a release existir é cache: clicar em
+  **"Review branch"** força o re-scan.
+- **Tag esquecida quebra a instalação pra TODO MUNDO (aconteceu na 0.9.2, ~15 h):** o Obsidian
+  lê a versão do `manifest.json` do `main` e baixa os assets da release com esse número. Merge do
+  PR de release sem tag → `main` diz `X`, release `X` não existe → **instalar/atualizar falha em
+  qualquer device** (o celular mostrava "Install failed"). Quem já tinha o plugin segue rodando.
+  Não é incompatibilidade de device. **Regra:** assim que o usuário avisar do merge, na MESMA
+  resposta: `git fetch` + fast-forward do `main` → `git tag X <merge commit>` → `git push origin X`
+  → esperar a Action → `gh release list` (X = Latest) → baixar os 3 assets e `gh attestation verify`
+  em cada → `grep child_process main.js` = 0 → `gh release edit X --notes-file`. Também conferir que
+  `https://github.com/jnagase/obsidian-momentum/releases/download/X/main.js` responde 200.
+- **Avisos recorrentes da review e como evitar (corrigidos na 0.9.3):**
+  - `no-unsafe-argument/call/member-access/assignment/return` em `flatMap`, `matchAll`,
+    `Object.fromEntries`, `trimEnd`: a review tipa com o `lib` do `tsconfig.json`; com lib só até
+    ES2018 essas funções viram `any` (localmente passava por causa de outros `@types`). **Fix:**
+    `lib` inclui `ES2019`, `ES2020`, `ES2021`. Ao usar API JS nova (ES2022+: `at`, `Object.hasOwn`,
+    `structuredClone`…), **adicionar o lib correspondente** antes.
+  - `obsidianmd/prefer-create-el` também pega `el.createEl("span", …)` → usar **`createSpan()`**
+    (e `createDiv()` pra div). `createEl` fica pros outros tags (`strong`, `ul`, `li`…).
+  - **CSS lint roda também em `site/styles.css`** (alvo Obsidian 1.6.5): evitar
+    `text-decoration-thickness`/propriedades `text-decoration-*` parciais e fontes de sistema
+    estendidas (`ui-monospace`, `ui-sans-serif`, `system-ui`…). Usar fontes nomeadas
+    (`SFMono-Regular, Menlo, Consolas, monospace`).
+  - `getSettingDefinitions()` continua só recomendação (não migrar).
+- **Antes de abrir o PR de release, rodar a review "local":** `tsc`, `eslint src` e também
+  `eslint src --rule` com as `@typescript-eslint/no-unsafe-*` como `error` (devem dar 0), e
+  `grep -rn 'createEl("span"\|document.createElement' src` (deve dar 0). A review do portal só roda
+  numa release nova, então aviso que escapa só some na versão seguinte.
 
 ## Modal "What's new"
 - `src/whatsnew.ts` tem um `CHANGELOG` versionado + rastreio de `lastSeenVersion` nas

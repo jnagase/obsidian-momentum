@@ -61,14 +61,14 @@ a {
   text-underline-offset: 2px;
 }
 
-a:hover { text-decoration-thickness: 2px; }
+a:hover { opacity: 0.8; }
 
 code {
   background: #f2f2f5;
   border-radius: 4px;
   padding: 0.1em 0.35em;
   font-size: 0.9em;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: SFMono-Regular, Menlo, Consolas, monospace;
 }
 
 .back {

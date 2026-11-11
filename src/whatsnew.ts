@@ -6,6 +6,17 @@ export interface ChangeEntry { version: string; sections: ChangeSection[]; }
 /** Release notes shown in the "What's new" dialog, newest first. */
 export const CHANGELOG: ChangeEntry[] = [
   {
+    version: "0.9.3",
+    sections: [
+      {
+        title: "Improved — Code quality",
+        items: [
+          "Behind-the-scenes cleanup from the Obsidian community review: stricter typing and Obsidian's own helpers for building the settings screen. Nothing changes in how the plugin works, and nothing is required from you.",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.9.2",
     sections: [
       {

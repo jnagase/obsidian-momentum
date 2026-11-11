@@ -2369,7 +2369,7 @@ class PASettingTab extends PluginSettingTab {
     // wise. Styled neutrally (see .pa-drive-sot-warning in styles.css).
     const driveInfo = containerEl.createDiv({ cls: "pa-drive-sot-warning" });
     driveInfo.createEl("strong", { text: "Google Drive is the source of truth." });
-    driveInfo.createEl("span", {
+    driveInfo.createSpan({
       text: " When sync is on, changes made on Drive win and flow to every device — including "
         + "deletions. It's a good idea to back up your vault before the first sync.",
     });
@@ -2500,7 +2500,7 @@ class PASettingTab extends PluginSettingTab {
         // sync channel. Spelling this out here stops the "why didn't my tasks sync?" confusion.
         const tasksNote = containerEl.createDiv({ cls: "pa-drive-tasks-note" });
         tasksNote.createEl("strong", { text: "Note: " });
-        tasksNote.createEl("span", {
+        tasksNote.createSpan({
           text: "Google Drive sync never syncs your tasks. To sync tasks across devices, enable Google tasks sync in the tasks section above.",
         });
       }

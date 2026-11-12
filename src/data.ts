@@ -12,6 +12,7 @@ import { mapTransaction, mapMealLog, mapWorkout, computePace, deriveWorkoutKind,
   taskDomainToEntry, taskEntryToDomain, renderBoardNoteBody, planBoardConsolidation,
   sortTaskEntries, upsertTaskEntry, patchTaskEntry, removeTaskEntry, boardNoteGoogleIds } from "./loaders";
 import { JournalEntry, CHECKIN_QUESTIONS, checkinTags } from "./journal";
+import { HealthDay, upsertByExternalId } from "./healthTransforms";
 
 /** Root folder inside the vault that holds all Personal Assistant data. */
 export let DATA_ROOT = "Momentum Life";
@@ -2579,6 +2580,134 @@ export class PADataStore {
   }
 
   // ============================================================
+  // GOOGLE HEALTH IMPORT (beta, read-only from Google)
+  // Imported items carry `source: "google-health"` + `external_id`; manual items have neither and
+  // are never touched. Weight/water per-day values written by Google are tracked in a `google`
+  // map so a value the user typed (or corrected) always wins and is never overwritten.
+  // ============================================================
+
+  /** Upsert imported ledger entries by external_id, month by month. Returns entries written. */
+  private async upsertImportedLedger<T extends LedgerItem>(cfg: MonthLedgerConfig<T>, entries: FM[], dates: Set<string>): Promise<number> {
+    const byMonth = new Map<string, FM[]>();
+    for (const d of dates) if (!byMonth.has(monthKeyOf(d))) byMonth.set(monthKeyOf(d), []);
+    for (const e of entries) {
+      const mk = monthKeyOf(str(e.date));
+      if (!mk) continue;
+      const arr = byMonth.get(mk); if (arr) arr.push(e); else byMonth.set(mk, [e]);
+    }
+    let written = 0;
+    for (const [mk, incoming] of byMonth) {
+      const rel = this.monthNoteRel(cfg, mk);
+      const existing = await this.readMonthEntries(rel);
+      const monthDates = new Set([...dates].filter((d) => monthKeyOf(d) === mk));
+      const r = upsertByExternalId(existing, incoming, monthDates);
+      if (r.changed) { await this.writeMonthNote(cfg, mk, r.entries); written += incoming.length; }
+    }
+    return written;
+  }
+
+  /** Watch workouts → Fitness month notes (calendar). */
+  async upsertGoogleWorkouts(entries: FM[], dates: Set<string>): Promise<number> {
+    return this.upsertImportedLedger(this.fitnessLedgerCfg(), entries, dates);
+  }
+
+  /** Google nutrition logs → Nutrition month notes (meal logs). */
+  async upsertGoogleMealLogs(entries: FM[], dates: Set<string>): Promise<number> {
+    return this.upsertImportedLedger(this.nutritionLedgerCfg(), entries, dates);
+  }
+
+  /** Fitness/Health/Health YYYY-MM <Month>.md */
+  private healthNoteRel(monthKey: string): string {
+    return `Fitness/Health/Health ${monthKey} ${monthName(monthKey)}.md`;
+  }
+
+  /** A health note's `days` map, read from the raw text (single-line JSON written by buildDoc). */
+  private async readHealthDays(rel: string): Promise<Record<string, HealthDay>> {
+    const f = this.fileAt(rel);
+    if (!f) return {};
+    try {
+      const { fmText } = this.splitFrontmatter(await this.app.vault.read(f));
+      const m = /^days:\s*(.*)$/m.exec(fmText);
+      if (m) { const v: unknown = JSON.parse(m[1]); if (v && typeof v === "object") return v as Record<string, HealthDay>; }
+    } catch { /* fall back to the metadata cache */ }
+    return coerce<Record<string, HealthDay>>(this.frontmatter(f).days, {});
+  }
+
+  /** All imported daily health metrics, across every month note. */
+  loadHealthDays(): Record<string, HealthDay> {
+    const out: Record<string, HealthDay> = {};
+    for (const f of this.listMarkdown("Fitness/Health")) {
+      const fm = this.frontmatter(f);
+      if (str(fm.type) !== "health-month") continue;
+      Object.assign(out, coerce<Record<string, HealthDay>>(fm.days, {}));
+    }
+    return out;
+  }
+
+  /** Merge imported daily metrics into the health month notes. Returns days changed. */
+  async mergeHealthDays(days: Record<string, HealthDay>): Promise<number> {
+    const byMonth = new Map<string, string[]>();
+    for (const d of Object.keys(days)) {
+      const mk = monthKeyOf(d); const arr = byMonth.get(mk); if (arr) arr.push(d); else byMonth.set(mk, [d]);
+    }
+    let changed = 0;
+    for (const [mk, ds] of byMonth) {
+      const rel = this.healthNoteRel(mk);
+      const cur = await this.readHealthDays(rel);
+      let dirty = false;
+      for (const d of ds) {
+        const next = { ...(cur[d] ?? {}), ...days[d] };
+        if (JSON.stringify(next) !== JSON.stringify(cur[d] ?? {})) { cur[d] = next; dirty = true; changed++; }
+      }
+      if (!dirty) continue;
+      const sorted = Object.fromEntries(Object.keys(cur).sort().map((k) => [k, cur[k]]));
+      await this.writeFile(rel, this.buildDoc({ type: "health-month", month: mk, source: "google-health", days: sorted }, renderHealthBody(mk, sorted)));
+    }
+    return changed;
+  }
+
+  /** Shared "Google fills, the user wins" rule for a {date: value} log note. */
+  private async applyGoogleDailyLog(rel: string, type: string, title: string, values: Record<string, number>): Promise<number> {
+    const dates = Object.keys(values);
+    if (!dates.length) return 0;
+    let n = 0;
+    const apply = (fm: FM) => {
+      const log = coerce<Record<string, number>>(fm.log, {});
+      const google = coerce<Record<string, number>>(fm.google, {});
+      for (const d of dates) {
+        const v = values[d];
+        // Write only an empty day, or a day still holding the value Google itself wrote last time.
+        if (log[d] === undefined || (google[d] !== undefined && log[d] === google[d])) {
+          if (log[d] !== v) { log[d] = v; n++; }
+          google[d] = v;
+        }
+      }
+      fm.log = log; fm.google = google;
+    };
+    const f = this.fileAt(rel);
+    if (f) {
+      const before = JSON.stringify(this.frontmatter(f).log ?? {});
+      await this.patchFrontmatter(f, (fm) => { apply(fm); if (JSON.stringify(fm.log) !== before) fm.modified = new Date().toISOString(); });
+      return n;
+    }
+    const fm: FM = { type };
+    apply(fm);
+    fm.modified = new Date().toISOString();
+    await this.writeFile(rel, this.buildDoc(fm, `# ${title}\n`));
+    return n;
+  }
+
+  /** Google weights → Fitness/weight.md (D3). Manual entries always win. */
+  async applyGoogleWeights(weights: Record<string, number>): Promise<number> {
+    return this.applyGoogleDailyLog("Fitness/weight.md", "weight-log", "Body weight log", weights);
+  }
+
+  /** Google hydration → Nutrition/water.md. Manual entries always win. */
+  async applyGoogleWater(liters: Record<string, number>): Promise<number> {
+    return this.applyGoogleDailyLog("Nutrition/water.md", "water-log", "Water log", liters);
+  }
+
+  // ============================================================
   // JOURNAL (Journal/YYYY/YYYY-MM-DD.md — one entry per day)
   // ============================================================
 
@@ -2938,6 +3067,27 @@ function boardsBody(title: string, boards: Board[]): string {
 function splitsBody(splits: Split[]): string {
   const lines = splits.map((s) => `- **${s.name}**`);
   return "# Workout splits\n\n" + (lines.length ? lines.join("\n") + "\n" : "_No splits yet._\n");
+}
+
+/** Readable body of a health month note (regenerated on every write; data lives in `days`). */
+function renderHealthBody(monthKey: string, days: Record<string, HealthDay>): string {
+  const cell = (v: number | undefined, fmt: (n: number) => string) => (v == null ? "" : fmt(v));
+  const hm = (min: number) => `${Math.floor(min / 60)}h${String(Math.round(min % 60)).padStart(2, "0")}`;
+  const lines = [
+    `# Health ${monthKey} ${monthName(monthKey)}`,
+    "",
+    "Imported from Google Health (read-only). Edit your own logs in Fitness and Nutrition.",
+    "",
+    "| Date | Steps | Distance | Calories | Active min | Resting HR | Sleep | Water | Weight |",
+    "|---|---|---|---|---|---|---|---|---|",
+  ];
+  for (const d of Object.keys(days).sort().reverse()) {
+    const x = days[d];
+    lines.push(`| ${d} | ${cell(x.steps, (n) => n.toLocaleString("en-US"))} | ${cell(x.distanceKm, (n) => `${n} km`)} | `
+      + `${cell(x.caloriesKcal, (n) => `${n} kcal`)} | ${cell(x.activeMinutes, String)} | ${cell(x.restingHr, (n) => `${n} bpm`)} | `
+      + `${cell(x.sleepMin, hm)} | ${cell(x.waterL, (n) => `${n} L`)} | ${cell(x.weightKg, (n) => `${n} kg`)} |`);
+  }
+  return lines.join("\n") + "\n";
 }
 
 function cryptoId(): string {

@@ -1,0 +1,16 @@
+name = "momentum-google-health"
+main = "src/index.js"
+compatibility_date = "2024-11-01"
+
+# Google Health OAuth RELAY — bring-your-own-client. Independent from the Tasks
+# (momentum-google) and Drive (momentum-google-drive) brokers.
+#
+# It holds NO secrets: there is no `wrangler secret put` for this worker. Each user signs in
+# with their own Google client; this worker only bounces the one-time code back to Obsidian.
+workers_dev = true
+
+# Custom domain. Must match healthRelayHost in ../health-domain.json.
+# First-level subdomain of jnagase.com so Cloudflare Universal SSL covers it automatically.
+[[routes]]
+pattern = "momentumlife-health.jnagase.com"
+custom_domain = true

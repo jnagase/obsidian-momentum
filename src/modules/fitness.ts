@@ -62,7 +62,7 @@ export class FitnessModule {
     this.renderCalendar(cols, workouts);
     this.renderBodyWeight(cols);
     this.renderWeightProgress(cols, exercises, workouts);
-    this.renderCardioProgress(cols, exercises, workouts);
+    this.renderSleepChart(cols);
 
     this.renderWorkoutPlan(root, exercises);
     if (this.selectedSplit) this.renderWorkoutEditor(root, exercises);
@@ -142,12 +142,31 @@ export class FitnessModule {
   }
 
   // ---- Calendar ----
+  /** A small emoji for a workout, from its name (watch names come localized, e.g. "Caminhada"). */
+  private workoutEmoji(name: string): string {
+    const n = name.toLowerCase();
+    const map: [RegExp, string][] = [
+      [/camin|walk|hik|trilh/, "🚶"], [/corr|run|esteira|treadmill|jog/, "🏃"],
+      [/bik|cicl|bicic|spin/, "🚴"], [/nata|swim|pisc/, "🏊"], [/pilat|yoga|along|stretch/, "🧘"],
+      [/fute|soccer|football/, "⚽"], [/tênis|tenis|tennis|padel|beach/, "🎾"], [/basq|basket/, "🏀"],
+      [/danc|danç/, "💃"], [/for[çc]a|strength|weight|muscula|gym|hiit|crossfit/, "🏋️"],
+    ];
+    for (const [re, e] of map) if (re.test(n)) return e;
+    return "💪";
+  }
+
+  /** "1h50" / "45m". */
+  private fmtMinutes(min: number): string {
+    const m = Math.round(min);
+    return m >= 60 ? `${Math.floor(m / 60)}h${String(m % 60).padStart(2, "0")}` : `${m}m`;
+  }
+
   private renderCalendar(root: HTMLElement, workouts: Workout[]): void {
-    const splitsByDay = new Map<string, string[]>();
+    const byDay = new Map<string, Workout[]>();
     workouts.forEach((w) => {
-      const arr = splitsByDay.get(w.date) || [];
-      if (!arr.includes(w.split)) arr.push(w.split);
-      splitsByDay.set(w.date, arr);
+      const arr = byDay.get(w.date) || [];
+      arr.push(w);
+      byDay.set(w.date, arr);
     });
 
     const card = root.createDiv({ cls: "pa-panel" });
@@ -170,10 +189,18 @@ export class FitnessModule {
       const ds = `${this.calYear}-${String(this.calMonth + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
       const cell = days.createDiv({ cls: "pa-cal-cell" });
       cell.createDiv({ text: String(day), cls: "pa-cal-day" });
-      const sp = splitsByDay.get(ds);
-      if (sp && sp.length) {
+      const dayW = byDay.get(ds);
+      if (dayW && dayW.length) {
         cell.addClass("worked");
-        cell.createDiv({ text: sp.join(" "), cls: "pa-cal-tag" });
+        // Icons (one per distinct activity, max 3) + total time — readable at any width, instead
+        // of a run-on list of names. The full list stays in the tooltip.
+        const names = dayW.map((w) => this.workoutLabel(w));
+        const icons = [...new Set(names.map((n) => this.workoutEmoji(n)))];
+        cell.createDiv({ text: icons.slice(0, 3).join("") + (icons.length > 3 ? "+" : ""), cls: "pa-cal-icons" });
+        const total = dayW.reduce((a, w) => a + (w.duration || 0), 0);
+        if (total > 0) cell.createDiv({ text: this.fmtMinutes(total), cls: "pa-cal-tag" });
+        cell.setAttr("title", names.join(" · "));
+        cell.setAttr("aria-label", `${ds}: ${names.join(", ")}`);
       }
       cell.addClass("pa-clickable");
       cell.onclick = () => { this.selectedDate = ds; this.ctx.refresh(); };
@@ -318,24 +345,34 @@ export class FitnessModule {
     drawLineChart(card, labels, series, { height: 220, format: (n) => `${n} ${this.wUnit()}` });
   }
 
-  // ---- Cardio progress (distance over time, cardio exercises only) — sibling to weight progress ----
-  private renderCardioProgress(root: HTMLElement, exercises: Exercise[], workouts: Workout[]): void {
+  // ---- Sleep (from Google health) — sibling to weight progress. Replaced the old "Cardio
+  // progress" chart, which stayed empty for most users (it only plotted cardio plan exercises). ----
+  private renderSleepChart(root: HTMLElement): void {
     const card = root.createDiv({ cls: "pa-panel" });
-    card.createEl("h3", { text: "🏃 Cardio progress", cls: "pa-panel-title" });
-
-    const splitWorkouts = workouts.filter((w) => w.split === this.weightSplit).sort((a, b) => a.date.localeCompare(b.date));
-    const labels = splitWorkouts.map((w) => w.date.slice(5));
-    const exs = exercises.filter((e) => e.split === this.weightSplit && e.kind === "cardio");
-    const series: LineSeries[] = exs.map((ex, i) => ({
-      name: ex.name,
-      color: SERIES_COLORS[i % SERIES_COLORS.length],
-      values: splitWorkouts.map((w) => {
-        const found = w.exercises.find((we) => we.exercise === ex.name);
-        return found && found.distance != null ? found.distance : null;
-      }),
-    })).filter((s) => s.values.some((v) => v != null));
-
-    drawLineChart(card, labels, series, { height: 220 }); // empty series -> empty chart when the split has no cardio
+    card.createEl("h3", { text: "😴 Sleep", cls: "pa-panel-title" });
+    const days = this.ctx.store.loadHealthDays();
+    // Last 30 calendar days, gaps kept as null so a missing night shows as a break in the line.
+    const today = new Date();
+    const labels: string[] = [];
+    const values: Array<number | null> = [];
+    for (let i = 29; i >= 0; i--) {
+      const d = new Date(today.getFullYear(), today.getMonth(), today.getDate() - i);
+      const key = ymd(d);
+      labels.push(key.slice(5));
+      const min = days[key]?.sleepMin;
+      values.push(min ? Math.round((min / 60) * 10) / 10 : null);
+    }
+    const nights = values.filter((v): v is number => v != null);
+    if (!nights.length) {
+      card.createDiv({ cls: "pa-muted", text: "No sleep data yet. Connect Google health in settings to import it from your watch." });
+      return;
+    }
+    const avg = nights.reduce((a, b) => a + b, 0) / nights.length;
+    const hm = (h: number) => `${Math.floor(h)}h${String(Math.round((h % 1) * 60)).padStart(2, "0")}`;
+    const summary = card.createDiv({ cls: "pa-weight-summary" });
+    summary.createSpan({ cls: "pa-weight-current", text: hm(nights[nights.length - 1]) });
+    summary.createSpan({ cls: "pa-muted", text: `· last night · ${hm(avg)} average over ${nights.length} nights` });
+    drawLineChart(card, labels, [{ name: "Sleep", color: "#6366f1", values }], { height: 220, goal: 8, goalColor: "#16a34a", format: hm });
   }
 
   // ---- Calendar day detail ----
@@ -344,7 +381,8 @@ export class FitnessModule {
     const dayWorkouts = workouts.filter((w) => w.date === ds);
     const panel = root.createDiv({ cls: "pa-panel pa-active" });
     const top = panel.createDiv({ cls: "pa-active-top" });
-    top.createEl("h3", { text: `🏋️ ${ds} — ${dayWorkouts.length} workout${dayWorkouts.length === 1 ? "" : "s"}`, cls: "pa-panel-title" });
+    const totalMin = dayWorkouts.reduce((a, w) => a + (w.duration || 0), 0);
+    top.createEl("h3", { text: `🏋️ ${ds} — ${dayWorkouts.length} workout${dayWorkouts.length === 1 ? "" : "s"}${totalMin ? ` · ${this.fmtMinutes(totalMin)}` : ""}`, cls: "pa-panel-title" });
     const headActions = top.createDiv({ cls: "pa-active-actions" });
     if (dayWorkouts.length) {
       const delDay = headActions.createEl("button", { text: "🗑", cls: "pa-icon-btn" });
@@ -363,11 +401,51 @@ export class FitnessModule {
     dayWorkouts.forEach((w) => this.renderLoggedWorkout(panel, w));
   }
 
+  /** Display name of a logged workout: the split's name for manual logs, the activity for imports. */
+  private workoutLabel(w: Workout): string {
+    if (w.source) return w.split;
+    const split = this.getSplits().find((s) => s.id === w.split);
+    return split?.name ? `${w.split} — ${split.name}` : w.split;
+  }
+
+  /** Imported (watch) workout: a compact read-only summary card instead of the editable table. */
+  private renderImportedWorkout(panel: HTMLElement, w: Workout): void {
+    const card = panel.createDiv({ cls: "pa-card pa-wk-imported" });
+    const head = card.createDiv({ cls: "pa-wk-imported-head" });
+    head.createSpan({ text: this.workoutEmoji(w.split), cls: "pa-wk-imported-icon" });
+    const titleWrap = head.createDiv({ cls: "pa-wk-imported-title" });
+    titleWrap.createEl("strong", { text: w.split });
+    titleWrap.createSpan({ text: "⌚ from Google health", cls: "pa-wk-source" });
+    const del = head.createEl("button", { text: "🗑", cls: "pa-icon-btn" });
+    del.setAttr("aria-label", "Delete this imported workout");
+    del.onclick = () => new ConfirmModal(this.ctx.app, `Delete this ${w.split} workout (${w.duration} min)? It may come back on the next import while it's still in Google.`, async () => {
+      await this.ctx.store.deleteWorkout(w);
+      this.ctx.refresh();
+    }).open();
+
+    const chips = card.createDiv({ cls: "pa-wk-chips" });
+    const chip = (icon: string, value: string, label: string) => {
+      const c = chips.createDiv({ cls: "pa-wk-chip" });
+      c.createSpan({ text: icon, cls: "pa-wk-chip-icon" });
+      c.createSpan({ text: value, cls: "pa-wk-chip-value" });
+      c.setAttr("aria-label", `${label}: ${value}`);
+    };
+    if (w.duration) chip("⏱", this.fmtMinutes(w.duration), "Duration");
+    const km = w.exercises.reduce((a, we) => a + (we.distance ?? 0), 0);
+    if (km > 0) chip("📍", `${km.toFixed(2).replace(/\.?0+$/, "")} km`, "Distance");
+    if (w.calories) chip("🔥", `${w.calories} kcal`, "Calories");
+    if (w.avgHr) chip("❤️", `${w.avgHr} bpm`, "Average heart rate");
+    if (w.steps) chip("👣", w.steps.toLocaleString(), "Steps");
+    const pace = km > 0 ? computePace(km, w.duration) : null;
+    if (pace != null && /camin|walk|corr|run|esteira|treadmill|hik/i.test(w.split)) chip("🏁", `${pace} min/km`, "Pace");
+  }
+
   private renderLoggedWorkout(panel: HTMLElement, w: Workout): void {
+    if (w.source === "google-health") { this.renderImportedWorkout(panel, w); return; }
     const split = this.getSplits().find((s) => s.id === w.split);
     const card = panel.createDiv({ cls: "pa-card" });
     const head = card.createDiv({ cls: "pa-card-title-row" });
-    head.createEl("strong", { text: `${w.split} - ${split?.name || ""}` });
+    head.createEl("strong", { text: this.workoutLabel(w) });
     // Editable duration for an already-logged session — previously shown as plain text
     // with no way to correct it (e.g. a past-date log that was saved with duration 0).
     const durWrap = head.createDiv({ cls: "pa-logged-dur-wrap" });

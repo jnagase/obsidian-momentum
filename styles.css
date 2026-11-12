@@ -236,6 +236,18 @@
 .pa-cal-cell{flex-direction:column;gap:1px;cursor:default;position:relative}
 .pa-cal-day{font-size:.7rem}
 .pa-cal-tag{font-size:.55rem;font-weight:700;line-height:1}
+.pa-cal-icons{font-size:.9rem;line-height:1.1;letter-spacing:1px}
+/* Imported (watch) workout — compact read-only summary in the day detail. */
+.pa-wk-imported{padding:12px 14px;margin:8px 0;border-radius:10px;background:var(--background-secondary);border:1px solid var(--background-modifier-border);color:var(--text-normal)}
+.pa-wk-imported-head{display:flex;align-items:center;gap:10px}
+.pa-wk-imported-icon{font-size:1.5rem;line-height:1}
+.pa-wk-imported-title{display:flex;flex-direction:column;flex:1;min-width:0}
+.pa-wk-imported-title strong{font-size:1rem}
+.pa-wk-source{font-size:.72rem;color:var(--text-muted)}
+.pa-wk-chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.pa-wk-chip{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:999px;background:var(--background-primary);border:1px solid var(--background-modifier-border);font-size:.8rem;color:var(--text-normal)}
+.pa-wk-chip-icon{font-size:.85rem}
+.pa-wk-chip-value{font-weight:600;font-variant-numeric:tabular-nums}
 .pa-cal-cell.worked{background:var(--interactive-accent);color:var(--text-on-accent);cursor:pointer}
 .pa-cal-cell.selected{outline:2px solid var(--interactive-accent);outline-offset:-2px}
 .pa-cal-legend{display:flex;gap:12px;justify-content:center;margin-top:8px}

@@ -103,6 +103,11 @@ export interface Workout {
   exercises: WorkoutExercise[];
   path: string;
   kind: WorkoutKind; // derived from the exercises' kinds; always present after load
+  /** "google-health" when imported from the watch (read-only summary); absent for manual logs. */
+  source?: string;
+  calories?: number; // kcal — imported workouts
+  avgHr?: number;    // bpm — imported workouts
+  steps?: number;    // imported workouts
 }
 
 export interface Split {

@@ -6,6 +6,26 @@ export interface ChangeEntry { version: string; sections: ChangeSection[]; }
 /** Release notes shown in the "What's new" dialog, newest first. */
 export const CHANGELOG: ChangeEntry[] = [
   {
+    version: "0.9.4",
+    sections: [
+      {
+        title: "New — Google health (beta): your watch in Fitness",
+        items: [
+          "Import from Fitbit, Pixel Watch and your phone: workouts land on the Fitness calendar, nutrition logs in Nutrition, weight and water in their logs, and steps, sleep, heart rate and calories in a monthly health note. Read-only — nothing is written to Google, and your own logs always win.",
+          "You connect it with your own Google Cloud client (about 10 minutes, once) — see the README for the steps. Turn it on under Settings → Google health.",
+          "With several devices, only one imports; the others read its notes. Your client ID and secret are shared through the vault, so the other devices just tap Connect.",
+        ],
+      },
+      {
+        title: "Improved — Fitness",
+        items: [
+          "A new sleep chart (last 30 nights, with your average and an 8-hour goal line) replaces the cardio progress chart.",
+          "The workout calendar shows an icon per activity and the day's total time, and imported workouts open as clean summary cards (time, distance, calories, heart rate, steps).",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.9.3",
     sections: [
       {

@@ -30,7 +30,9 @@ import { AUTH_HOST } from "../src/appdomain";
 // call, catching a host that never appears in these code paths.
 // =====================================================================================
 
-const ALLOWED_HOSTS = new Set([AUTH_HOST, "oauth2.googleapis.com", "tasks.googleapis.com", "www.googleapis.com"]);
+// health.googleapis.com: Google Health import (beta, read-only, the user's OWN OAuth client) —
+// declared in the worker-health privacy page and README.
+const ALLOWED_HOSTS = new Set([AUTH_HOST, "oauth2.googleapis.com", "tasks.googleapis.com", "www.googleapis.com", "health.googleapis.com"]);
 
 /** Only these keys may reach the Google Tasks API. Anything else widens what we declared. */
 const ALLOWED_TASK_KEYS = new Set(["id", "title", "notes", "due", "status", "completed"]);
@@ -141,6 +143,7 @@ describe("Property 10: no undeclared host anywhere in src/", () => {
     "world.openfoodfacts.org": "the nutrition search, documented in README 'Network use & privacy'",
     "api.openfoodfacts.org": "the nutrition search, documented in README 'Network use & privacy'",
     "github.com": "repository link",
+    "accounts.google.com": "Google Health consent page (healthAuth.ts) — opened in the user's browser, never requested by the plugin",
   };
 
   it("names no host beyond the allowed set and the justified non-request list", () => {

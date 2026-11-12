@@ -1,4 +1,4 @@
-import { Plugin, WorkspaceLeaf, PluginSettingTab, App, Setting, TFolder, TFile, Notice, normalizePath } from "obsidian";
+import { Plugin, WorkspaceLeaf, PluginSettingTab, App, Setting, TFolder, TFile, Notice, normalizePath, Platform } from "obsidian";
 import { PADataStore, setDataRoot, planBoardDeletions } from "./data";
 import { PAView, VIEW_TYPE_PA, PAHost, PALocation } from "./view";
 import { PANavView, VIEW_TYPE_PA_NAV } from "./nav";
@@ -15,6 +15,11 @@ import { FileManagerView, VIEW_TYPE_QUICK } from "./quickAccess";
 import { DriveBrowserView, VIEW_TYPE_DRIVE, DriveViewConfig } from "./driveBrowser";
 import { runDriveSync, DriveBaselineStore, VaultFS, DriveConflictStrategy, DEFAULT_CONFLICT_STRATEGY, ConflictChoice, DriveSyncResult, DriveSyncSummary, DriveProgress, acquireDriveLock, releaseDriveLock, isObsidianConfigSyncPath } from "./driveSync";
 import { authorizeDrive, completeDriveAuth, ensureFreshDriveToken, revokeDriveToken, DriveAuthExpiredError, DRIVE_PROTOCOL_ACTION } from "./driveAuth";
+import { authorizeHealth, completeHealthAuth, ensureFreshHealthToken, revokeHealthToken, grantedHealthScopes, HealthAuthExpiredError, HealthClientError, HealthToken, HEALTH_PROTOCOL_ACTION, HEALTH_SCOPES } from "./healthAuth";
+import { HEALTH_REDIRECT_URI } from "./healthdomain";
+import { runHealthSync } from "./healthSync";
+import { decideImporter, importerFromFrontmatter, ImporterInfo } from "./healthImporter";
+import { todayLocal } from "./util";
 import { DriveFolderPicker } from "./driveFolderPicker";
 import { isProActive, proNeedsRecheck, validateLicense, PRO_BETA_FREE, PRO_PRICE, PRO_CHECKOUT_URL, PRO_BETA_OFFER, ProState } from "./pro";
 interface PASettings {
@@ -67,6 +72,13 @@ interface PASettings {
   driveCursor?: string;            // Changes API page token (last clean cycle)
   driveFolderIds?: string[];       // Drive folder ids of our tree (for scoping the account-wide change feed)
   driveFolderMap?: Record<string, string>; // relDir → Drive folder id from the last full walk (incremental edit check)
+  // Google Health (beta, bring-your-own OAuth client). Device-local: the client secret and the
+  // token live only in this device's data.json (never in a vault note, never synced by Drive).
+  googleHealthEnabled?: boolean;
+  healthClientId?: string;
+  healthClientSecret?: string;
+  healthToken?: HealthToken | null;
+  healthLastSync?: string;         // ISO time of the last successful Google Health import
 }
 const DEFAULT_SETTINGS: PASettings = {
   dataRoot: "Momentum Life",
@@ -114,6 +126,7 @@ const DRIVE_DATA_EXCLUDE = new Set<string>([
   "Config/pending-google-deletes.md",
   "Config/known-boards.md",
   "Config/deleted-boards.md",
+  "Config/google-health-debug.md",
 ]);
 /** One synced file's last-sync snapshot (`base` = full text, the 3-way merge base). */
 type DriveBaselineEntry = { fileId: string; md5: string; modifiedTime: string; base?: string };
@@ -229,6 +242,10 @@ export default class MomentumPlugin extends Plugin implements PAHost {
     this.registerObsidianProtocolHandler(DRIVE_PROTOCOL_ACTION, (params) => {
       void completeDriveAuth(params);
     });
+    // Google Health OAuth returns here (obsidian://momentum-health), via the stateless relay.
+    this.registerObsidianProtocolHandler(HEALTH_PROTOCOL_ACTION, (params) => {
+      void completeHealthAuth(params);
+    });
 
     this.addCommand({
       id: "open",
@@ -280,6 +297,12 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       id: "momentum-open-left",
       name: "Momentum: open current page in left sidebar",
       callback: () => void this.openPageIn(this.currentPage, "left"),
+    });
+
+    this.addCommand({
+      id: "sync-google-health",
+      name: "Momentum: import from Google health now (beta)",
+      callback: () => void this.syncGoogleHealth(false),
     });
 
     this.addCommand({
@@ -434,6 +457,12 @@ export default class MomentumPlugin extends Plugin implements PAHost {
       // walk anyway to seed. So "first sync is full, every open after is incremental" — for free.
       if (this.settings.googleDriveEnabled && this.settings.driveToken) {
         window.setTimeout(() => void this.syncGoogleDrive(false, undefined, true), 4000);
+      }
+      // Google Health (beta): pick up the client shared by another device, then import the latest
+      // watch data a few seconds after startup.
+      void this.loadHealthClientFromVault();
+      if (this.settings.googleHealthEnabled && this.settings.healthToken) {
+        window.setTimeout(() => void this.syncGoogleHealth(true), 6000);
       }
       // Optional event-driven Drive sync: watch vault changes and sync (debounced).
       this.registerDriveChangeWatcher();
@@ -1556,6 +1585,217 @@ export default class MomentumPlugin extends Plugin implements PAHost {
     this.registerInterval(this.driveSyncTimer);
   }
 
+  /** Connect Google Health (beta) with the user's OWN OAuth client (bring-your-own). Stores
+   *  healthToken locally; never touches the Tasks or Drive connections. */
+  async connectHealth(): Promise<void> {
+    await this.loadHealthClientFromVault(); // the client may have arrived from another device
+    try {
+      new Notice("Opening Google sign-in for Google health…");
+      const token = await authorizeHealth(
+        { clientId: this.settings.healthClientId ?? "", clientSecret: this.settings.healthClientSecret ?? "" },
+        (url) => { window.open(url, "_blank"); },
+      );
+      this.settings.healthToken = token;
+      this.settings.googleHealthEnabled = true;
+      await this.saveSettings();
+      const granted = grantedHealthScopes(token).length;
+      new Notice(granted === HEALTH_SCOPES.length
+        ? "✓ connected to Google Health (beta)."
+        : `✓ connected to Google Health (beta) — ${granted} of ${HEALTH_SCOPES.length} data types allowed.`);
+      void this.syncGoogleHealth(false); // first import right away (last 30 days)
+    } catch (e) {
+      new Notice(`Google Health connection failed: ${e instanceof Error ? e.message : String(e)}`, 10000);
+    }
+  }
+
+  /** Disconnect Google Health: revoke the grant, drop the token. Vault notes are kept. The
+   *  pasted client ID/secret stay, so reconnecting is one click. */
+  async disconnectHealth(): Promise<void> {
+    const token = this.settings.healthToken;
+    if (!token) return;
+    const outcome = await revokeHealthToken(token);
+    this.settings.healthToken = null;
+    await this.saveSettings();
+    new Notice(outcome.ok
+      ? "✓ Google Health: access revoked and disconnected."
+      : "Google Health: disconnected locally; revocation wasn't confirmed. You can also remove access at myaccount.google.com/permissions.");
+  }
+
+  // ---- Google Health client (bring-your-own): kept in a VAULT note so it travels to every device
+  // with Drive/Obsidian Sync (author decision). Only the client ID + secret — never the token, which
+  // stays per-device in data.json. The note is the source of truth; data.json mirrors it.
+  private static readonly HEALTH_CLIENT_NOTE = "Config/google-health.md";
+
+  /** Pull the client ID/secret from the vault note into settings (when the note has them). */
+  async loadHealthClientFromVault(): Promise<void> {
+    const f = this.store.fileAt(MomentumPlugin.HEALTH_CLIENT_NOTE);
+    if (!f) {
+      // First run after this change: seed the note from what this device already has.
+      if (this.settings.healthClientId || this.settings.healthClientSecret) await this.saveHealthClientToVault();
+      return;
+    }
+    const fm = this.store.frontmatter(f);
+    const id = typeof fm.client_id === "string" ? fm.client_id.trim() : "";
+    const secret = typeof fm.client_secret === "string" ? fm.client_secret.trim() : "";
+    if ((id && id !== this.settings.healthClientId) || (secret && secret !== this.settings.healthClientSecret)) {
+      if (id) this.settings.healthClientId = id;
+      if (secret) this.settings.healthClientSecret = secret;
+      await this.saveSettings();
+    }
+  }
+
+  /** Write the shared Google Health note: client ID/secret + the importer device (idempotent). */
+  async saveHealthClientToVault(importer?: ImporterInfo | null): Promise<void> {
+    const f = this.store.fileAt(MomentumPlugin.HEALTH_CLIENT_NOTE);
+    // Keep the current importer unless a new one is given (a settings edit must not drop it).
+    const keep = importer === undefined ? (f ? importerFromFrontmatter(this.store.frontmatter(f)) : null) : importer;
+    const body = "# Google health client\n\nYour own Google Cloud OAuth client, shared by your devices so you only paste it once. "
+      + "Your sign-in itself is NOT stored here (it stays on each device). To rotate the secret, create a new one in "
+      + "Google Cloud, paste it in settings and delete the old one.\n\n"
+      + "Only the **importer** device imports from Google; the others read the notes it writes. Another device takes over "
+      + "after a day without imports, or when you choose it in settings.\n";
+    const meta: Record<string, unknown> = {
+      type: "google-health-client",
+      client_id: this.settings.healthClientId ?? "",
+      client_secret: this.settings.healthClientSecret ?? "",
+    };
+    if (keep) { meta.importer_device = keep.deviceId; meta.importer_name = keep.name; meta.importer_last = keep.last; }
+    await this.store.writeFile(MomentumPlugin.HEALTH_CLIENT_NOTE, this.store.buildDoc(meta, body));
+  }
+
+  /** The importer device recorded in the shared note, or null. */
+  healthImporter(): ImporterInfo | null {
+    const f = this.store.fileAt(MomentumPlugin.HEALTH_CLIENT_NOTE);
+    return f ? importerFromFrontmatter(this.store.frontmatter(f)) : null;
+  }
+
+  /** A short human name for this device ("Desktop · macOS", "Phone · Android"). */
+  private deviceLabel(): string {
+    const kind = Platform.isMobile ? (Platform.isTablet ? "Tablet" : "Phone") : "Desktop";
+    const os = Platform.isMacOS ? "macOS" : Platform.isWin ? "Windows" : Platform.isLinux ? "Linux"
+      : Platform.isIosApp ? "iOS" : Platform.isAndroidApp ? "Android" : "";
+    return os ? `${kind} · ${os}` : kind;
+  }
+
+  /** Make this device the Google Health importer (records it in the shared note). */
+  async claimHealthImporter(last = ""): Promise<void> {
+    await this.saveHealthClientToVault({ deviceId: this.getDriveDeviceId(), name: this.deviceLabel(), last });
+  }
+
+  /** True when this device is the importer (or none is set yet). */
+  isHealthImporter(): boolean {
+    const imp = this.healthImporter();
+    return !imp || imp.deviceId === this.getDriveDeviceId();
+  }
+
+  private healthClientSaveTimer: number | null = null;
+  /** Debounced vault write while the user types in the settings fields. */
+  queueHealthClientSave(): void {
+    if (this.healthClientSaveTimer !== null) window.clearTimeout(this.healthClientSaveTimer);
+    this.healthClientSaveTimer = window.setTimeout(() => {
+      this.healthClientSaveTimer = null;
+      void this.saveHealthClientToVault();
+    }, 800);
+  }
+
+  private healthSyncing = false;
+
+  /**
+   * Import Google Health into the vault (read-only from Google). First run: last 30 days; then
+   * the last 7 (late watch syncs and edits still land). Silent runs (startup) only notify on
+   * errors. Writes a log to Config/google-health-debug.md (never synced by Drive).
+   */
+  async syncGoogleHealth(silent = false): Promise<void> {
+    if (this.healthSyncing) { if (!silent) new Notice("Google health: a sync is already running."); return; }
+    // Single writer across devices: only the importer device imports (see healthImporter.ts).
+    const decision = decideImporter(this.getDriveDeviceId(), this.healthImporter(), Date.now(), !silent);
+    if (decision.action === "skip") return;
+    if (decision.action === "ask") {
+      const when = decision.importer.last ? new Date(decision.importer.last).toLocaleString() : "not yet";
+      const ok = await new Promise<boolean>((resolve) => {
+        let decided = false;
+        const modal = new ConfirmModal(this.app,
+          `Google health is imported by ${decision.importer.name} (last import: ${when}); this device just reads its notes. Make this device the importer instead?`,
+          () => { decided = true; resolve(true); });
+        modal.onClose = () => { modal.contentEl.empty(); if (!decided) resolve(false); };
+        modal.open();
+      });
+      if (!ok) return;
+    }
+    const token = await this.healthAccessToken();
+    if (!token) { if (!silent) new Notice("Google health: not connected."); return; }
+    this.healthSyncing = true;
+    const notice = silent ? null : new Notice("⏳ Google health: importing…", 0);
+    const lines: string[] = [`## ${new Date().toISOString()}`];
+    try {
+      const today = todayLocal();
+      const back = this.settings.healthLastSync ? 7 : 30;
+      const startD = new Date(); startD.setDate(startD.getDate() - back);
+      const pad = (n: number) => String(n).padStart(2, "0");
+      const startYmd = `${startD.getFullYear()}-${pad(startD.getMonth() + 1)}-${pad(startD.getDate())}`;
+      const endD = new Date(); endD.setDate(endD.getDate() + 1);
+      const endYmd = `${endD.getFullYear()}-${pad(endD.getMonth() + 1)}-${pad(endD.getDate())}`;
+      lines.push(`- range: ${startYmd} → ${today}`);
+      const res = await runHealthSync({
+        token, sink: this.store,
+        granted: this.settings.healthToken ? grantedHealthScopes(this.settings.healthToken) : [],
+        startYmd, endYmd,
+        log: (m) => lines.push(`- ${m}`),
+      });
+      lines.push(`- days=${res.days} workouts=${res.workouts} meals=${res.meals} weights=${res.weights} water=${res.water}`);
+      for (const n of res.notes) lines.push(`- note: ${n}`);
+      for (const er of res.errors) lines.push(`- ERROR: ${er}`);
+      if (!res.errors.length) {
+        this.settings.healthLastSync = new Date().toISOString();
+        await this.saveSettings();
+        await this.claimHealthImporter(this.settings.healthLastSync); // this device is (now) the importer
+        if (decision.action === "import" && decision.reason === "takeover") lines.push("- note: took over as the importer (the previous one was silent for over a day)");
+      }
+      this.app.workspace.getLeavesOfType(VIEW_TYPE_PA).forEach((l) => { if (l.view instanceof PAView) l.view.rerender(); });
+      const summary = `${res.days} days, ${res.workouts} workouts, ${res.meals} meals`;
+      if (res.errors.length) new Notice(`Google health: imported ${summary}, with ${res.errors.length} error(s). See Config/google-health-debug.md.`, 10000);
+      else if (!silent) new Notice(`✓ Google health: imported ${summary}.`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      lines.push(`- FATAL: ${msg}`);
+      new Notice(`Google health sync failed: ${msg}`, 10000);
+    } finally {
+      notice?.hide();
+      this.healthSyncing = false;
+      await this.writeHealthLog(lines);
+    }
+  }
+
+  /** Prepend a run to Config/google-health-debug.md (kept to the last ~40 runs). */
+  private async writeHealthLog(lines: string[]): Promise<void> {
+    try {
+      const path = normalizePath(`${this.settings.dataRoot}/Config/google-health-debug.md`);
+      const f = this.app.vault.getAbstractFileByPath(path);
+      const prev = f instanceof TFile ? await this.app.vault.read(f) : "";
+      const runs = prev.split(/\n(?=## )/).filter((r) => r.trim()).slice(0, 40);
+      const text = [lines.join("\n"), ...runs].join("\n\n") + "\n";
+      if (f instanceof TFile) await this.app.vault.modify(f, text);
+      else await this.app.vault.create(path, text);
+    } catch { /* best-effort */ }
+  }
+
+  /** A fresh Google Health access token, or null when off/disconnected/expired (with a Notice). */
+  async healthAccessToken(): Promise<string | null> {
+    const tok = this.settings.healthToken;
+    if (!this.settings.googleHealthEnabled || !tok) return null;
+    try {
+      const fresh = await ensureFreshHealthToken(tok, {
+        clientId: this.settings.healthClientId ?? "", clientSecret: this.settings.healthClientSecret ?? "",
+      });
+      if (fresh !== tok) { this.settings.healthToken = fresh; await this.saveSettings(); }
+      return fresh.access_token;
+    } catch (e) {
+      if (e instanceof HealthAuthExpiredError) { new Notice("Google health: session expired. Reconnect it in settings.", 10000); return null; }
+      if (e instanceof HealthClientError) { new Notice(e.message, 10000); return null; }
+      throw e;
+    }
+  }
+
   /** Connect Google Drive (beta) via its OWN broker/deep-link. Stores driveToken; never touches
    *  the Tasks token or connection. */
   async connectDrive(): Promise<void> {
@@ -2503,6 +2743,101 @@ class PASettingTab extends PluginSettingTab {
         tasksNote.createSpan({
           text: "Google Drive sync never syncs your tasks. To sync tasks across devices, enable Google tasks sync in the tasks section above.",
         });
+      }
+    }
+
+    // ── Google Health (beta) — bring your own Google OAuth client ─────────────────────────
+    containerEl = card("Google health", true);
+    {
+      const s = this.plugin.settings;
+      const healthConnected = !!s.healthToken;
+      const intro = containerEl.createDiv({ cls: "pa-drive-sot-warning" });
+      intro.createEl("strong", { text: "Reads your watch data into fitness." });
+      intro.createSpan({
+        text: " Steps, sleep, heart rate, workouts, weight and more come from your Google account (Fitbit, "
+          + "Pixel Watch, phone). Read-only: nothing is ever written to Google. You connect with your own "
+          + "Google Cloud client, so your data goes straight from Google to this device.",
+      });
+
+      new Setting(containerEl)
+        .setName("Enable Google health")
+        .setDesc("Off by default. This device only.")
+        .addToggle((t) => t.setValue(!!s.googleHealthEnabled).onChange(async (v) => {
+          s.googleHealthEnabled = v;
+          await this.plugin.saveSettings();
+          rerender();
+        }));
+
+      if (s.googleHealthEnabled) {
+        sub("Your Google Cloud client");
+        new Setting(containerEl)
+          .setName("Redirect address")
+          .setDesc(`Add this exact address to your OAuth client's authorized redirect URIs: ${HEALTH_REDIRECT_URI}`)
+          .addButton((b) => b.setButtonText("Copy").onClick(() => {
+            void navigator.clipboard.writeText(HEALTH_REDIRECT_URI).then(() => new Notice("Redirect address copied."));
+          }));
+        new Setting(containerEl)
+          .setName("Client ID")
+          .setDesc("From your Google cloud project → Google auth platform → clients.")
+          .addText((t) => t.setPlaceholder("1234-abc.apps.googleusercontent.com")
+            .setValue(s.healthClientId ?? "")
+            .onChange(async (v) => { s.healthClientId = v.trim(); await this.plugin.saveSettings(); this.plugin.queueHealthClientSave(); }));
+        new Setting(containerEl)
+          .setName("Client secret")
+          .setDesc("Shared with your other devices through a note in your vault, so you paste it once. Your sign-in stays on each device.")
+          .addText((t) => {
+            t.inputEl.type = "password";
+            t.setPlaceholder("Paste your client secret")
+              .setValue(s.healthClientSecret ?? "")
+              .onChange(async (v) => { s.healthClientSecret = v.trim(); await this.plugin.saveSettings(); this.plugin.queueHealthClientSave(); });
+          });
+
+        sub("Connection");
+        const granted = s.healthToken ? grantedHealthScopes(s.healthToken).length : 0;
+        new Setting(containerEl)
+          .setName("Google account")
+          .setDesc(healthConnected
+            ? (granted === HEALTH_SCOPES.length
+              ? "Connected."
+              : `Connected — ${granted} of ${HEALTH_SCOPES.length} data types allowed. Reconnect to allow the rest.`)
+            : "Not connected.")
+          .addButton((b) => {
+            if (healthConnected) {
+              b.setButtonText("Disconnect").onClick(async () => { await this.plugin.disconnectHealth(); rerender(); });
+            } else {
+              // Always clickable: the disabled state was computed once at render, so typing the
+              // ID/secret never enabled it. Missing or malformed values are reported on click.
+              b.setButtonText("Connect").setCta()
+                .onClick(() => {
+                  if (!s.healthClientId || !s.healthClientSecret) {
+                    new Notice("Paste your client ID and client secret first.");
+                    return;
+                  }
+                  void this.plugin.connectHealth().then(() => rerender());
+                });
+            }
+          });
+
+        if (healthConnected) {
+          const last = s.healthLastSync ? new Date(s.healthLastSync).toLocaleString() : "never";
+          const imp = this.plugin.healthImporter();
+          const mine = this.plugin.isHealthImporter();
+          new Setting(containerEl)
+            .setName("Importer device")
+            .setDesc(mine
+              ? "This device imports from Google. Your other devices read the notes it writes."
+              : `${imp?.name ?? "Another device"} imports from Google (last: ${imp?.last ? new Date(imp.last).toLocaleString() : "not yet"}). This device reads its notes, and takes over by itself after a day without imports.`)
+            .addButton((b) => {
+              if (mine) { b.setButtonText("This device").setDisabled(true); return; }
+              b.setButtonText("Use this device").onClick(async () => { await this.plugin.claimHealthImporter(); rerender(); });
+            });
+          new Setting(containerEl)
+            .setName("Import now")
+            .setDesc(`Imports the last days into fitness and nutrition. Also runs when Obsidian opens. Last import: ${last}.`)
+            .addButton((b) => b.setButtonText("Import now").setCta().onClick(() => {
+              void this.plugin.syncGoogleHealth(false).then(() => rerender());
+            }));
+        }
       }
     }
 

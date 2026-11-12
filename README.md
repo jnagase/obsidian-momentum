@@ -11,7 +11,7 @@ plain Markdown under a single folder, so your data stays yours.
 - Frontmatter parsing handled by Obsidian's metadata cache.
 - Cross-device sync handled by Obsidian Sync / iCloud / git.
 - Renders with Obsidian's DOM API and theme variables (no remote code, no CDN).
-- Works offline. Network use is opt-in and limited to two features
+- Works offline. Network use is opt-in and limited to the features you turn on
   (see [Network use & privacy](#network-use--privacy)).
 
 ## Modules
@@ -20,7 +20,7 @@ plain Markdown under a single folder, so your data stays yours.
 | 🎯 Cockpit Life | The landing page: today's whole picture in one screen — quick task capture, habits with streaks, study progress, evolution charts and one-tap actions |
 | 🚀 Habit Tracker | Monthly bullet-journal trackers: a clickable dot per day, weekly consistency bars and a rolling completion-rate line, per habit |
 | ✅ Tasks | Kanban (drag & drop, folder-backed boards, priorities, columns) + Eisenhower matrix, search, optional Google Tasks sync |
-| 🏋️ Fitness | Workout splits, active workout w/ timer, strength & cardio exercises, calendar, progress charts, monthly summaries |
+| 🏋️ Fitness | Workout splits, active workout w/ timer, strength & cardio exercises, calendar, progress & sleep charts, monthly summaries, optional Google Health import (Fitbit, Pixel Watch) |
 | 🥗 Nutrition | Fixed meal plans, food logging, calorie calendar & trends, water tracking, Open Food Facts search |
 | 📚 Studies | Kanban by topic (drag & drop, subtopics, URLs) + list view |
 | 💰 Finances | Income/expense ledger, monthly summaries, category breakdown, recurring templates (monthly & weekly), net worth trend, savings buckets |
@@ -130,6 +130,52 @@ consent flow — no "unverified app" warning and no account limit:
    asks for Google Tasks access only — and click **Continue**.
 3. You're returned to Obsidian and the plugin confirms it's connected.
 
+## Google Health (beta) — Fitbit, Pixel Watch & phone
+
+Import your watch and phone data into Fitness and Nutrition. **Read-only**: nothing is ever written
+to Google. Off by default — enable it under **Settings → Google health**.
+
+| From Google | Lands in |
+| --- | --- |
+| Workouts (walks, runs, strength, pilates, football…) | the **Fitness calendar**, as read-only workout cards |
+| Nutrition logs | **Nutrition** meal logs, one per day and meal ("Lunch (Google)") |
+| Weight · hydration | your weight and water logs — only empty days; what you type always wins |
+| Steps, distance, calories, active minutes, resting heart rate, sleep | a monthly note, `Fitness/Health/Health YYYY-MM <Month>.md`, and the **Sleep** chart |
+
+- Daily totals come from Google's daily rollup, which already merges your watch and phone, so
+  nothing is counted twice. Re-importing never duplicates (every item has a stable id), and your
+  own manual logs are never touched.
+- It imports when Obsidian opens (last 7 days), right after you connect (last 30 days) and with
+  **Import now**.
+- With several devices, only one — the **importer device** — imports; the others read the notes it
+  writes. Another device takes over automatically after a day without imports, or when you choose it.
+
+### Setting it up (about 10 minutes, once)
+
+Every Google Health permission is "restricted", so instead of a shared app you use **your own**
+Google Cloud OAuth client. You are its only user: no review, no cost, no account limit.
+
+1. In the [Google Cloud console](https://console.cloud.google.com), create a new project.
+2. **APIs & Services → Library** → enable **Google Health API**.
+3. **Google Auth Platform → Get started**: app name, your email, audience **External**.
+4. **Branding**: home page `https://momentumlife.jnagase.com`, privacy policy
+   `https://momentumlife.jnagase.com/privacy`, authorized domain `jnagase.com`. Don't upload a logo
+   (a logo forces a review).
+5. **Data access → Add or remove scopes**: search `googlehealth` and tick every scope ending in
+   `.readonly`.
+6. **Audience → Publish app → Confirm**. It shows "In production" with a yellow "requires
+   verification" banner — ignore the banner (don't submit for review). In production your sign-in
+   doesn't expire every 7 days.
+7. **Clients → Create client** → type **Web application** → authorized redirect URI
+   `https://momentumlife-health.jnagase.com/callback` → **Create**. Copy the **Client ID** and the
+   **Client secret** (Google shows the secret only once).
+8. In Obsidian: **Settings → Google health** → enable → paste the Client ID and secret → **Connect**.
+   On the "Google hasn't verified this app" screen, choose **Advanced → Go to … (unsafe)** — it's
+   your own app — and allow the data types.
+
+The Client ID and secret are saved in `Config/google-health.md`, so your other devices only need
+**Connect**. Your sign-in (token) stays on each device and never syncs.
+
 ## Momentum Pro
 
 Momentum is **free**, and the whole life dashboard (habits, tasks, fitness, nutrition, studies,
@@ -176,6 +222,12 @@ cases, and only when you actively use them:
   to Google's Drive API and to a **separate** OAuth broker (its own Cloudflare Worker,
   isolated from Tasks). Only the files in the folder/scope you chose are synced, plus your
   Drive auth tokens. Disabled by default.
+- **Google Health import (beta, opt-in)** — when you connect it with **your own** Google Cloud
+  client, the plugin reads (never writes) your data from Google's Health API
+  (`health.googleapis.com`) and exchanges tokens directly with Google (`oauth2.googleapis.com`). A
+  stateless relay (`momentumlife-health.jnagase.com`) only bounces the one-time sign-in code back to
+  Obsidian; it never sees your client secret, tokens or health data
+  ([privacy](https://momentumlife-health.jnagase.com/privacy)). Disabled by default.
 - **Momentum Pro license check (only if you buy Pro)** — to unlock paid features, the plugin
   sends **only your license key** to the store's public verify API (Gumroad/Lemon Squeezy),
   which answers whether the key is a valid purchase. No other data is sent, there is no server

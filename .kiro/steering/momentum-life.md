@@ -418,6 +418,35 @@ aposentam no modo ON; órfãs vão pra `Tasks/_orphaned.md` (type `task-orphaned
 - **O MCP NÃO faz sync com Google Tasks** — isso é exclusivo do plugin. O MCP só lê/escreve
   os arquivos do vault.
 
+## Google Health (beta) — `src/healthAuth.ts`, `googlehealth.ts`, `healthTransforms.ts`, `healthSync.ts`, `healthImporter.ts`
+Spec: `.kiro/specs/google-health-byo/`. Lê (nunca escreve) Fitbit/Pixel/celular via Google Health API v4.
+- **BYO client:** todo scope é **restrito** → cada usuário cria o PRÓPRIO projeto/client Web no Google
+  Cloud (sem auditoria, sem teto). O plugin monta o consent e troca/renova token **direto** em
+  `oauth2.googleapis.com` com o client do usuário (+ PKCE). O relay `worker-health/` (`momentum-google-health`,
+  `momentumlife-health.jnagase.com`, host em `health-domain.json`) só faz `/callback` →
+  `obsidian://momentum-health`: **sem segredo, sem chamada ao Google, sem storage** (testado). Deploy:
+  `cd worker-health && wrangler deploy` (wrangler fixado num scratch; `wrangler login` abre o navegador).
+- **Projeto do usuário precisa ir para "In production"** (aviso amarelo de verificação é ignorado; NÃO
+  submeter). Branding exige home + privacy num domínio autorizado; **sem logo** (logo força revisão).
+  Em Testing sem test user → `403 access_denied`.
+- **Formas reais da API (aprendido na prática):** a `list` **não** traz `civilStartTime`/`civilEndTime`
+  nem `name` em exercício e sono → sempre ter fallback `startTime/endTime + *UtcOffset` (`localYmd`) e id
+  derivado do início+tipo. Sono pode vir sem `summary` → somar fases não-AWAKE, senão a duração. Ao
+  mapear 0 de N pontos, logar só os **nomes das chaves** (nunca valores). Totais diários via
+  **`dailyRollUp`** (reconcilia Fitbit + celular — não somar os pontos crus, que duplicam), blocos de 14
+  dias, campo `*Sum` genérico.
+- **Onde grava:** treinos → `fitness-month` (`source: "google-health"`, `external_id`, card read-only no
+  dia); refeições → `nutrition-month` (uma por dia+tipo); peso/água → `weight.md`/`water.md` com mapa
+  `google` (só preenche dia vazio ou que o próprio Google escreveu — **manual sempre ganha**); métricas
+  diárias → `Fitness/Health/Health YYYY-MM <Mês>.md` (`type: health-month`). `upsertByExternalId`:
+  manual nunca é tocado; importado que sumiu do Google sai só dentro da janela relida (7 dias; 30 no 1º).
+- **Multi-device:** Client ID/secret numa nota do vault `Config/google-health.md` (sincroniza; decisão do
+  autor, secret em texto puro aceito); **token nunca** sai do `data.json`. **Aparelho importador** (só pro
+  Health): um único escritor, registrado na mesma nota; outro aparelho pula no startup, pergunta no
+  "Import now" e assume após 24 h sem import. NÃO estender esse "dono" pro Google Tasks.
+- Log em `Config/google-health-debug.md` (no `DRIVE_DATA_EXCLUDE`). Hosts `health.googleapis.com`
+  (allowed) e `accounts.google.com` (só aberto no navegador) declarados no teste de superfície de rede e no README.
+
 ## O que NÃO fazer
 - Não reintroduzir recurrency de tasks.
 - Não criar uma única lista "Momentum Life" no Google (erro antigo de sub-agente) — é uma

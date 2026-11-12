@@ -117,7 +117,7 @@ export function mapWorkout(fm: Frontmatter, basename: string, path: string): Wor
   const kind: WorkoutKind = storedKind === "strength" || storedKind === "cardio" || storedKind === "mixed" || storedKind === "empty"
     ? storedKind
     : deriveWorkoutKind(exercises);
-  return {
+  const w: Workout = {
     id: str(fm.id) || basename,
     date: str(fm.date).substring(0, 10),
     split: str(fm.split) || "A",
@@ -126,6 +126,12 @@ export function mapWorkout(fm: Frontmatter, basename: string, path: string): Wor
     path,
     kind,
   };
+  // Imported (Google health) extras — only set when present, so manual workouts stay identical.
+  if (str(fm.source)) w.source = str(fm.source);
+  if (num(fm.calories)) w.calories = num(fm.calories);
+  if (num(fm.avg_hr)) w.avgHr = num(fm.avg_hr);
+  if (num(fm.steps)) w.steps = num(fm.steps);
+  return w;
 }
 
 // ============================================================

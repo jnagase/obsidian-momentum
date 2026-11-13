@@ -1,7 +1,14 @@
 name: Release Obsidian plugin
 
+# Two ways in:
+#  - merge to main → if manifest.json's version has no release yet, tag it and release it
+#    (the tag is created here; a GITHUB_TOKEN tag push never re-triggers this workflow);
+#  - push a tag by hand (fallback) → release that tag.
+# Either way, an existing release is never recreated.
 on:
   push:
+    branches:
+      - main
     tags:
       - "*"
 
@@ -16,19 +23,46 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Decide release tag
+        id: tag
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version=$(node -p "require('./manifest.json').version")
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            tag="${{ github.ref_name }}"
+          else
+            tag="$version"
+          fi
+          if [ "$tag" != "$version" ]; then
+            echo "Tag $tag does not match manifest version $version." >&2
+            exit 1
+          fi
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists — nothing to do."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
       - name: Use Node.js
+        if: steps.tag.outputs.skip == 'false'
         uses: actions/setup-node@v4
         with:
           node-version: "20.x"
           cache: "npm"
 
       - name: Install dependencies
+        if: steps.tag.outputs.skip == 'false'
         run: npm ci
 
       - name: Build
+        if: steps.tag.outputs.skip == 'false'
         run: npm run build
 
       - name: Generate artifact attestations
+        if: steps.tag.outputs.skip == 'false'
         uses: actions/attest-build-provenance@v2
         with:
           subject-path: |
@@ -37,11 +71,14 @@ jobs:
             styles.css
 
       - name: Create release
+        if: steps.tag.outputs.skip == 'false'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          tag: ${{ github.ref_name }}
+          tag: ${{ steps.tag.outputs.tag }}
         run: |
+          # --target creates the tag on this commit when it doesn't exist yet (merge path).
           gh release create "$tag" \
+            --target "$GITHUB_SHA" \
             --title="$tag" \
             --notes="Release $tag" \
             main.js manifest.json styles.css

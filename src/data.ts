@@ -13,6 +13,7 @@ import { mapTransaction, mapMealLog, mapWorkout, computePace, deriveWorkoutKind,
   sortTaskEntries, upsertTaskEntry, patchTaskEntry, removeTaskEntry, boardNoteGoogleIds } from "./loaders";
 import { JournalEntry, CHECKIN_QUESTIONS, checkinTags } from "./journal";
 import { HealthDay, upsertByExternalId } from "./healthTransforms";
+import { mergeLedgerTexts, parseLedgerDoc, conflictOriginalPath } from "./ledgerMerge";
 
 /** Root folder inside the vault that holds all Personal Assistant data. */
 export let DATA_ROOT = "Momentum Life";
@@ -1636,6 +1637,67 @@ export class PADataStore {
     n += await this.consolidateLedger(this.nutritionLedgerCfg());
     n += await this.consolidateLedger(this.fitnessLedgerCfg());
     return n;
+  }
+
+  /**
+   * Drive-sync conflict on a month ledger note: merge the two versions BY ITEM (entry id / day)
+   * instead of keeping a hidden `.conflict` copy. Returns the merged document (same serialisation
+   * as writeMonthNote, so it is byte-stable), or null when the texts aren't both ledger notes of
+   * the same type+month — the engine then keeps its normal conflict behaviour.
+   */
+  async mergeLedgerConflict(baseText: string | undefined, localText: string, remoteText: string, vaultPath: string): Promise<string | null> {
+    const m = mergeLedgerTexts(baseText, localText, remoteText);
+    if (!m) return null;
+    if (m.kind === "days") {
+      const meta: FM = { type: m.type, month: m.month, source: typeof m.extra.source === "string" ? m.extra.source : "google-health", days: m.days };
+      return this.buildDoc(meta, renderHealthBody(m.month, m.days as Record<string, HealthDay>));
+    }
+    if (!m.entries.length) return null;
+    const cfgs: MonthLedgerConfig<LedgerItem>[] = [
+      this.financeLedgerCfg(),
+      this.nutritionLedgerCfg(),
+      this.fitnessLedgerCfg(),
+    ];
+    const cfg = cfgs.find((c) => c.noteType === m.type);
+    if (!cfg) return null;
+    const sorted = sortEntriesByDateId(m.entries);
+    const items = sorted.map((e) => cfg.fromEntry(e, vaultPath));
+    const body = await cfg.renderBody(items, m.month);
+    return this.buildDoc({ type: cfg.noteType, month: m.month, entries: sorted }, body);
+  }
+
+  /**
+   * Fold `.conflict` copies of month ledger notes (left by older Drive syncs) back into the real
+   * note, merging by item, then trash the copy (reversible). The UI ignores `.conflict` files, so
+   * without this their items stay invisible. A copy that isn't a ledger note is left untouched.
+   * Returns how many copies were healed.
+   */
+  async healLedgerConflicts(): Promise<number> {
+    const prefixes = ["Finance/Months", "Nutrition/Months", "Fitness/Months", "Fitness/Health"].map((p) => `${this.full(p)}/`);
+    const copies = this.app.vault.getMarkdownFiles()
+      .filter((f) => isSyncConflictFile(f.name) && prefixes.some((p) => f.path.startsWith(p)))
+      .sort((a, b) => a.path.localeCompare(b.path));
+    let healed = 0;
+    for (const copy of copies) {
+      try {
+        const origPath = conflictOriginalPath(copy.path);
+        if (!origPath) continue;
+        const copyText = await this.app.vault.read(copy);
+        const orig = this.app.vault.getAbstractFileByPath(origPath);
+        if (orig instanceof TFile) {
+          const origText = await this.app.vault.read(orig);
+          const merged = await this.mergeLedgerConflict(undefined, origText, copyText, origPath);
+          if (merged === null) continue; // not a ledger pair → leave the copy for the user
+          if (merged !== origText) await this.app.vault.modify(orig, merged);
+        } else {
+          if (!parseLedgerDoc(copyText)) continue;
+          await this.app.vault.create(origPath, copyText); // the real note is missing → the copy becomes it
+        }
+        await this.removeFile(copy);
+        healed++;
+      } catch { /* leave this copy; retried next run */ }
+    }
+    return healed;
   }
 
   /**

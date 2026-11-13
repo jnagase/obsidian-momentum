@@ -743,3 +743,35 @@ describe("incremental sync applies simple remote changes without a full walk", (
     expect(v.map.has("a.md")).toBe(false);
   });
 });
+
+describe("month ledger conflicts merge by entry id (no hidden .conflict copy)", () => {
+  const ledger = (ids: string[]) =>
+    `---\ntype: "fitness-month"\nmonth: "2026-11"\nentries: ${JSON.stringify(ids.map((id) => ({ id, date: "2026-11-01" })))}\n---\n\nbody\n`;
+  const mergeConflict = async (_p: string, base: string | undefined, local: string, remote: string) => {
+    const { mergeLedgerTexts } = await import("../src/ledgerMerge");
+    const m = mergeLedgerTexts(base, local, remote);
+    return m ? ledger(m.entries.map((e) => String(e.id)).sort()) : null;
+  };
+
+  it("first contact: merges both sides instead of keeping a conflict copy", async () => {
+    D.seed("Fitness 2026-11 November.md", ledger(["a", "pilates"]));
+    const v = makeVault({ "Fitness 2026-11 November.md": ledger(["a", "local"]) });
+    const b = makeBaselines();
+    const r = await run(v.fs, b.store, { mergeConflict });
+    expect(r.conflicted).toBe(0);
+    expect(r.merged).toBe(1);
+    expect(v.map.has("Fitness 2026-11 November.conflict.md")).toBe(false);
+    expect(v.map.get("Fitness 2026-11 November.md")).toBe(ledger(["a", "local", "pilates"]));
+    expect(D.byName("Fitness 2026-11 November.md")?.content).toBe(ledger(["a", "local", "pilates"]));
+    expect(r.issues.some((i) => i.category === "conflict")).toBe(false);
+  });
+
+  it("non-ledger notes still keep both copies", async () => {
+    D.seed("n.md", "REMOTE");
+    const v = makeVault({ "n.md": "LOCAL" });
+    const b = makeBaselines();
+    const r = await run(v.fs, b.store, { mergeConflict });
+    expect(r.conflicted).toBe(1);
+    expect(v.map.get("n.conflict.md")).toBe("REMOTE");
+  });
+});

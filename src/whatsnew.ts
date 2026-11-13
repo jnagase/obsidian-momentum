@@ -6,6 +6,18 @@ export interface ChangeEntry { version: string; sections: ChangeSection[]; }
 /** Release notes shown in the "What's new" dialog, newest first. */
 export const CHANGELOG: ChangeEntry[] = [
   {
+    version: "0.9.5",
+    sections: [
+      {
+        title: "Fixed — Google Drive sync",
+        items: [
+          "When two devices log in the same month, the monthly Fitness, Nutrition, Finance and health notes are now merged item by item. No more hidden “.conflict” copies, so workouts no longer disappear from the calendar.",
+          "Old “.conflict” copies of monthly notes are folded back into the real note automatically (the copy goes to the trash).",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.9.4",
     sections: [
       {

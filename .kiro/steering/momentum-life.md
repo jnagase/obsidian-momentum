@@ -38,14 +38,19 @@ nossas conversas. Vale para toda interação neste repositório.
 
 ## Release / promover pra prod (só quando o usuário mandar)
 - Repo: `github.com/jnagase/obsidian-momentum`, branch `main`. `main.js` é **gitignored**
-  (a CI builda). Releases saem via `.github/workflows/release.yml`, disparado por **push de
-  tag** (qualquer tag) → builda e cria o GitHub Release com `main.js`/`manifest.json`/`styles.css`.
+  (a CI builda). Releases saem via `.github/workflows/release.yml`, disparado por **merge no
+  `main`** (e, como plano B, por push de tag) → builda e cria o GitHub Release com
+  `main.js`/`manifest.json`/`styles.css`.
 - Passos: bump de versão em **`manifest.json` + `package.json` + `versions.json`** (mesma
   SemVer; tag SEM `v`, ex.: `0.5.0`) → commit → **branch `release/X.Y.Z` + PR** (`gh pr create`)
-  → o usuário dá **merge normal** no site → `git fetch` + fast-forward do `main` local →
-  `git tag X.Y.Z <commit do merge>` → `git push origin X.Y.Z` → confirmar que a release ficou
-  **Latest**. **Sempre criar e enviar a tag** logo depois do merge: é ela que dispara a Action;
-  sem tag a release continua na versão antiga.
+  → o usuário dá **merge normal** no site → **a Action cria a tag sozinha** (versão do
+  `manifest.json`, se ainda não houver release dela) e publica → `git fetch` + fast-forward do
+  `main` local → confirmar que a release ficou **Latest** + attestations + notas. Merge sem bump
+  de versão não gera release (a release já existe → skip). Tag criada pelo `GITHUB_TOKEN` não
+  dispara outra Action, por isso tag + release ficam no MESMO workflow. Push manual de tag ainda
+  funciona (tem que casar com o manifest; release existente nunca é recriada).
+- Notas da release: escreva o arquivo de notas **antes** de rodar `gh release edit`, nunca em
+  paralelo.
 - **O agente NÃO pode dar push no `main`** (trava fixa do Kiro Crew,
   `git-publish-push-protected-branch-name`). Por isso o fluxo é por PR. Push de branch e de tag
   funcionam.
@@ -477,7 +482,8 @@ Spec: `.kiro/specs/google-health-byo/`. Lê (nunca escreve) Fitbit/Pixel/celular
   **precisa estar em sincronia** com o `package.json`. Lock dessincronizado (versão antiga
   ou dependência removida ainda listada) já quebrou a verificação de attestation. Após bumpar
   o `package.json`, rode `npm install --package-lock-only` pra alinhar o lock.
-- **Fluxo de release:** `git tag X && git push origin X` dispara a GitHub Action, que buildar
+- **Fluxo de release:** o merge no `main` (com versão nova no manifest) dispara a GitHub Action,
+  que cria a tag, builda
   e anexa `main.js` + `manifest.json` + `styles.css` à release, com **attestations** de
   proveniência. Publicação é via **community.obsidian.md** (o autor gerencia lá) — **não** é
   mais PR pro `obsidian-releases`.

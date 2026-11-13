@@ -381,6 +381,12 @@ aposentam no modo ON; órfãs vão pra `Tasks/_orphaned.md` (type `task-orphaned
   TODO evento enquanto `driveSyncing` era true → o que o usuário apagava durante um sync automático
   (que podia durar 9 min) não era anotado em `driveLocalDeletes` e o sync **baixava o arquivo de
   volta**. Mudança feita durante um sync marca `driveRerunPending` → roda outro sync no fim.
+- **Notas mensais nunca geram `.conflict`.** Conflito em `finance/nutrition/fitness-month`
+  (por `id`) ou `health-month` (por dia) é juntado item a item (`src/ledgerMerge.ts` →
+  `store.mergeLedgerConflict`, via arg `mergeConflict` do `runDriveSync`). Com baseline: 3-way
+  (edit vence delete; editado nos dois → local). Sem baseline: união. Cópias `.conflict` antigas
+  nas pastas mensais são incorporadas à nota real por `healLedgerConflicts` (no startup e após cada
+  Drive sync) e vão pra lixeira. Motivo: a UI ignora `.conflict` → treinos sumiam no celular.
 - **Delete no meio do sync (engine):** antes de um `pull` recriar arquivo ausente, reconfere
   `getLocalDeletes()`; se o usuário apagou e o remoto não mudou (md5 = baseline) → vira
   `delete_remote` (edit continua ganhando de delete). A limpeza do commit **não** apaga evidência

@@ -435,6 +435,9 @@ export async function runDriveSync(args: {
    *  scope-agnostic, so without this an out-of-scope-but-on-Drive file is pulled every cycle.
    *  When provided, out-of-scope remote entries are ignored on both sides. */
   inScope?: (relPath: string) => boolean;
+  /** Content-aware merge for a two-sided text conflict (e.g. month ledger notes merged by entry
+   *  id). Returns the merged text, or null to fall back to the conflict strategy (keep-both). */
+  mergeConflict?: (path: string, base: string | undefined, local: string, remote: string) => Promise<string | null>;
 }): Promise<DriveSyncResult> {
   const { token, driveFolderId, fs, baselines, confirmed } = args;
   const strategy = args.conflictStrategy ?? DEFAULT_CONFLICT_STRATEGY;
@@ -979,6 +982,7 @@ export async function runDriveSync(args: {
       }
     }
     let okThis = true;
+    let autoMerged = false;
     try {
       if (p.binary) {
         switch (p.action) {
@@ -993,8 +997,8 @@ export async function runDriveSync(args: {
         switch (p.action) {
           case "pull": await this_pull(token, p.path, p.remote!, fs, baselines, result); break;
           case "push": await this_push(token, p.path, rootId, folderCache, fs, baselines, result, args.deviceId); break;
-          case "merge": await this_merge(token, p.path, p.remote!, fs, baselines, result, strategy, args.resolveConflict); break;
-          case "conflict": await this_conflict(token, p.path, p.remote!, fs, baselines, result, strategy, args.resolveConflict, p.remoteText); break;
+          case "merge": autoMerged = await this_merge(token, p.path, p.remote!, fs, baselines, result, strategy, args.resolveConflict, args.mergeConflict); break;
+          case "conflict": autoMerged = await this_conflict(token, p.path, p.remote!, fs, baselines, result, strategy, args.resolveConflict, p.remoteText, undefined, args.mergeConflict); break;
           case "delete_local": await this_deleteLocal(p.path, fs, baselines, result); break;
           case "delete_remote": await this_deleteRemote(token, p.path, p.remote, baselines, result); break;
           default: break;
@@ -1014,7 +1018,7 @@ export async function runDriveSync(args: {
     }
     // Record the successful per-file outcomes the user asked to see by name.
     if (okThis) {
-      if (p.action === "conflict") {
+      if (p.action === "conflict" && !autoMerged) {
         result.issues.push({ path: p.path, reason: "changed on both sides — kept both copies", category: "conflict" });
       } else if (p.action === "delete_local") {
         result.issues.push({ path: p.path, reason: "deleted locally (gone on Drive)", category: "deleted" });
@@ -1271,7 +1275,8 @@ async function this_push(
 async function this_merge(
   token: string, path: string, remote: DriveFile, fs: VaultFS, baselines: DriveBaselineStore, result: DriveSyncResult,
   strategy: DriveConflictStrategy, resolveCb?: (name: string) => Promise<ConflictChoice>,
-): Promise<void> {
+  mergeCb?: (path: string, base: string | undefined, local: string, remote: string) => Promise<string | null>,
+): Promise<boolean> {
   const base = baselines.get(path);
   const local = await fs.read(path);
   const remoteText = new TextDecoder().decode(await downloadFile(token, remote.id));
@@ -1281,9 +1286,10 @@ async function this_merge(
     const meta = await updateTextFile(token, remote.id, merged);
     baselines.set(path, { fileId: meta.id, md5: meta.md5Checksum ?? "", modifiedTime: meta.modifiedTime ?? "", base: merged });
     result.merged++;
+    return true;
   } else {
     // Merge not provable safe → resolve per the configured strategy.
-    await this_conflict(token, path, remote, fs, baselines, result, strategy, resolveCb, remoteText, local);
+    return await this_conflict(token, path, remote, fs, baselines, result, strategy, resolveCb, remoteText, local, mergeCb);
   }
 }
 
@@ -1313,8 +1319,31 @@ async function this_conflict(
   fs: VaultFS, baselines: DriveBaselineStore, result: DriveSyncResult,
   strategy: DriveConflictStrategy, resolveCb?: (name: string) => Promise<ConflictChoice>,
   remoteTextIn?: string, localIn?: string,
-): Promise<void> {
+  mergeCb?: (path: string, base: string | undefined, local: string, remote: string) => Promise<string | null>,
+): Promise<boolean> {
   const remoteText = remoteTextIn ?? new TextDecoder().decode(await downloadFile(token, remote.id));
+
+  // Content-aware merge first (month ledger notes → merged by entry id). Returns true = handled
+  // with NO conflict copy: both sides now hold the merged text and it's the new baseline.
+  if (mergeCb) {
+    const local = localIn ?? (await fs.read(path));
+    let merged: string | null = null;
+    try { merged = await mergeCb(path, baselines.get(path)?.base, local, remoteText); }
+    catch (e) { result.notes.push(`Field merge of ${path} failed (${e instanceof Error ? e.message : String(e)}) — using the conflict strategy.`); }
+    if (merged !== null) {
+      if (merged !== local) await fs.write(path, merged);
+      let meta: DriveFile = remote;
+      if (merged !== remoteText) meta = await updateTextFile(token, remote.id, merged);
+      baselines.set(path, {
+        fileId: meta.id, md5: meta.md5Checksum ?? "", modifiedTime: meta.modifiedTime ?? "",
+        base: isMergeable(path, merged.length) ? merged : undefined,
+      });
+      result.merged++;
+      result.notes.push(`Merged ${path} item by item (both devices' entries kept, no conflict copy).`);
+      return true;
+    }
+  }
+
   const choice = await resolveChoice(strategy, path, remote, fs, resolveCb);
 
   if (choice === "local") {
@@ -1328,7 +1357,7 @@ async function this_conflict(
     });
     result.pushed++;
     result.notes.push(`Conflict on ${path}: local kept (${strategy}); remote overwritten.`);
-    return;
+    return false;
   }
 
   if (choice === "remote") {
@@ -1340,7 +1369,7 @@ async function this_conflict(
     });
     result.pulled++;
     result.notes.push(`Conflict on ${path}: remote kept (${strategy}); local overwritten.`);
-    return;
+    return false;
   }
 
   // "both" (keep-both, the default): keep local at its path; save the remote alongside as a
@@ -1378,6 +1407,7 @@ async function this_conflict(
     modifiedTime: remote.modifiedTime ?? "",
     base: isMergeable(path, local.length) ? local : undefined,
   });
+  return false;
 }
 
 // ---- binary per-action helpers (real bytes; no 3-way merge) ---------------------------

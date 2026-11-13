@@ -501,6 +501,10 @@ export default class MomentumPlugin extends Plugin implements PAHost {
           } catch { /* leave the guard unset so the consolidate command can retry */ }
         })();
       }
+
+      // Heal month-ledger `.conflict` copies left by older Drive syncs (every launch; cheap no-op
+      // when there are none).
+      void this.healLedgerConflicts();
     });
 
     // Every 5 minutes: register hand-made board folders, file loose root notes into
@@ -1355,7 +1359,19 @@ export default class MomentumPlugin extends Plugin implements PAHost {
           const base = raw === "" ? "" : normalizePath(raw);
           return this.driveInScope(base ? normalizePath(`${base}/${rel}`) : rel);
         },
+        // Month ledger notes (workouts/meals/transactions/health) are merged item by item, so two
+        // devices logging in the same month never leave a hidden `.conflict` copy behind.
+        mergeConflict: (rel, baseText, local, remote) => {
+          const raw = this.settings.driveMirrorDir ?? "";
+          const base = raw === "" ? "" : normalizePath(raw);
+          const full = base ? normalizePath(`${base}/${rel}`) : rel;
+          if (!full.endsWith(".md")) return Promise.resolve(null);
+          return this.store.mergeLedgerConflict(baseText, local, remote, full);
+        },
       });
+      // Fold any `.conflict` copy of a month ledger note back into the real note (older syncs
+      // left these; the UI ignores them, so their entries would stay hidden).
+      void this.healLedgerConflicts();
       this.settings.driveLastSync = {
         time: new Date().toISOString(),
         scope: (this.settings.driveMirrorDir ?? "") === "" ? "whole vault" : this.settings.driveMirrorDir!,
@@ -1413,6 +1429,17 @@ export default class MomentumPlugin extends Plugin implements PAHost {
 
   /** Request a graceful stop of the running Drive sync (checked between files by the engine). */
   cancelDriveSync(): void { if (this.driveSyncActive) this.driveStopRequested = true; }
+
+  /** Merge `.conflict` copies of month ledger notes back into the real note (see store). */
+  private async healLedgerConflicts(): Promise<void> {
+    try {
+      const n = await this.store.healLedgerConflicts();
+      if (n > 0) {
+        new Notice(`Momentum: merged ${n} sync conflict ${n === 1 ? "copy" : "copies"} back into your monthly notes.`);
+        this.rerenderViews();
+      }
+    } catch { /* best-effort; retried next launch / sync */ }
+  }
 
   /** Append a human-readable Drive sync entry to Config/google-drive-debug.md (diagnostics). */
   private async writeDriveDebugLog(result: DriveSyncResult | null, fatal?: string): Promise<void> {
